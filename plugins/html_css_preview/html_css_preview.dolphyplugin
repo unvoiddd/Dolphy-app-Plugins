@@ -1,0 +1,146 @@
+__id__ = "html_css_previewer"
+__name__ = "HTML & CSS Preview"
+__version__ = "1.1.0"
+__author__ = "ROCKET"
+__icon__ = "rounded:code"
+__description__ = "Предпросмотр HTML и CSS кода или файлов в реальном времени с прокруткой"
+__permissions__ = ["files"]
+
+class HtmlCssPreviewPlugin(BasePlugin):
+    def on_plugin_load(self):
+        self.mode = "html"
+        self.html_code = "<h1>Привет, Dolphy!</h1>\n<p>Здесь можно тестировать длинный HTML и CSS код.</p>" + "".join([f"<p>Строка текста номер {i}</p>" for i in range(1, 20)])
+        self.css_code = "body { font-family: sans-serif; padding: 16px; background: #121212; color: #ffffff; }\nh1 { color: #ff8a00; }\np { margin: 8px 0; }"
+        self.file_path = ""
+        self.rendered_html = self.build_document()
+        self.add_module(
+            title="HTML / CSS Preview",
+            description="Проверка и рендер HTML/CSS кода и файлов",
+            icon="rounded:code",
+            screen="main",
+            section="PLUGINS"
+        )
+
+    def build_document(self):
+        return f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><style>{self.css_code}</style></head><body>{self.html_code}</body></html>"
+
+    def on_mode_change(self, index):
+        modes = ["html", "css", "file"]
+        if 0 <= index < len(modes):
+            self.mode = modes[index]
+            self.refresh()
+
+    def on_html_change(self, text):
+        self.html_code = text
+
+    def on_css_change(self, text):
+        self.css_code = text
+
+    def on_path_change(self, text):
+        self.file_path = text
+
+    def run_preview(self):
+        self.rendered_html = self.build_document()
+        self.refresh()
+
+    def clear_code(self):
+        if self.mode == "html":
+            self.html_code = ""
+        elif self.mode == "css":
+            self.css_code = ""
+        else:
+            self.file_path = ""
+        self.rendered_html = self.build_document()
+        self.refresh()
+
+    def load_from_file(self):
+        path = self.file_path.strip()
+        if not path:
+            self.toast("Укажите путь к файлу")
+            return
+        try:
+            content = None
+            android = self.api.getAndroid()
+            if android.filesExists(path):
+                content = android.filesRead(path)
+            if content is None:
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            if path.lower().endswith(".css"):
+                self.css_code = str(content)
+                self.toast("CSS файл загружен")
+            else:
+                if "<html" in str(content).lower() or "<!doctype" in str(content).lower():
+                    self.rendered_html = str(content)
+                    self.toast("HTML файл загружен")
+                    self.refresh()
+                    return
+                self.html_code = str(content)
+                self.toast("HTML файл загружен")
+            self.rendered_html = self.build_document()
+            self.refresh()
+        except Exception as e:
+            self.toast(f"Ошибка чтения: {e}")
+
+    def screen_main(self, ui, api, state):
+        tab_index = {"html": 0, "css": 1, "file": 2}.get(self.mode, 0)
+        editor_items = []
+
+        if self.mode == "html":
+            editor_items = [
+                ui.text_field(
+                    value=self.html_code,
+                    on_change=self.on_html_change,
+                    label="HTML код",
+                    single_line=False,
+                    fill_max_width=True
+                ),
+                ui.row([
+                    ui.button("Обновить", self.run_preview, style="filled"),
+                    ui.button("Очистить", self.clear_code, style="outlined")
+                ], spacing=8)
+            ]
+        elif self.mode == "css":
+            editor_items = [
+                ui.text_field(
+                    value=self.css_code,
+                    on_change=self.on_css_change,
+                    label="CSS стили",
+                    single_line=False,
+                    fill_max_width=True
+                ),
+                ui.row([
+                    ui.button("Обновить", self.run_preview, style="filled"),
+                    ui.button("Очистить", self.clear_code, style="outlined")
+                ], spacing=8)
+            ]
+        else:
+            editor_items = [
+                ui.text_field(
+                    value=self.file_path,
+                    on_change=self.on_path_change,
+                    label="Путь к .html или .css файлу (например /sdcard/index.html)",
+                    single_line=True,
+                    fill_max_width=True
+                ),
+                ui.row([
+                    ui.button("Загрузить файл", self.load_from_file, style="filled"),
+                    ui.button("Очистить", self.clear_code, style="outlined")
+                ], spacing=8)
+            ]
+
+        return ui.scaffold(
+            title="HTML / CSS Preview",
+            actions=[
+                ui.top_action("refresh", self.run_preview)
+            ],
+            content=ui.lazy_column([
+                ui.card([
+                    ui.text("Предпросмотр сайта", "titleMedium"),
+                    ui.spacer(height=8),
+                    ui.webview(html=self.rendered_html, fill_max_size=True, height=420)
+                ], padding=12),
+                ui.tabs(["HTML", "CSS", "Файл"], selected=tab_index, on_select=self.on_mode_change),
+                ui.card(editor_items, padding=12)
+            ], padding=16, spacing=12)
+        )
