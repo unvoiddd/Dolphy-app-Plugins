@@ -1,6 +1,6 @@
 {
   "format": "dolphy-plugins-v1",
-  "count": 34,
+  "count": 35,
   "plugins": [
     {
       "id": 16,
@@ -113,6 +113,20 @@
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/cortex/cortex.dolphyplugin",
       "post_url": "https://t.me/c/3966541757/41836",
       "updated_at": "2026-11-02 15:16:26"
+    },
+    {
+      "id": 35,
+      "name": "Dolphy AI Assistant",
+      "version": "1.0.0",
+      "author": "@miohaze",
+      "description": {
+        "ru": "Ии создатель плагинов. (Написано с помощью специального промта канала и мной).",
+        "en": "Ai creator of plugins❤️ (writer - me and chatgpt)"
+      },
+      "file": "plugins/dolphy_ai_assistant/dolphy_ai_assistant.dolphyplugin",
+      "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/dolphy_ai_assistant/dolphy_ai_assistant.dolphyplugin",
+      "post_url": "https://t.me/c/3966541757/46035",
+      "updated_at": "2026-11-14 17:36:37"
     },
     {
       "id": 13,
