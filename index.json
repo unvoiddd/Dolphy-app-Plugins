@@ -1,6 +1,6 @@
 {
   "format": "dolphy-plugins-v1",
-  "count": 33,
+  "count": 34,
   "plugins": [
     {
       "id": 16,
@@ -197,6 +197,20 @@
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/hardware_status/hardware_status.dolphyplugin",
       "post_url": "https://t.me/c/3966541757/27020",
       "updated_at": "2026-09-27 12:38:57"
+    },
+    {
+      "id": 34,
+      "name": "HTML & CSS Preview",
+      "version": "1.1.0",
+      "author": "@Dobrak_w",
+      "description": {
+        "ru": "Интерактивный предпросмотр HTML и CSS кода или файлов в реальном времени. Встроенный WebView с поддержкой прокрутки, переключение вкладок и удобный редактор.",
+        "en": "Real-time interactive preview of HTML and CSS code or files. Built-in WebView with scrolling support, tab switching, and a convenient editor."
+      },
+      "file": "plugins/html_css_preview/html_css_preview.dolphyplugin",
+      "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/html_css_preview/html_css_preview.dolphyplugin",
+      "post_url": "https://t.me/c/3966541757/45994",
+      "updated_at": "2026-11-14 15:12:29"
     },
     {
       "id": 17,
