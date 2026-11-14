@@ -1,0 +1,1254 @@
+__id__ = "gpt_agent"
+__name__ = "GPT Agent"
+__version__ = "2.0.0"
+__author__ = "Claude"
+__description__ = "ChatGPT по вашему API-ключу: стриминг, рассуждение, персоны, агент (shell, root, файлы)"
+__icon__ = "rounded:smart_toy"
+
+import re
+import json
+import time
+import random
+import shlex
+import base64
+import threading
+import urllib.request
+import urllib.error
+
+DEFAULT_BASE = "https://api.openai.com/v1"
+DEFAULT_MODEL = "gpt-4o-mini"
+UA = "OpenAI/Python 1.55.0 DolphyGptAgent/2.0"
+MAX_STEPS = 10
+MAX_TOOL_OUTPUT = 6000
+DENIED = "Пользователь отклонил выполнение."
+
+BASE_PROMPT = (
+    "Ты — полезный ассистент внутри Android-приложения Dolphy. Отвечай на языке пользователя. "
+    "Не выполняй разрушительные команды без явной просьбы пользователя. "
+    "Кратко объясняй, что собираешься сделать."
+)
+TOOLS_NOTE = (
+    " Если доступны инструменты, используй их, когда нужно что-то узнать или сделать на устройстве: "
+    "run_shell — оболочка Android, run_root — команды с root, read_file/write_file — файлы, "
+    "get_battery, get_device_info, wifi_scan, bt_bonded, clipboard_get/set, vibrate, notify, open_url. "
+    "Если просят написать плагин для Dolphy: сначала вызови get_plugin_docs, затем напиши полный код "
+    "и вызови create_plugin — он проверит код и откроет установщик Dolphy."
+)
+
+PLUGIN_DOCS = r"""
+СПРАВОЧНИК ПО ПЛАГИНАМ DOLPHY
+Плагин = один UTF-8 файл .dolphyplugin на Python (Chaquopy, только стандартная библиотека + Android/Java через jclass).
+Нет pip-пакетов. Плагины не в песочнице.
+
+1. МЕТАДАННЫЕ — самые первые строки файла, ДО любых import/class/def, верхний уровень, строки в кавычках:
+__id__ = "my_plugin"          # a-z0-9_- , до 64 символов, стабильный
+__name__ = "My Plugin"
+__version__ = "1.0.0"
+__author__ = "Name"
+__description__ = "Короткое описание"
+__icon__ = "rounded:radar"    # filled|outlined|rounded|sharp|twotone : имя Material-иконки
+# необязательно: __library__ = False, __dependencies__ = ["other_id"], __permissions__ = ["files"]
+
+2. МИНИМАЛЬНЫЙ ПЛАГИН
+class MyPlugin(BasePlugin):          # BasePlugin, ui, api доступны без import
+    def on_plugin_load(self):
+        self.add_module(title="My Plugin", description="О чём", icon="extension",
+                        screen="main", section="PLUGINS", order=0)
+    def screen_main(self, ui, api, state):
+        return ui.scaffold(title="My Plugin", content=ui.column([
+            ui.card([ui.text("Привет", "headlineSmall"), ui.button("Нажми", self.hello)])
+        ], padding=16, spacing=12))
+    def hello(self):
+        self.toast("Работает")
+    def on_plugin_unload(self):
+        pass   # остановить потоки, сканы, сокеты
+
+Жизненный цикл: on_plugin_load, screen_<id>(ui, api, state), on_plugin_unload (также on_plugin_enable/disable).
+Состояние храни в self.*; после изменения вызывай self.refresh() (перерисует экраны, можно из потока).
+Долгие операции (сеть, сканы, команды) — только в threading.Thread(daemon=True), потом self.refresh().
+
+3. BasePlugin
+add_module(title, description="", icon="extension", screen="main", section="PLUGINS", order=0)
+  section: INFRARED, BLUETOOTH, OTHER, PLUGINS или своя строка.
+navigate(screen_id)  navigate_app(route)  refresh()  toast(text)
+get_setting(key, default=None)  set_setting(key, value)   # JSON-совместимые значения, хранятся между запусками
+shell(cmd)  root(cmd)  shizuku(cmd) -> dict {ok, code, out, err, via} (или JSON-строка; проверяй isinstance str -> json.loads)
+hook_screen(route, screen="main", mode="overlay", priority=0)  # mode: overlay|top|bottom|fab|replace; маршруты: other, bluetooth, settings, ir_*, nfc_*, bluetooth/all|ble|advert ...
+hook_surface("bottom_bar", screen, "replace"|"overlay", priority)
+hook_action(action, priority)  -> метод hook_<action_с_подчёркиваниями>(payload) возвращает None | {"payload":..} | {"handled":True,"result":..} | {"cancel":True}
+  действия: infrared.transmit, bluetooth.advertising.transmit, bluetooth.ble.*, bluetooth.advert.preset.* ...
+provide_service("infrared.transmitter", priority)
+register_ble_mode(mode_id, title, description, icon)
+События: on_navigation(route), on_nfc_tag(tag), on_setting_changed({key,value}), on_event(name, payload)
+Нативные настройки: self.api.registerSettings("Title", json.dumps([{"type":"switch","key":"k","title":"T","subtitle":"S","default":True},
+  {"type":"slider","key":"p","title":"T","min":1,"max":100,"default":40,"steps":98},{"type":"nav","title":"T","icon":"tune","screen":"adv"},
+  {"type":"header","title":"H"},{"type":"card","title":"T","subtitle":"S","icon":"info","screen":"x"}]), order)
+
+4. UI (ui.*) — дерево рендерится в Jetpack Compose Material 3. Размеры в dp.
+scaffold(content, title=None, show_back=True, fab=None, actions=None)   top_action(icon, on_click=None)
+column(children=None, padding=0, spacing=8, fill_max_size=False)   row(children=None, padding=0, spacing=8, fill_max_width=True)
+box(children=None, padding=0, fill_max_size=False)   lazy_column(children=None, padding=0, spacing=4, fill_max_size=True)   lazy_row(children=None, padding=0, spacing=8, fill_max_width=True)
+text(text, style="bodyMedium", color=None, max_lines=2147483647)
+   style: headline/title/body/label + Large/Medium/Small; color: primary, muted, error, success, warning, accent или #RRGGBB
+button(text, on_click=None, style="filled", enabled=True, fill_max_width=False)   bounce_button(text, on_click=None, enabled=True, fill_max_width=True)
+split_button(text, on_click=None, on_secondary=None, enabled=True, fill_max_width=True)   icon_button(icon, on_click=None, enabled=True)
+text_field(value="", on_change=None, label="", single_line=True, fill_max_width=True)   # on_change(str)
+switch(checked=False, on_change=None, title="", subtitle="", enabled=True)   checkbox(...same...)   # on_change(bool)
+slider(value=0, on_change=None, minimum=0, maximum=100, title="", steps=0)   # on_change(float)
+linear_progress(progress=None, fill_max_width=True)   circular_progress(progress=None)   wavy_progress(progress=None, size=64)
+divider(vertical=False)   spacer(height=8, width=0)   icon(name, size=24, tint=None)
+image(source, width=None, height=None, scale="fit", corner_radius=0, fill_max_width=False, content_description="")
+chip(text, selected=False, on_click=None)   card(children=None, padding=16, index=None, count=None, on_click=None)
+function_row(title, description="", icon="extension", icon_tint=None, on_click=None)   segmented_list(children=None, spacing=4)
+settings_row(title, subtitle="", icon=None, on_click=None, trailing=None)   tabs(tabs, selected=0, on_select=None)   # on_select(int)
+button_group(options, selected, on_select=None)   radio_group(options, selected, on_select=None, title="")   dropdown(options, selected, on_select=None, label="", enabled=True)
+floating_toolbar(items)   toolbar_item(icon, on_click=None, selected=False, label="")
+webview(url="", html="", fill_max_size=True, height=320)   log_panel(text, max_height=200)
+alert_dialog(show, title, message, confirm_text="OK", dismiss_text="Cancel", on_confirm=None, on_dismiss=None, cancelable=True)   empty()
+Колбэки без аргументов принимают lambda: .... Обработчики в циклах привязывай через default-аргумент: lambda i=i: self.pick(i).
+
+5. ANDROID / УСТРОЙСТВО
+android = self.api.getAndroid()   (методы возвращают JSON-строки: json.loads(...))
+  clipboardGet() clipboardSet(text) vibrate(ms) notifyShow(id, title, text, "dolphy_plugins") openUrl(url) shareText(text, title)
+  filesList(sub) filesRead(path) filesWrite(path, content, append) filesExists(path) filesDelete(path) filesMkdir(path) filesAbsolute(path) filesShare(path, mime, title) filesOpenWith(path, mime)
+  batteryJson() featuresJson() deviceInfoExtendedJson() connectivityDetailJson() locationLastJson() sensorsListJson() usbDevicesJson()
+  irHasEmitter() irTransmit(freqHz, int_array)   btBondedDevicesJson() btStartDiscovery(cb) btStopDiscovery()
+  gattConnect(addr, cb) gattWrite(addr, svc, chr, hex) bleAdvertiseStart(manufacturerId, payloadHex, connectable, includeName) bleAdvertiseStop()
+  cryptoHash(algo, text) cryptoRandomHex(n) cryptoUuid() hasPermission(perm) audioTone(type, ms)
+device = self.api.getDevice()
+  wifiScanResultsJson(20, None) wifiStartScan(False) nfcReadNdef(cb) nfcWriteNdef(text, is_uri, cb)
+  httpRequest(method, url, body, headersJson, cb)  pingHost(host, ms, cb)  portScan(host, ports, ms, cb)
+  rootExec(cmd, cb)  rootAvailable()  shizukuExec(cmd, cb)
+Колбэки получают JSON-строку. Сканы/GATT/сокеты останавливай в on_plugin_unload. Сеть можно и через urllib в потоке.
+Java-классы: from java import jclass  /  jarray, jint.
+
+6. ПРАВИЛА
+- Метаданные строго в начале. Файл должен компилироваться как Python.
+- Только API из этого справочника; не выдумывай методы. Если не уверен — упрости.
+- Один главный класс-наследник BasePlugin, экран main обязателен, если есть add_module(screen="main").
+- Тексты интерфейса — на языке пользователя.
+"""
+
+PLUGIN_MASTER_PROMPT = (
+    "Ты — инженер плагинов для приложения Dolphy. Когда просят плагин, пиши ПОЛНЫЙ рабочий код одним файлом "
+    "и вызывай инструмент create_plugin с этим кодом (метаданные в первых строках). Не выдумывай API — "
+    "используй только справочник ниже. После вызова create_plugin сообщи пользователю: откроется окно "
+    "установки Dolphy, нужно нажать Install. Если инструмент вернул ошибку — исправь код и вызови снова. "
+    "Для правок существующего плагина вызывай create_plugin с тем же __id__ и увеличенной __version__. "
+    "Отвечай на языке пользователя, кратко. " + PLUGIN_DOCS
+)
+
+# (название, эмодзи, промпт; None = свой промпт из настроек)
+PERSONAS = [
+    ("Обычный", "🤖", BASE_PROMPT),
+    ("Хакер", "🕶️", BASE_PROMPT + " Говори как харизматичный хакер из 90-х: короткие фразы, сленг, "
+                     "иногда ASCII-смайлы. Но давай точные и полезные ответы."),
+    ("Пират", "🏴‍☠️", BASE_PROMPT + " Говори как пират: «йо-хо-хо», морские словечки, но по делу."),
+    ("Кот", "🐱", BASE_PROMPT + " Ты — умный кот. Иногда мурлычешь («мрр»), любишь рыбу и тёплые клавиатуры, "
+                  "но отвечаешь правильно и по делу."),
+    ("Сократ", "🏛️", BASE_PROMPT + " Отвечай как Сократ: подводи к ответу наводящими вопросами, "
+                      "но в конце всё равно давай краткий вывод."),
+    ("Объяснялка", "🧒", BASE_PROMPT + " Объясняй максимально просто, как для 10-летнего, с яркими аналогиями."),
+    ("Переводчик", "🌐", "Ты переводчик. Если текст на русском — переводи на английский, иначе — на русский. "
+                         "Отвечай только переводом, без комментариев."),
+    ("Плагин-мастер", "🧩", PLUGIN_MASTER_PROMPT),
+    ("Свой", "✏️", None),
+]
+
+THINK_PHRASES = [
+    "Думаю…", "Взвешиваю варианты…", "Ковыряюсь в нейронах…", "Гоняю токены…",
+    "Сверяюсь с дельфином 🐬", "Почти придумал…", "Перебираю гипотезы…", "Грею видеокарту…",
+]
+
+SUGGESTIONS = [
+    ("Расскажи анекдот", "Что-нибудь свежее и не банальное", "mood", "Расскажи короткий смешной анекдот"),
+    ("Как работает NFC?", "Объяснение простыми словами", "nfc", "Объясни просто, как работает NFC и чем он отличается от RFID"),
+    ("Что с батареей?", "Агент проверит телефон", "battery_full", "Проверь заряд батареи и скажи, что за у меня устройство"),
+    ("Wi-Fi рядом", "Агент просканирует сети", "wifi", "Покажи Wi-Fi сети рядом и отметь самую сильную"),
+    ("Идея для плагина", "Придумать что-то для Dolphy", "lightbulb", "Придумай 5 крутых идей плагинов для Dolphy"),
+]
+
+HELP_TEXT = (
+    "Команды:\n"
+    "/help — это меню\n"
+    "/clear — новый чат\n"
+    "/model [id] — показать или сменить модель\n"
+    "/persona [имя] — сменить персону\n"
+    "/dice — бросить кубик 🎲\n"
+    "/flip — орёл или решка 🪙\n"
+    "/stats — статистика чата\n"
+    "/export — поделиться чатом"
+)
+
+TOOL_TITLES = {
+    "run_shell": "Shell", "run_root": "ROOT", "read_file": "Чтение файла", "write_file": "Запись файла",
+    "get_battery": "Батарея", "get_device_info": "Устройство", "wifi_scan": "Wi-Fi", "bt_bonded": "Bluetooth",
+    "clipboard_get": "Буфер обмена", "clipboard_set": "Буфер обмена", "vibrate": "Вибрация",
+    "notify": "Уведомление", "open_url": "Открыть ссылку",
+    "get_plugin_docs": "Справочник плагинов", "create_plugin": "Создание плагина",
+}
+
+
+def _tool(name, desc, props=None, required=None):
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": desc,
+            "parameters": {"type": "object", "properties": props or {}, "required": required or []},
+        },
+    }
+
+
+S = {"type": "string"}
+TOOL_SHELL = _tool("run_shell", "Выполнить команду в обычной оболочке Android (без root).", {"command": S}, ["command"])
+TOOL_ROOT = _tool("run_root", "Выполнить команду от root (su).", {"command": S}, ["command"])
+TOOL_READ = _tool("read_file", "Прочитать текстовый файл (первые ~20 КБ).",
+                  {"path": S, "root": {"type": "boolean"}}, ["path"])
+TOOL_WRITE = _tool("write_file", "Записать текст в файл (перезаписывает).",
+                   {"path": S, "content": S, "root": {"type": "boolean"}}, ["path", "content"])
+TOOLS_DEVICE = [
+    _tool("get_battery", "Уровень заряда и состояние батареи."),
+    _tool("get_device_info", "Информация об устройстве."),
+    _tool("wifi_scan", "Wi-Fi сети поблизости."),
+    _tool("bt_bonded", "Сопряжённые Bluetooth-устройства."),
+    _tool("clipboard_get", "Прочитать буфер обмена."),
+    _tool("clipboard_set", "Записать текст в буфер обмена.", {"text": S}, ["text"]),
+    _tool("vibrate", "Вибрация телефона.", {"ms": {"type": "integer"}}, ["ms"]),
+    _tool("notify", "Показать уведомление.", {"title": S, "text": S}, ["title", "text"]),
+    _tool("open_url", "Открыть ссылку в браузере.", {"url": S}, ["url"]),
+]
+TOOL_PLUGIN_DOCS = _tool(
+    "get_plugin_docs",
+    "Получить справочник по написанию плагинов Dolphy (.dolphyplugin). Вызови перед create_plugin.")
+TOOL_CREATE_PLUGIN = _tool(
+    "create_plugin",
+    "Создать плагин Dolphy: принимает ПОЛНЫЙ текст файла .dolphyplugin (метаданные __id__, __name__ и т.д. "
+    "в самом начале), проверяет код, сохраняет файл и открывает установщик Dolphy. Тот же __id__ обновляет плагин.",
+    {"code": S}, ["code"])
+
+RISK_MARKERS = [
+    ("rootExec", "root"), ("root(", "root"), ("shizuku", "Shizuku"), ("shell(", "shell-команды"),
+    ("load_dex", "нативный DEX-код"), ("invoke_java", "Java reflection"), ("set_java_field", "Java reflection"),
+    ("download_assets", "загрузка файлов"), ("urllib", "сеть"), ("httpRequest", "сеть"),
+    ("filesDelete", "удаление файлов"), ("hook_action", "перехват действий приложения"),
+    ("hook_screen", "изменение экранов приложения"), ("hook_surface", "изменение панели приложения"),
+    ("clipboard", "буфер обмена"), ("bleAdvertise", "Bluetooth-рассылка"), ("irTransmit", "ИК-передача"),
+]
+
+
+def check_plugin(code):
+    """Проверяет исходник плагина. Возвращает (info, ошибка)."""
+    if not code or not code.strip():
+        return None, "Пустой код."
+    if len(code) > 400000:
+        return None, "Файл слишком большой."
+    try:
+        compile(code, "plugin", "exec")
+    except SyntaxError as e:
+        return None, "SyntaxError в строке %s: %s." % (e.lineno, e.msg)
+    except Exception as e:
+        return None, "Ошибка компиляции: %s." % e
+
+    def field(name):
+        m = re.search(r'^%s\s*=\s*([\'"])(.*?)\1\s*$' % name, code, re.M)
+        return (m.group(2), m.start()) if m else (None, -1)
+
+    pid_raw, pos = field("__id__")
+    name, _ = field("__name__")
+    if not pid_raw or not name:
+        return None, "Нет обязательных метаданных __id__ и __name__ (верхний уровень, в кавычках)."
+    first = re.search(r"^(import |from |class |def )", code, re.M)
+    if first and first.start() < pos:
+        return None, "Метаданные должны стоять в самом начале файла, до import/class/def."
+    if "BasePlugin" not in code:
+        return None, "Нет класса, наследующего BasePlugin."
+    pid = re.sub(r"[^a-z0-9_-]", "_", pid_raw.lower())[:64]
+    version, _ = field("__version__")
+    risks = []
+    for marker, label in RISK_MARKERS:
+        if marker in code and label not in risks:
+            risks.append(label)
+    return {
+        "id": pid, "name": name, "version": version or "1.0",
+        "lines": code.count("\n") + 1, "risks": risks,
+    }, None
+
+
+# ---------- текстовые помощники ----------
+
+def split_think(content):
+    """Отделяет <think>…</think> от ответа. Возвращает (рассуждение, ответ)."""
+    content = content or ""
+    for tag in ("think", "thinking"):
+        op, cl = "<%s>" % tag, "</%s>" % tag
+        if op in content:
+            before, rest = content.split(op, 1)
+            if cl in rest:
+                think, after = rest.split(cl, 1)
+                return think.strip(), (before + after).strip()
+            return rest.strip(), before.strip()
+    return "", content
+
+
+def clean_inline(line):
+    s = line.replace("**", "").replace("__", "").replace("`", "")
+    st = s.lstrip()
+    pad = s[:len(s) - len(st)]
+    if st.startswith("- ") or st.startswith("* "):
+        s = pad + "• " + st[2:]
+    return s
+
+
+def parse_blocks(text):
+    """Режет ответ на ('h', заголовок), ('p', абзац), ('code', код)."""
+    parts = []
+    chunks = (text or "").split("```")
+    for i, ch in enumerate(chunks):
+        if i % 2 == 1:
+            first, _, rest = ch.partition("\n")
+            code = rest if (rest and first.strip() and " " not in first.strip()) else ch
+            parts.append(("code", code.strip("\n")))
+            continue
+        buf = []
+        for line in ch.split("\n"):
+            if line.lstrip().startswith("#"):
+                if buf:
+                    parts.append(("p", "\n".join(buf).strip()))
+                    buf = []
+                parts.append(("h", clean_inline(line.lstrip("# ").strip())))
+            else:
+                buf.append(clean_inline(line))
+        if buf and "\n".join(buf).strip():
+            parts.append(("p", "\n".join(buf).strip()))
+    return [p for p in parts if p[1]]
+
+
+def http_error_text(e):
+    raw = ""
+    try:
+        raw = e.read().decode("utf-8", "replace")
+    except Exception:
+        pass
+    detail = raw
+    try:
+        parsed = json.loads(raw)
+        err = parsed.get("error", parsed)
+        detail = err.get("message", raw) if isinstance(err, dict) else str(err)
+    except Exception:
+        pass
+    return (detail or str(e))[:600]
+
+
+class GptAgent(BasePlugin):
+
+    # ---------- lifecycle ----------
+
+    def on_plugin_load(self):
+        self.messages = []
+        self.history = []
+        self.input = ""
+        self.busy = False
+        self.cancel = False
+        self.pending = None
+        self.approved = False
+        self.event = None
+        self.phase = "idle"
+        self.t_start = 0.0
+        self._last_ref = 0.0
+        self.models = list(self.get_setting("models_cache", []) or [])
+        self.models_status = ""
+
+        try:
+            saved = self.get_setting("chat_msgs", []) or []
+            self.messages = [m for m in saved if isinstance(m, dict)]
+            for m in self.messages:
+                m["streaming"] = False
+            self.history = list(self.get_setting("chat_hist", []) or [])
+        except Exception:
+            self.messages, self.history = [], []
+
+        self.add_module(
+            title="GPT Agent",
+            description="Чат с GPT, рассуждение, персоны, shell и root",
+            icon="smart_toy",
+            screen="main",
+            section="PLUGINS",
+        )
+        self.api.registerSettings("GPT Agent", json.dumps([
+            {"type": "switch", "key": "agent_mode", "title": "Агентный режим",
+             "subtitle": "GPT может вызывать shell, файлы и функции телефона", "default": True},
+            {"type": "switch", "key": "root_mode", "title": "Разрешить root",
+             "subtitle": "GPT сможет просить команды от root", "default": False},
+            {"type": "switch", "key": "confirm", "title": "Подтверждать действия",
+             "subtitle": "Спрашивать перед каждым действием агента", "default": True},
+            {"type": "switch", "key": "show_reasoning", "title": "Показывать рассуждение",
+             "subtitle": "Карточка «Рассуждал…» у моделей с reasoning", "default": True},
+            {"type": "switch", "key": "haptics", "title": "Вибро по окончании ответа", "default": True},
+            {"type": "nav", "title": "API-ключ, модель и персона", "icon": "key", "screen": "settings"},
+        ]), 30)
+
+    def on_plugin_unload(self):
+        self.cancel = True
+        if self.event is not None:
+            self.approved = False
+            self.event.set()
+
+    on_plugin_disable = on_plugin_unload
+
+    # ---------- общие помощники ----------
+
+    def soft_refresh(self, force=False):
+        now = time.time()
+        if force or now - self._last_ref > 0.12:
+            self._last_ref = now
+            self.refresh()
+
+    def on_input(self, value):
+        self.input = str(value)
+
+    def toggle(self, key, default):
+        self.set_setting(key, not bool(self.get_setting(key, default)))
+        self.refresh()
+
+    def persona(self):
+        name = self.get_setting("persona", "Обычный")
+        for p in PERSONAS:
+            if p[0] == name:
+                return p
+        return PERSONAS[0]
+
+    def next_persona(self):
+        cur = self.persona()[0]
+        names = [p[0] for p in PERSONAS]
+        self.set_setting("persona", names[(names.index(cur) + 1) % len(names)])
+        self.refresh()
+
+    def system_prompt(self):
+        p = self.persona()
+        text = p[2]
+        if text is None:
+            text = str(self.get_setting("system_prompt", "") or BASE_PROMPT)
+        if self.get_setting("agent_mode", True) and p[0] != "Переводчик":
+            text += TOOLS_NOTE
+        return text
+
+    def headers(self, stream=False):
+        key = str(self.get_setting("api_key", "")).strip()
+        return {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream" if stream else "application/json",
+            "Authorization": "Bearer " + key,
+            "User-Agent": UA,
+        }
+
+    def base_url(self):
+        return str(self.get_setting("base_url", DEFAULT_BASE) or DEFAULT_BASE).rstrip("/")
+
+    def model(self):
+        return str(self.get_setting("model", DEFAULT_MODEL) or DEFAULT_MODEL).strip()
+
+    def add_info(self, text, role="info"):
+        self.messages.append({"role": role, "text": str(text)})
+        self.refresh()
+
+    def copy_text(self, text):
+        try:
+            self.api.getAndroid().clipboardSet(str(text))
+            self.toast("Скопировано")
+        except Exception as e:
+            self.toast("Не удалось скопировать: %s" % e)
+
+    def share_text(self, text, title="Поделиться"):
+        try:
+            self.api.getAndroid().shareText(str(text), title)
+        except Exception as e:
+            self.toast("Не удалось поделиться: %s" % e)
+
+    def buzz(self, ms=35):
+        if self.get_setting("haptics", True):
+            try:
+                self.api.getAndroid().vibrate(ms)
+            except Exception:
+                pass
+
+    def chat_as_text(self):
+        names = {"user": "Вы", "assistant": "GPT", "tool": "Агент", "error": "Ошибка", "info": "Инфо"}
+        out = []
+        for m in self.messages:
+            if m.get("text"):
+                out.append("%s: %s" % (names.get(m.get("role"), m.get("role")), m["text"]))
+        return "\n\n".join(out)
+
+    def save_chat(self):
+        try:
+            msgs = []
+            for m in self.messages[-80:]:
+                c = dict(m)
+                c["streaming"] = False
+                msgs.append(c)
+            hist = self.history[-60:]
+            while hist and hist[0].get("role") != "user":
+                hist.pop(0)
+            self.set_setting("chat_msgs", msgs)
+            self.set_setting("chat_hist", hist)
+        except Exception:
+            pass
+
+    def new_chat(self):
+        if self.busy:
+            self.stop()
+        self.messages = []
+        self.history = []
+        self.save_chat()
+        self.refresh()
+
+    def stop(self):
+        self.cancel = True
+        if self.event is not None:
+            self.approved = False
+            self.event.set()
+
+    # ---------- команды ----------
+
+    def run_command(self, text):
+        parts = text[1:].split(None, 1)
+        cmd = parts[0].lower() if parts else ""
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        self.messages.append({"role": "user", "text": text, "local": True})
+
+        if cmd in ("help", "?", "h"):
+            self.add_info(HELP_TEXT)
+        elif cmd == "clear":
+            self.new_chat()
+        elif cmd == "dice":
+            self.add_info("🎲 Выпало: %d" % random.randint(1, 6))
+        elif cmd == "flip":
+            self.add_info("🪙 " + random.choice(["Орёл", "Решка"]))
+        elif cmd == "model":
+            if arg:
+                self.set_setting("model", arg)
+                self.add_info("Модель: " + arg)
+            else:
+                self.add_info("Текущая модель: " + self.model())
+        elif cmd == "persona":
+            if arg:
+                hit = None
+                for p in PERSONAS:
+                    if arg.lower() in (p[0].lower(), p[1]):
+                        hit = p
+                if hit:
+                    self.set_setting("persona", hit[0])
+                    self.add_info("Персона: %s %s" % (hit[1], hit[0]))
+                else:
+                    self.add_info("Нет такой персоны. Доступны: " + ", ".join(p[0] for p in PERSONAS))
+            else:
+                p = self.persona()
+                self.add_info("Сейчас: %s %s. Доступны: %s" % (p[1], p[0], ", ".join(x[0] for x in PERSONAS)))
+        elif cmd == "stats":
+            users = len([m for m in self.messages if m.get("role") == "user" and not m.get("local")])
+            answers = len([m for m in self.messages if m.get("role") == "assistant"])
+            self.add_info("Сообщений: %d, ответов: %d\nМодель: %s\nПерсона: %s" %
+                          (users, answers, self.model(), self.persona()[0]))
+        elif cmd == "export":
+            self.share_text(self.chat_as_text(), "Чат с GPT")
+            self.add_info("Экспорт открыт")
+        else:
+            self.add_info("Неизвестная команда. /help — список команд.")
+
+    # ---------- отправка ----------
+
+    def send(self):
+        text = self.input.strip()
+        if not text or self.busy:
+            return
+        if text.startswith("/"):
+            self.input = ""
+            self.run_command(text)
+            return
+        self.start_turn(text)
+
+    def start_turn(self, text):
+        if not self.get_setting("api_key", ""):
+            self.toast("Сначала вставьте API-ключ в настройках плагина")
+            self.navigate("settings")
+            return
+        self.input = ""
+        self.cancel = False
+        self.busy = True
+        self.phase = "wait"
+        self.t_start = time.time()
+        self.history.append({"role": "user", "content": text})
+        self.messages.append({"role": "user", "text": text})
+        self.refresh()
+        threading.Thread(target=self.agent_loop, daemon=True).start()
+        threading.Thread(target=self.ticker, daemon=True).start()
+
+    def ask_suggestion(self, text):
+        self.input = text
+        self.send()
+
+    def ticker(self):
+        while self.busy:
+            time.sleep(0.8)
+            self.refresh()
+
+    def regen(self):
+        if self.busy:
+            return
+        idx = None
+        for i in range(len(self.messages) - 1, -1, -1):
+            m = self.messages[i]
+            if m.get("role") == "user" and not m.get("local"):
+                idx = i
+                break
+        if idx is None:
+            return
+        hidx = None
+        for i in range(len(self.history) - 1, -1, -1):
+            if self.history[i].get("role") == "user":
+                hidx = i
+                break
+        if hidx is None:
+            return
+        self.messages = self.messages[:idx + 1]
+        self.history = self.history[:hidx + 1]
+        self.cancel = False
+        self.busy = True
+        self.phase = "wait"
+        self.t_start = time.time()
+        self.refresh()
+        threading.Thread(target=self.agent_loop, daemon=True).start()
+        threading.Thread(target=self.ticker, daemon=True).start()
+
+    # ---------- OpenAI ----------
+
+    def active_tools(self):
+        if not self.get_setting("agent_mode", True) or self.persona()[0] == "Переводчик":
+            return []
+        tools = [TOOL_SHELL, TOOL_READ, TOOL_WRITE] + TOOLS_DEVICE
+        if self.get_setting("root_mode", False):
+            tools.insert(1, TOOL_ROOT)
+        return tools
+
+    def build_body(self, stream):
+        body = {
+            "model": self.model(),
+            "messages": [{"role": "system", "content": self.system_prompt()}] + self.history,
+        }
+        if stream:
+            body["stream"] = True
+        effort = str(self.get_setting("effort", "auto"))
+        if effort in ("low", "medium", "high"):
+            body["reasoning_effort"] = effort
+        tools = self.active_tools()
+        if tools:
+            body["tools"] = tools
+        return body
+
+    def apply_stream(self, msg, content, reasoning):
+        think, answer = split_think(content)
+        if think:
+            reasoning = (reasoning + "\n" + think).strip() if reasoning else think
+        msg["text"] = answer
+        msg["reasoning"] = reasoning
+
+    def request_turn(self, msg):
+        """Один запрос к модели. Заполняет msg и возвращает список tool_calls."""
+        stream = bool(self.get_setting("stream", True))
+        req = urllib.request.Request(
+            self.base_url() + "/chat/completions",
+            data=json.dumps(self.build_body(stream)).encode("utf-8"),
+            headers=self.headers(stream),
+            method="POST",
+        )
+        t0 = time.time()
+        content, reasoning = "", ""
+        calls = {}
+        think_end = None
+
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            ctype = str(resp.headers.get("Content-Type", "") or "")
+            if "event-stream" not in ctype:
+                data = json.loads(resp.read().decode("utf-8"))
+                m = data["choices"][0]["message"]
+                content = str(m.get("content") or "")
+                reasoning = str(m.get("reasoning_content") or m.get("reasoning") or "")
+                for i, c in enumerate(m.get("tool_calls") or []):
+                    calls[i] = c
+                self.phase = "write"
+            else:
+                for raw in resp:
+                    if self.cancel:
+                        break
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                    except Exception:
+                        continue
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    r = delta.get("reasoning_content") or delta.get("reasoning")
+                    if r:
+                        reasoning += str(r)
+                        self.phase = "think"
+                    c = delta.get("content")
+                    if c:
+                        content += str(c)
+                        if self.phase != "write":
+                            self.phase = "write"
+                        if think_end is None and "<think" not in content:
+                            think_end = time.time()
+                    for tc in delta.get("tool_calls") or []:
+                        idx = tc.get("index", 0)
+                        slot = calls.setdefault(idx, {"id": "", "type": "function",
+                                                      "function": {"name": "", "arguments": ""}})
+                        if tc.get("id"):
+                            slot["id"] = tc["id"]
+                        fn = tc.get("function") or {}
+                        if fn.get("name") and not slot["function"]["name"]:
+                            slot["function"]["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            slot["function"]["arguments"] += fn["arguments"]
+                        self.phase = "tool"
+                    self.apply_stream(msg, content, reasoning)
+                    self.soft_refresh()
+
+        self.apply_stream(msg, content, reasoning)
+        end = time.time()
+        msg["secs"] = end - t0
+        if msg.get("reasoning"):
+            msg["think_s"] = ((think_end or end) - t0)
+        out = []
+        for n, idx in enumerate(sorted(calls)):
+            c = calls[idx]
+            if not c.get("id"):
+                c["id"] = "call_%d_%d" % (int(t0), n)
+            if c.get("function", {}).get("name"):
+                out.append(c)
+        return out
+
+    def agent_loop(self):
+        ok = True
+        try:
+            finished = False
+            for _ in range(MAX_STEPS):
+                if self.cancel:
+                    self.add_info("Остановлено")
+                    finished = True
+                    break
+                msg = {"role": "assistant", "text": "", "reasoning": "", "streaming": True, "open": False}
+                self.messages.append(msg)
+                self.phase = "wait"
+                try:
+                    calls = self.request_turn(msg)
+                finally:
+                    msg["streaming"] = False
+                    msg["open"] = False
+                    if not msg["text"] and not msg["reasoning"] and msg in self.messages:
+                        self.messages.remove(msg)
+
+                if self.cancel:
+                    if msg["text"]:
+                        self.history.append({"role": "assistant", "content": msg["text"]})
+                    self.add_info("Остановлено")
+                    finished = True
+                    break
+
+                entry = {"role": "assistant", "content": msg["text"] or None}
+                if calls:
+                    entry["tool_calls"] = calls
+                self.history.append(entry)
+
+                if not calls:
+                    if not msg["text"]:
+                        self.add_info("Модель вернула пустой ответ")
+                    finished = True
+                    break
+
+                for call in calls:
+                    fn = call.get("function", {})
+                    name = fn.get("name", "")
+                    try:
+                        args = json.loads(fn.get("arguments") or "{}")
+                        if not isinstance(args, dict):
+                            args = {}
+                    except Exception:
+                        args = {}
+                    self.phase = "tool"
+                    self.refresh()
+                    shown, result = self.exec_tool(name, args)
+                    self.history.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result})
+                    body = shown + "\n—\n" + result if shown else result
+                    self.messages.append({"role": "tool", "title": TOOL_TITLES.get(name, name),
+                                          "text": body[:1500]})
+                    self.refresh()
+                    if self.cancel:
+                        break
+            if not finished:
+                self.add_info("Достигнут лимит шагов агента (%d)" % MAX_STEPS)
+        except urllib.error.HTTPError as e:
+            ok = False
+            self.messages.append({"role": "error", "text": "Ошибка API %s (модель: %s): %s" %
+                                  (e.code, self.model(), http_error_text(e))})
+        except Exception as e:
+            ok = False
+            self.messages.append({"role": "error", "text": "Ошибка: %s" % e})
+        finally:
+            self.busy = False
+            self.phase = "idle"
+            self.save_chat()
+            self.refresh()
+            if ok and not self.cancel:
+                self.buzz()
+
+    # ---------- инструменты ----------
+
+    def ask(self, label, shown):
+        if not self.get_setting("confirm", True):
+            return True
+        self.pending = (label, shown)
+        self.approved = False
+        self.event = threading.Event()
+        self.phase = "ask"
+        self.refresh()
+        self.event.wait(600)
+        self.pending = None
+        self.event = None
+        self.phase = "tool"
+        self.refresh()
+        return self.approved
+
+    def exec_tool(self, name, a):
+        """Возвращает (что показать, результат для модели)."""
+        root_ok = bool(self.get_setting("root_mode", False))
+        try:
+            if name == "run_shell":
+                cmd = str(a.get("command", ""))
+                if not self.ask("Shell", cmd):
+                    return "$ " + cmd, DENIED
+                return "$ " + cmd, self.run_cmd("shell", cmd)
+            if name == "run_root":
+                cmd = str(a.get("command", ""))
+                if not root_ok:
+                    return "# " + cmd, "Root отключён пользователем в настройках."
+                if not self.ask("ROOT", cmd):
+                    return "# " + cmd, DENIED
+                return "# " + cmd, self.run_cmd("root", cmd)
+            if name == "read_file":
+                path = str(a.get("path", ""))
+                cmd = "head -c 20000 " + shlex.quote(path)
+                if a.get("root") and root_ok:
+                    if not self.ask("ROOT чтение", path):
+                        return "cat " + path, DENIED
+                    return "# cat " + path, self.run_cmd("root", cmd)
+                return "cat " + path, self.run_cmd("shell", cmd)
+            if name == "write_file":
+                path = str(a.get("path", ""))
+                content = str(a.get("content", ""))
+                use_root = bool(a.get("root")) and root_ok
+                shown = "Запись %d симв. → %s" % (len(content), path)
+                if not self.ask("ROOT запись" if use_root else "Запись файла", shown):
+                    return shown, DENIED
+                b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
+                cmd = "echo %s | base64 -d > %s" % (b64, shlex.quote(path))
+                return shown, self.run_cmd("root" if use_root else "shell", cmd)
+
+            ad = self.api.getAndroid()
+            if name == "get_battery":
+                return "", str(ad.batteryJson())
+            if name == "get_device_info":
+                return "", str(self.api.getDevice().deviceInfoJson())
+            if name == "wifi_scan":
+                return "", str(self.api.getDevice().wifiScanResultsJson(20, None))[:MAX_TOOL_OUTPUT]
+            if name == "bt_bonded":
+                return "", str(ad.btBondedDevicesJson())[:MAX_TOOL_OUTPUT]
+            if name == "clipboard_get":
+                return "", str(ad.clipboardGet())[:MAX_TOOL_OUTPUT]
+            if name == "clipboard_set":
+                text = str(a.get("text", ""))
+                if not self.ask("Буфер обмена", text):
+                    return text, DENIED
+                return text, "ok" if ad.clipboardSet(text) else "не удалось"
+            if name == "vibrate":
+                ms = max(10, min(int(a.get("ms", 200)), 3000))
+                return "%d мс" % ms, "ok" if ad.vibrate(ms) else "не удалось"
+            if name == "notify":
+                title, text = str(a.get("title", "")), str(a.get("text", ""))
+                ok = ad.notifyShow(random.randint(1000, 9999), title, text, "dolphy_plugins")
+                return title, "ok" if ok else "не удалось"
+            if name == "open_url":
+                url = str(a.get("url", ""))
+                if not self.ask("Открыть ссылку", url):
+                    return url, DENIED
+                return url, "ok" if ad.openUrl(url) else "не удалось"
+        except Exception as e:
+            return "", "Ошибка инструмента %s: %s" % (name, e)
+        return "", "Неизвестный инструмент: %s" % name
+
+    def run_cmd(self, kind, cmd):
+        try:
+            r = self.root(cmd) if kind == "root" else self.shell(cmd)
+        except Exception as e:
+            return "Ошибка запуска: %s" % e
+        if isinstance(r, str):
+            try:
+                r = json.loads(r)
+            except Exception:
+                return r[:MAX_TOOL_OUTPUT]
+        try:
+            text = "exit=%s\n%s" % (r.get("code"), str(r.get("out", "")))
+            err = str(r.get("err", ""))
+            if err:
+                text += "\nstderr:\n" + err
+        except Exception:
+            text = str(r)
+        if len(text) > MAX_TOOL_OUTPUT:
+            text = text[:MAX_TOOL_OUTPUT] + "\n…(обрезано)"
+        return text
+
+    def on_confirm(self):
+        self.approved = True
+        if self.event is not None:
+            self.event.set()
+
+    def on_deny(self):
+        self.approved = False
+        if self.event is not None:
+            self.event.set()
+
+    # ---------- список моделей ----------
+
+    def fetch_models(self):
+        if not self.get_setting("api_key", ""):
+            self.models_status = "Сначала вставьте API-ключ"
+            self.refresh()
+            return
+        self.models_status = "Загружаю…"
+        self.refresh()
+
+        def work():
+            try:
+                req = urllib.request.Request(self.base_url() + "/models", headers=self.headers(), method="GET")
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    data = json.loads(r.read().decode("utf-8"))
+                ids = sorted({str(m.get("id")) for m in data.get("data", []) if m.get("id")})
+                self.models = ids
+                self.set_setting("models_cache", ids)
+                self.models_status = "Ключ работает. Моделей: %d" % len(ids)
+            except urllib.error.HTTPError as e:
+                self.models_status = "Ошибка %s: %s" % (e.code, http_error_text(e))
+            except Exception as e:
+                self.models_status = "Ошибка: %s" % e
+            self.refresh()
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---------- отрисовка ----------
+
+    def toggler(self, msg):
+        def _t():
+            msg["open"] = not msg.get("open", False)
+            self.refresh()
+        return _t
+
+    def copier(self, text):
+        return lambda: self.copy_text(text)
+
+    def sharer(self, text):
+        return lambda: self.share_text(text, "Ответ GPT")
+
+    def render_text_parts(self, ui, text):
+        out = []
+        for kind, body in parse_blocks(text):
+            if kind == "h":
+                out.append(ui.text(body, "titleSmall", color="accent"))
+            elif kind == "code":
+                out.append(ui.log_panel(body, max_height=260))
+                out.append(ui.row([ui.chip("Копировать код", False, self.copier(body))], spacing=8))
+            else:
+                out.append(ui.text(body, "bodyMedium"))
+        return out
+
+    def render_user(self, ui, m):
+        return ui.card([
+            ui.row([ui.icon("person", 18, "primary"), ui.text("Вы", "labelLarge", color="primary")], spacing=8),
+            ui.text(str(m.get("text", "")), "bodyMedium"),
+        ], padding=14)
+
+    def render_assistant(self, ui, m, is_last):
+        kids = []
+        meta = []
+        if m.get("secs") and not m.get("streaming"):
+            meta.append("⏱ %.1f с" % m["secs"])
+            if m.get("text"):
+                meta.append("%d симв." % len(m["text"]))
+        head = [ui.icon("auto_awesome", 18, "accent"), ui.text("GPT", "labelLarge", color="accent")]
+        kids.append(ui.row(head, spacing=8))
+        if meta:
+            kids.append(ui.text("  ·  ".join(meta), "labelSmall", color="muted"))
+
+        reasoning = m.get("reasoning") or ""
+        streaming = bool(m.get("streaming"))
+        if reasoning and self.get_setting("show_reasoning", True):
+            thinking_now = streaming and not m.get("text")
+            if thinking_now:
+                title = "Рассуждаю…"
+            elif m.get("think_s") is not None:
+                title = "Рассуждал %.1f с" % m["think_s"]
+            else:
+                title = "Рассуждение"
+            opened = thinking_now or bool(m.get("open"))
+            inner = [ui.row([
+                ui.icon("psychology", 20, "warning"),
+                ui.text(title, "labelLarge", color="warning"),
+                ui.icon("expand_less" if opened else "expand_more", 20, "muted"),
+            ], spacing=8)]
+            if opened:
+                inner.append(ui.text(reasoning, "bodySmall", color="muted"))
+            kids.append(ui.card(inner, padding=12, on_click=self.toggler(m)))
+
+        text = m.get("text") or ""
+        if text:
+            kids.extend(self.render_text_parts(ui, text))
+        elif streaming and not reasoning:
+            kids.append(ui.text("…", "bodyMedium", color="muted"))
+
+        if text and not streaming:
+            acts = [
+                ui.icon_button("content_copy", self.copier(text)),
+                ui.icon_button("share", self.sharer(text)),
+            ]
+            if is_last and not self.busy:
+                acts.append(ui.icon_button("refresh", self.regen))
+            kids.append(ui.row(acts, spacing=0))
+        return ui.card(kids, padding=14)
+
+    def render_tool(self, ui, m):
+        return ui.card([
+            ui.row([ui.icon("terminal", 18, "muted"),
+                    ui.text(str(m.get("title", "Инструмент")), "labelMedium", color="muted")], spacing=8),
+            ui.log_panel(str(m.get("text", "")), max_height=180),
+        ], padding=12)
+
+    def render_info(self, ui, m):
+        return ui.card([
+            ui.row([ui.icon("info", 18, "success"), ui.text("Инфо", "labelMedium", color="success")], spacing=8),
+            ui.text(str(m.get("text", "")), "bodyMedium"),
+        ], padding=12)
+
+    def render_error(self, ui, m, is_last):
+        kids = [
+            ui.row([ui.icon("error", 18, "error"), ui.text("Ошибка", "labelLarge", color="error")], spacing=8),
+            ui.text(str(m.get("text", "")), "bodyMedium", color="error"),
+        ]
+        if is_last and not self.busy:
+            kids.append(ui.button("Повторить", self.regen))
+        return ui.card(kids, padding=14)
+
+    def status_card(self, ui):
+        elapsed = time.time() - self.t_start if self.t_start else 0
+        phase = self.phase
+        if phase == "think":
+            label = "Рассуждаю…"
+        elif phase == "write":
+            label = "Пишу ответ…"
+        elif phase == "tool":
+            label = "Выполняю действие…"
+        elif phase == "ask":
+            label = "Жду вашего разрешения…"
+        else:
+            label = THINK_PHRASES[int(elapsed / 1.6) % len(THINK_PHRASES)]
+        return ui.card([ui.row([
+            ui.wavy_progress(None, 28),
+            ui.column([
+                ui.text(label, "titleSmall"),
+                ui.text("⏱ %.1f с" % elapsed, "labelSmall", color="muted"),
+            ], spacing=2),
+        ], spacing=12)], padding=12)
+
+    def welcome(self, ui):
+        p = self.persona()
+        rows = [ui.function_row(t, d, ic, on_click=(lambda s=prompt: self.ask_suggestion(s)))
+                for (t, d, ic, prompt) in SUGGESTIONS]
+        return [
+            ui.card([
+                ui.text("🐬 Привет!", "headlineSmall"),
+                ui.text("Я GPT Agent. Персона: %s %s · модель: %s" % (p[1], p[0], self.model()),
+                        "bodyMedium", color="muted"),
+                ui.text("Спросите что угодно или напишите /help.", "bodySmall", color="muted"),
+            ]),
+            ui.segmented_list(rows),
+        ]
+
+    def screen_main(self, ui, api, state):
+        items = []
+        p = self.persona()
+
+        items.append(ui.lazy_row([
+            ui.chip("%s %s" % (p[1], p[0]), True, self.next_persona),
+            ui.chip("Агент", bool(self.get_setting("agent_mode", True)),
+                    lambda: self.toggle("agent_mode", True)),
+            ui.chip("Рассуждение", bool(self.get_setting("show_reasoning", True)),
+                    lambda: self.toggle("show_reasoning", True)),
+            ui.chip("Root", bool(self.get_setting("root_mode", False)),
+                    lambda: self.toggle("root_mode", False)),
+            ui.chip("Подтверждать", bool(self.get_setting("confirm", True)),
+                    lambda: self.toggle("confirm", True)),
+        ], spacing=8))
+
+        if not self.get_setting("api_key", ""):
+            items.append(ui.card([
+                ui.text("Нужен API-ключ", "titleMedium"),
+                ui.text("Откройте настройки и вставьте ключ (sk-...)."),
+                ui.button("Открыть настройки", lambda: self.navigate("settings")),
+            ]))
+
+        items.append(ui.text_field(self.input, self.on_input, "Сообщение или /команда", single_line=False))
+        if self.busy:
+            items.append(ui.button("Стоп", self.stop, fill_max_width=True))
+            items.append(self.status_card(ui))
+        else:
+            items.append(ui.button("Отправить", self.send, fill_max_width=True))
+
+        # группы по репликам пользователя: новые сверху, внутри группы по порядку
+        groups = []
+        for m in self.messages:
+            if m.get("role") == "user" or not groups:
+                groups.append([m])
+            else:
+                groups[-1].append(m)
+
+        if not self.messages:
+            items.extend(self.welcome(ui))
+
+        last_idx = len(self.messages) - 1
+        ids = {id(m): i for i, m in enumerate(self.messages)}
+        for g in reversed(groups):
+            for m in g:
+                role = m.get("role")
+                is_last = ids.get(id(m)) == last_idx
+                if role == "user":
+                    items.append(self.render_user(ui, m))
+                elif role == "assistant":
+                    last_ass = is_last or (ids.get(id(m)) == self.last_assistant_index())
+                    items.append(self.render_assistant(ui, m, last_ass))
+                elif role == "tool":
+                    items.append(self.render_tool(ui, m))
+                elif role == "error":
+                    items.append(self.render_error(ui, m, is_last))
+                else:
+                    items.append(self.render_info(ui, m))
+
+        pending = self.pending
+        items.append(ui.alert_dialog(
+            show=pending is not None,
+            title="Агент хочет: " + (pending[0] if pending else ""),
+            message=pending[1] if pending else "",
+            confirm_text="Выполнить",
+            dismiss_text="Отклонить",
+            on_confirm=self.on_confirm,
+            on_dismiss=self.on_deny,
+            cancelable=False,
+        ))
+
+        return ui.scaffold(
+            title="GPT Agent",
+            content=ui.lazy_column(items, padding=16, spacing=10, fill_max_size=True),
+            actions=[
+                ui.top_action("ios_share", lambda: self.share_text(self.chat_as_text(), "Чат с GPT")),
+                ui.top_action("add_comment", self.new_chat),
+                ui.top_action("tune", lambda: self.navigate("settings")),
+            ],
+        )
+
+    def last_assistant_index(self):
+        for i in range(len(self.messages) - 1, -1, -1):
+            if self.messages[i].get("role") == "assistant":
+                return i
+        return -1
+
+    def screen_settings(self, ui, api, state):
+        def setter(key):
+            def _set(value):
+                self.set_setting(key, str(value))
+            return _set
+
+        def switcher(key):
+            def _set(value):
+                self.set_setting(key, bool(value))
+                self.refresh()
+            return _set
+
+        def pick(key):
+            def _set(value):
+                self.set_setting(key, str(value))
+                self.refresh()
+            return _set
+
+        key = str(self.get_setting("api_key", ""))
+        masked = ("сохранён: ..." + key[-4:]) if len(key) > 4 else "не задан"
+        cur_model = self.model()
+
+        model_cards = [
+            ui.text("Модель", "titleMedium"),
+            ui.text_field(cur_model, setter("model"), "ID модели"),
+            ui.text_field(self.base_url(), setter("base_url"), "Base URL (OpenAI-совместимый)"),
+            ui.button("Проверить ключ и загрузить модели", self.fetch_models, fill_max_width=True),
+        ]
+        if self.models_status:
+            model_cards.append(ui.text(self.models_status, "bodySmall", color="muted"))
+        if self.models:
+            opts = list(self.models)
+            if cur_model not in opts:
+                opts.insert(0, cur_model)
+            model_cards.append(ui.dropdown(opts, cur_model, pick("model"), "Выбрать из списка"))
+
+        names = [x[0] for x in PERSONAS]
+        persona_card = [
+            ui.text("Персона", "titleMedium"),
+            ui.dropdown(names, self.persona()[0], pick("persona"), "Стиль ответов"),
+            ui.text("Свой промпт (для персоны «Свой»)", "labelMedium", color="muted"),
+            ui.text_field(str(self.get_setting("system_prompt", "") or BASE_PROMPT),
+                          setter("system_prompt"), "Системный промпт", single_line=False),
+        ]
+
+        return ui.scaffold(
+            title="Настройки GPT Agent",
+            content=ui.lazy_column([
+                ui.card([
+                    ui.text("API-ключ", "titleMedium"),
+                    ui.text("Ключ " + masked, "bodySmall", color="muted"),
+                    ui.text_field(key, setter("api_key"), "API key (sk-...)"),
+                ]),
+                ui.card(model_cards),
+                ui.card(persona_card),
+                ui.card([
+                    ui.text("Ответы", "titleMedium"),
+                    ui.switch(bool(self.get_setting("stream", True)), switcher("stream"),
+                              "Стриминг", "Текст появляется по мере генерации"),
+                    ui.switch(bool(self.get_setting("show_reasoning", True)), switcher("show_reasoning"),
+                              "Показывать рассуждение", "Если модель его присылает"),
+                    ui.dropdown(["auto", "low", "medium", "high"], str(self.get_setting("effort", "auto")),
+                                pick("effort"), "Усилие рассуждения (auto — не отправлять)"),
+                    ui.switch(bool(self.get_setting("haptics", True)), switcher("haptics"),
+                              "Вибро по окончании", "Короткий отклик, когда ответ готов"),
+                ]),
+                ui.card([
+                    ui.text("Агент", "titleMedium"),
+                    ui.switch(bool(self.get_setting("agent_mode", True)), switcher("agent_mode"),
+                              "Агентный режим", "shell, файлы, батарея, Wi-Fi, буфер…"),
+                    ui.switch(bool(self.get_setting("root_mode", False)), switcher("root_mode"),
+                              "Разрешить root", "нужен выданный root-доступ"),
+                    ui.switch(bool(self.get_setting("confirm", True)), switcher("confirm"),
+                              "Подтверждать действия", "рекомендуется оставить включённым"),
+                ]),
+            ], padding=16, spacing=12, fill_max_size=True),
+        )
