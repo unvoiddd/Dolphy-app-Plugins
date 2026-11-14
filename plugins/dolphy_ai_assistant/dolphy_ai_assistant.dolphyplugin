@@ -1,0 +1,459 @@
+__id__ = "dolphy_ai_assistant"
+__name__ = "Dolphy AI Assistant"
+__version__ = "1.0.0"
+__author__ = "Create Plugin Dolphy"
+__icon__ = "rounded:smart_toy"
+__description__ = "Чат-ассистент, файлы, сборщик плагинов и IR-пульты"
+__permissions__ = ["files"]
+
+import ast
+import datetime
+import html
+import json
+import operator
+import os
+import random
+import re
+
+JOKES = [
+    "Почему программист не любит природу? Там слишком много багов.",
+    "Сколько программистов нужно, чтобы выкрутить лампочку? Ни одного, это аппаратная проблема.",
+    "Почему Python такой спокойный? Он не спорит про табы и пробелы.",
+    "Что сказал один байт другому? Не переживай, ты в норме.",
+]
+
+TIPS = [
+    "Пишите маленькие функции: их проще проверять и переиспользовать.",
+    "Сохраняйте настройки через set_setting, чтобы они переживали перезапуск.",
+    "Перед установкой плагина читайте его код: плагины не запускаются в песочнице.",
+    "Давайте id плагина в виде my_tool, без пробелов и заглавных букв.",
+]
+
+FACTS = [
+    "Большинство ИК-пультов работает на несущей частоте около 38 кГц.",
+    "Протокол NEC передаёт адрес и команду, а затем их инверсию для проверки.",
+    "Bluetooth Low Energy рассылает рекламные пакеты на трёх каналах.",
+]
+
+KINDS = ["Экран", "Настройки", "IR-пульт"]
+
+REFUSAL = "Подбор паролей, взлом чужих сетей и сайтов или сканирование чужих серверов я делать не буду. Могу помочь с защитой ваших собственных аккаунтов и сервера или с тестом вашего сервиса с лимитами попыток и разрешения владельца."
+
+FALLBACK = [
+    "Не до конца понял. Спросите про плагины, файлы, IR-пульты или время, или посчитайте что-нибудь вроде 12*7+3.",
+    "Пока не знаю ответа. Напишите «помощь», чтобы увидеть, что я умею.",
+]
+
+REPLIES = {
+    "thanks": "Пожалуйста! Обращайтесь в любое время.",
+    "bye": "До встречи! Хорошего дня.",
+    "mood": "У меня всё отлично, спасибо, что спросили. Чем займёмся?",
+    "name": "Я Dolphy AI, встроенный помощник этого плагина.",
+    "help": "Я умею болтать, считать (например, 12*7+3), сообщать время и дату, рассказывать о плагинах, IR-пультах и файлах, рассказывать шутки и факты, а также сохранять чат в файл. Во вкладке «Сборщик плагинов» можно создать заготовку нового плагина.",
+    "plugin": "Плагин — это один файл .dolphyplugin с метаданными в начале и классом, унаследованным от BasePlugin. Откройте «Сборщик плагинов», задайте название и тип, и я соберу заготовку. Затем откройте файл в разделе «Файлы» и нажмите Install.",
+    "ir": "ИК-сигналы отправляются через Android irTransmit. Во вкладке IR-пульт есть тестовый импульс, а .ir файлы можно импортировать как пульты в разделе «Файлы». Используйте только на своих устройствах.",
+    "files": "Файлы плагина лежат в его приватной папке. В разделе «Файлы» их можно просмотреть, импортировать .ir как пульт или сохранить текущий чат в chat.txt.",
+    "dolphy": "Dolphy — приложение для Android с инструментами для Bluetooth, Wi-Fi, NFC, USB и IR. Плагины расширяют его экранами и хуками.",
+    "weather": "Прогноз погоды я без интернета не знаю. Посмотрите его в погодном приложении.",
+    "python": "Плагины пишутся на Python. Пришлите фрагмент кода и опишите задачу, помогу разобраться.",
+    "android": "Dolphy работает на Android. Плагины на Python могут вызывать Java-классы и подключать DEX-библиотеки через api.",
+    "bluetooth": "Плагин может заменить Bluetooth-экраны, добавить BLE-режим и изменить пакеты рекламы через хуки. Могу объяснить любой из этих способов.",
+}
+
+INTENTS = [
+    ("greet", ["привет", "здравств", "хай", "hello", "hi", "добрый"]),
+    ("thanks", ["спасибо", "благодар", "thanks"]),
+    ("bye", ["пока", "до свидания", "бай", "bye"]),
+    ("mood", ["как дела", "как ты", "как жизнь"]),
+    ("name", ["как тебя зовут", "ты кто", "кто ты", "твое имя", "твоё имя"]),
+    ("help", ["помощь", "help", "что умеешь", "команды", "возможности"]),
+    ("time", ["который час", "сколько времени", "время"]),
+    ("date", ["какое число", "какой день", "дата", "какое сегодня"]),
+    ("joke", ["шутк", "анекдот", "смешн", "рассмеш"]),
+    ("tip", ["совет", "подскажи"]),
+    ("fact", ["факт", "расскажи что-нибудь", "интересн"]),
+    ("plugin", ["плагин", "dolphyplugin", "создай", "расширен"]),
+    ("ir", ["ик", "ir", "инфракрас", "пульт", "сигнал", "частот"]),
+    ("files", ["файл", "загруз", "прочит", "импорт", "сохрани"]),
+    ("dolphy", ["dolphy", "долфи", "приложени"]),
+    ("weather", ["погод"]),
+    ("python", ["python", "питон", "скрипт"]),
+    ("android", ["android", "андроид", "kotlin", "котлин", "java"]),
+    ("bluetooth", ["bluetooth", "блютуз", "ble"]),
+]
+
+OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+
+UNARY = {ast.USub: operator.neg, ast.UAdd: operator.pos}
+
+CSS = """<style>
+:root{color-scheme:light dark;--bot:#f1e6ff;--bot-text:#1d1b20;--user:#ff8a00;--text:#1d1b20}
+@media (prefers-color-scheme:dark){:root{--bot:#2b2633;--bot-text:#e6e0e9;--text:#e6e0e9}}
+body{margin:0;font-family:system-ui,sans-serif;background:transparent;color:var(--text)}
+.chat{display:flex;flex-direction:column;gap:8px;padding:8px}
+.row{display:flex}
+.row.user{justify-content:flex-end}
+.bubble{max-width:85%;padding:10px 14px;border-radius:18px;font-size:15px;line-height:1.4;white-space:pre-wrap;background:var(--bot);color:var(--bot-text);animation:pop .35s ease both}
+.row.user .bubble{background:var(--user);color:#fff}
+@keyframes pop{from{opacity:0;transform:translateY(8px) scale(.96)}to{opacity:1;transform:none}}
+.empty{opacity:.6;text-align:center;padding:24px;font-size:14px}
+</style>"""
+
+SCRIPT = """<script>
+(function(){
+  var el = document.querySelector('[data-typing]');
+  if (el) {
+    var full = el.getAttribute('data-full') || '';
+    var i = 0;
+    el.textContent = '';
+    var t = setInterval(function(){
+      i += 2;
+      el.textContent = full.slice(0, i);
+      if (i >= full.length) { el.textContent = full; clearInterval(t); }
+      window.scrollTo(0, document.body.scrollHeight);
+    }, 16);
+  }
+  window.scrollTo(0, document.body.scrollHeight);
+})();
+</script>"""
+
+
+def _eval(node):
+    if isinstance(node, ast.Expression):
+        return _eval(node.body)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op) in OPS:
+        left = _eval(node.left)
+        right = _eval(node.right)
+        if isinstance(node.op, ast.Pow) and abs(right) > 64:
+            raise ValueError("too big")
+        return OPS[type(node.op)](left, right)
+    if isinstance(node, ast.UnaryOp) and type(node.op) in UNARY:
+        return UNARY[type(node.op)](_eval(node.operand))
+    raise ValueError("unsupported")
+
+
+def generate_source(pid, name, desc, kind):
+    q = json.dumps
+    cls = "Plugin" + "".join(part.capitalize() for part in pid.split("_"))
+    lines = [
+        "__id__ = " + q(pid),
+        "__name__ = " + q(name),
+        '__version__ = "1.0.0"',
+        '__author__ = "Developer"',
+        "__description__ = " + q(desc),
+        '__icon__ = "rounded:extension"',
+        '__permissions__ = ["files"]' if kind == KINDS[1] else "__permissions__ = []",
+        "",
+        "import json",
+        "",
+        "",
+        "class " + cls + "(BasePlugin):",
+        "    def on_plugin_load(self):",
+        "        self.add_module(title=" + q(name) + ", description=" + q(desc) + ', icon="extension", screen="main", section="PLUGINS")',
+    ]
+    if kind == KINDS[1]:
+        lines.append('        self.api.registerSettings(' + q(name) + ', json.dumps([{"type": "switch", "key": "enabled", "title": "Включено", "subtitle": "", "default": True}]), 20)')
+        lines += ["", "    def on_setting_changed(self, payload):", '        self.toast(str(payload["key"]) + ": " + str(payload["value"]))']
+    action = "self.send_test" if kind == KINDS[2] else "self.say"
+    label = "Отправить тест" if kind == KINDS[2] else "Нажми"
+    lines += [
+        "",
+        "    def screen_main(self, ui, api, state):",
+        "        return ui.scaffold(",
+        "            title=" + q(name) + ",",
+        "            content=ui.column([",
+        "                ui.card([",
+        '                    ui.text(' + q(name) + ', "headlineSmall"),',
+        '                    ui.button("' + label + '", ' + action + ')',
+        "                ])",
+        "            ], padding=16, spacing=12)",
+        "        )",
+    ]
+    if kind == KINDS[2]:
+        lines += [
+            "",
+            "    def send_test(self):",
+            "        from java import jarray, jint",
+            "        android = self.api.getAndroid()",
+            "        android.irTransmit(38000, jarray(jint)([9000, 4500, 560, 560, 560, 1690]))",
+        ]
+    else:
+        lines += ["", "    def say(self):", "        self.toast(" + q("Работает: " + name) + ")"]
+    return "\n".join(lines) + "\n"
+
+
+class DolphyAssistant(BasePlugin):
+    def _init(self):
+        if not hasattr(self, "history"):
+            self.history = self.get_setting("history", [])
+            self.draft = ""
+            self.pending = -1
+            self.preview = ""
+            self.build_preview = ""
+            self.ir_status = ""
+            self.last_file = ""
+            self.builder = {"name": "", "desc": "", "kind": KINDS[0]}
+
+    def on_plugin_load(self):
+        self._init()
+        self.add_module(title="Dolphy AI", description="Чат и помощь", icon="smart_toy", screen="main", section="PLUGINS", order=0)
+        self.add_module(title="Файлы", description="Просмотр и импорт", icon="folder", screen="files", section="PLUGINS", order=1)
+        self.add_module(title="Сборщик плагинов", description="Создать .dolphyplugin", icon="build", screen="builder", section="PLUGINS", order=2)
+        self.add_module(title="IR-пульт", description="Тестовые ИК-импульсы", icon="settings_input_antenna", screen="ir", section="PLUGINS", order=3)
+
+    def on_plugin_unload(self):
+        if hasattr(self, "history"):
+            self.set_setting("history", self.history[-60:])
+
+    def base_dir(self):
+        path = self.asset_path("")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def list_files(self):
+        base = self.base_dir()
+        found = []
+        for root, _dirs, files in os.walk(base):
+            for name in files:
+                found.append(os.path.relpath(os.path.join(root, name), base))
+        return sorted(found)[:200]
+
+    def size_of(self, name):
+        try:
+            return str(max(1, os.path.getsize(os.path.join(self.base_dir(), name)) // 1024)) + " КБ"
+        except Exception:
+            return ""
+
+    def calc(self, expr):
+        tree = ast.parse(expr.replace("^", "**"), mode="eval")
+        return _eval(tree)
+
+    def reply_for(self, name):
+        now = datetime.datetime.now()
+        user = self.get_setting("user_name", "")
+        if name == "greet":
+            return ("Привет, " + user + "!" if user else "Привет!") + " Чем помочь?"
+        if name == "time":
+            return "Сейчас " + now.strftime("%H:%M") + "."
+        if name == "date":
+            return "Сегодня " + now.strftime("%d.%m.%Y") + "."
+        if name == "joke":
+            return random.choice(JOKES)
+        if name == "tip":
+            return random.choice(TIPS)
+        if name == "fact":
+            return random.choice(FACTS)
+        return REPLIES[name]
+
+    def answer(self, text):
+        low = text.lower().strip()
+        match = re.search(r"меня зовут\s+([a-zа-яё\-]+)", low)
+        if match:
+            name = match.group(1).capitalize()
+            self.set_setting("user_name", name)
+            return "Приятно познакомиться, " + name + "! Запомнил."
+        if re.search(r"брут|подбор парол|взлом|ddos|ддос|сканир\w* интернет|чужо\w* (сайт|сервер|аккаунт)", low):
+            return REFUSAL
+        for candidate in re.findall(r"[\d\.\+\-\*/\(\)%\^ ]+", low):
+            candidate = candidate.strip()
+            if len(candidate) >= 3 and re.search(r"\d", candidate) and re.search(r"[\+\-\*/%\^]", candidate):
+                try:
+                    return "Результат: " + str(self.calc(candidate))
+                except Exception:
+                    pass
+        best, score = None, 0
+        for name, words in INTENTS:
+            s = sum(1 for w in words if re.search(r"(^|[\s,.!?])" + re.escape(w), low))
+            if s > score:
+                best, score = name, s
+        if best:
+            return self.reply_for(best)
+        return random.choice(FALLBACK)
+
+    def send(self):
+        self._init()
+        text = self.draft.strip()
+        if not text:
+            return
+        self.history.append({"role": "user", "text": text})
+        self.history.append({"role": "bot", "text": self.answer(text)})
+        self.history = self.history[-60:]
+        self.pending = len(self.history) - 1
+        self.draft = ""
+        self.set_setting("history", self.history)
+        self.refresh()
+
+    def clear(self):
+        self._init()
+        self.history = []
+        self.pending = -1
+        self.set_setting("history", [])
+        self.refresh()
+
+    def on_draft(self, value):
+        self.draft = str(value)
+
+    def render_chat(self):
+        self._init()
+        bubbles = []
+        for i, m in enumerate(self.history):
+            text = html.escape(m["text"])
+            if m["role"] == "user":
+                bubbles.append('<div class="row user"><div class="bubble">' + text + "</div></div>")
+            elif i == self.pending:
+                bubbles.append('<div class="row"><div class="bubble" data-typing data-full="' + text + '"></div></div>')
+            else:
+                bubbles.append('<div class="row"><div class="bubble">' + text + "</div></div>")
+        self.pending = -1
+        if not bubbles:
+            bubbles.append('<div class="empty">Напишите что-нибудь, например «помощь»</div>')
+        return CSS + '<div class="chat">' + "".join(bubbles) + "</div>" + SCRIPT
+
+    def screen_main(self, ui, api, state):
+        self._init()
+        return ui.scaffold(
+            title="Dolphy AI",
+            content=ui.column([
+                ui.webview(html=self.render_chat(), height=380),
+                ui.text_field(self.draft, on_change=self.on_draft, label="Сообщение", single_line=False),
+                ui.button("Отправить", self.send, fill_max_width=True),
+                ui.row([
+                    ui.button("Файлы", lambda: self.navigate("files")),
+                    ui.button("Плагины", lambda: self.navigate("builder")),
+                    ui.button("IR", lambda: self.navigate("ir")),
+                ], spacing=8),
+                ui.button("Очистить чат", self.clear, fill_max_width=True),
+            ], padding=12, spacing=10, fill_max_size=True),
+        )
+
+    def make_open(self, name):
+        return lambda: self.open_file(name)
+
+    def open_file(self, name):
+        self._init()
+        self.last_file = name
+        try:
+            with open(os.path.join(self.base_dir(), name), "r", encoding="utf-8", errors="replace") as f:
+                self.preview = f.read(20000)
+        except Exception as e:
+            self.preview = "Не удалось прочитать: " + str(e)
+        self.refresh()
+
+    def import_last(self):
+        self._init()
+        try:
+            result = self.apply_asset("ir_remote", self.last_file, os.path.splitext(os.path.basename(self.last_file))[0])
+            self.toast("Импортировано" if result.get("ok") else "Не импортировано")
+        except Exception as e:
+            self.toast("Ошибка импорта: " + str(e))
+
+    def save_chat(self):
+        self._init()
+        lines = [("Вы: " if m["role"] == "user" else "Dolphy: ") + m["text"] for m in self.history]
+        with open(os.path.join(self.base_dir(), "chat.txt"), "w", encoding="utf-8") as f:
+            f.write("\n\n".join(lines))
+        self.toast("Чат сохранён в chat.txt")
+        self.open_file("chat.txt")
+
+    def screen_files(self, ui, api, state):
+        self._init()
+        rows = [
+            ui.function_row(name, description=self.size_of(name), icon="description", on_click=self.make_open(name))
+            for name in self.list_files()
+        ]
+        if not rows:
+            rows.append(ui.text("Файлов пока нет. Сохраните чат или создайте плагин.", "bodyMedium"))
+        controls = [ui.button("Сохранить чат в файл", self.save_chat, fill_max_width=True)]
+        if self.last_file.endswith(".ir"):
+            controls.append(ui.button("Импортировать как пульт", self.import_last, fill_max_width=True))
+        return ui.scaffold(
+            title="Файлы",
+            content=ui.column(
+                [ui.segmented_list(rows), ui.log_panel(self.preview or "Выберите файл", max_height=260)] + controls,
+                padding=16, spacing=12, fill_max_size=True,
+            ),
+        )
+
+    def make_setter(self, key):
+        def setter(value):
+            self.builder[key] = str(value)
+        return setter
+
+    def set_kind(self, value):
+        self._init()
+        self.builder["kind"] = str(value)
+        self.refresh()
+
+    def build_plugin(self):
+        self._init()
+        b = self.builder
+        name = b["name"].strip() or "My Plugin"
+        pid = re.sub(r"[^a-z0-9_]", "_", name.lower().replace(" ", "_")).strip("_")[:60] or "custom_plugin"
+        desc = b["desc"].strip() or "Создано ассистентом Dolphy"
+        source = generate_source(pid, name, desc, b["kind"])
+        folder = os.path.join(self.base_dir(), "generated")
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, pid + ".dolphyplugin"), "w", encoding="utf-8") as f:
+            f.write(source)
+        self.build_preview = source
+        self.last_file = os.path.join("generated", pid + ".dolphyplugin")
+        self.toast("Создано: откройте файл в разделе «Файлы» и нажмите Install")
+        self.refresh()
+
+    def screen_builder(self, ui, api, state):
+        self._init()
+        b = self.builder
+        return ui.scaffold(
+            title="Сборщик плагинов",
+            content=ui.column([
+                ui.text_field(b["name"], on_change=self.make_setter("name"), label="Название"),
+                ui.text_field(b["desc"], on_change=self.make_setter("desc"), label="Описание", single_line=False),
+                ui.dropdown(KINDS, b["kind"], on_select=self.set_kind, label="Тип"),
+                ui.button("Создать .dolphyplugin", self.build_plugin, fill_max_width=True),
+                ui.log_panel(self.build_preview or "Здесь появится код плагина", max_height=320),
+            ], padding=16, spacing=12, fill_max_size=True),
+        )
+
+    def send_pattern(self, frequency, pattern):
+        self._init()
+        try:
+            from java import jarray, jint
+            android = self.api.getAndroid()
+            ok = android.irTransmit(int(frequency), jarray(jint)([int(v) for v in pattern]))
+            self.ir_status = "Отправлено: " + str(ok)
+        except Exception as e:
+            self.ir_status = "Ошибка IR: " + str(e)
+        self.refresh()
+
+    def test_pulse(self):
+        self.send_pattern(38000, [9000, 4500, 560, 560, 560, 1690, 560, 560])
+
+    def make_send(self, remote):
+        return lambda: self.send_pattern(remote.get("frequency", 38000), remote.get("pattern", []))
+
+    def screen_ir(self, ui, api, state):
+        self._init()
+        remotes = self.get_setting("ir_remotes", [])
+        rows = [
+            ui.function_row(r.get("name", "Пульт"), description=str(r.get("frequency", 38000)) + " Гц", icon="settings_remote", on_click=self.make_send(r))
+            for r in remotes
+        ]
+        if not rows:
+            rows.append(ui.text("Пульты пока не добавлены. Импортируйте .ir файл в разделе «Файлы».", "bodyMedium"))
+        return ui.scaffold(
+            title="IR-пульт",
+            content=ui.column([
+                ui.button("Тест-импульс 38 кГц", self.test_pulse, fill_max_width=True),
+                ui.segmented_list(rows),
+                ui.log_panel(self.ir_status or "Статус появится здесь", max_height=200),
+            ], padding=16, spacing=12, fill_max_size=True),
+        )
