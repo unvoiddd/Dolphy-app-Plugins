@@ -1,6 +1,6 @@
 {
   "format": "dolphy-plugins-v1",
-  "count": 31,
+  "count": 32,
   "plugins": [
     {
       "id": 16,
@@ -169,6 +169,20 @@
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/fast_wifi_bruteforce/fast_wifi_bruteforce.dolphyplugin",
       "post_url": "https://t.me/c/3966541757/40296",
       "updated_at": "2026-10-31 11:02:36"
+    },
+    {
+      "id": 32,
+      "name": "GPT Agent",
+      "version": "2.0.0",
+      "author": "@Da_koroche",
+      "description": {
+        "ru": "GPT Agent — чат с ChatGPT прямо в Dolphy по вашему API-ключу. Стриминг ответов, персоны, рассуждения. Агент умеет выполнять shell и root-команды, читать и писать файлы, смотреть батарею, Wi-Fi, Bluetooth, буфер обмена. Может создавать плагины Dolphy. Есть команды, история и настройки.",
+        "en": "GPT Agent is a ChatGPT chat inside Dolphy using your own API key. Streaming replies, personas, reasoning. The agent can run shell and root commands, read and write files, check battery, Wi-Fi, Bluetooth, clipboard. It can also build Dolphy plugins. Includes commands, history and settings."
+      },
+      "file": "plugins/gpt_agent/gpt_agent.dolphyplugin",
+      "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/gpt_agent/gpt_agent.dolphyplugin",
+      "post_url": "https://t.me/c/3966541757/45897",
+      "updated_at": "2026-11-14 11:09:53"
     },
     {
       "id": 14,
