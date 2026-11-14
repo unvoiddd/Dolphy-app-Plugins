@@ -1,6 +1,6 @@
 {
   "format": "dolphy-plugins-v1",
-  "count": 32,
+  "count": 33,
   "plugins": [
     {
       "id": 16,
@@ -225,6 +225,20 @@
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/ir_transceiver/ir_transceiver.dolphyplugin",
       "post_url": "https://t.me/c/3966541757/42565",
       "updated_at": "2026-11-04 14:03:57"
+    },
+    {
+      "id": 33,
+      "name": "MineSweeper",
+      "version": "1.1.0",
+      "author": "@maratichka",
+      "description": {
+        "ru": "Сапёр! - простенькая игра, которая теперь будет прямо в вашем приложении Dolphy! Есть несколько видов сложности для проверки ваших умений.",
+        "en": "Minesweeper! - a simple game that’s now available right inside your Dolphy app! There are several difficulty levels to put your skills to the test."
+      },
+      "file": "plugins/minesweeper/minesweeper.dolphyplugin",
+      "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/minesweeper/minesweeper.dolphyplugin",
+      "post_url": "https://t.me/c/3966541757/45993",
+      "updated_at": "2026-11-14 15:11:38"
     },
     {
       "id": 7,
