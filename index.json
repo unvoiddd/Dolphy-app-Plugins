@@ -439,7 +439,7 @@
     {
       "id": 3,
       "name": "WiFi Stresser",
-      "version": "3.0",
+      "version": "4.0.4",
       "author": "Pixel Floppa",
       "description": {
         "ru": "Аудит и стресс-тест Wi-Fi шлюзов: L4/L7 флуд (UDP, TCP, HTTP, Slowloris), обход WAF/Rate-limit и L2-скан. До 2048 потоков, автоопределение IP, живой счётчик пак/сек, пинг цели и журнал ошибок. Работает без Root (нужен только для L2).",
@@ -447,8 +447,8 @@
       },
       "file": "plugins/wifi_stresser/wifi_stresser.dolphyplugin",
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/wifi_stresser/wifi_stresser.dolphyplugin",
-      "post_url": "https://t.me/c/3966541757/28207",
-      "updated_at": "2026-10-01 04:46:31"
+      "post_url": "https://t.me/c/3966541757/46125",
+      "updated_at": "2026-11-15 06:40:12"
     },
     {
       "id": 12,
