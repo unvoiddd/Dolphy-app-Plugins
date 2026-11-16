@@ -1,7 +1,7 @@
 __id__ = "glass_bar"
 __name__ = "Glass Bar"
-__version__ = "3.16.0"
-__author__ = "Claude"
+__version__ = "3.17.0"
+__author__ = "@Da_koroche"
 __description__ = "Liquid-glass панель: реальное преломление, дисперсия, слипание линзы с панелью, свечение"
 __icon__ = "rounded:blur_on"
 __permissions__ = []
@@ -156,6 +156,7 @@ uniform float dispK;   // сила радужной каймы
 uniform float edgeK;   // ширина полосы искажения
 uniform float tintK;   // непрозрачность заливки панели
 uniform float blurK;   // множитель размытия фона
+uniform float3 touch;  // x, y и сила водяного бугорка
 
 float sdBox(float2 p, float2 c, float2 hs) {
     float r = min(hs.x, hs.y);
@@ -251,6 +252,13 @@ half4 main(float2 p) {
     float2 base = p + (bub.xy - p) * mag;
     float2 off = -nU * mU - nL * mL;
 
+    // Локальная водяная выпуклость под пальцем: без изменения геометрии панели.
+    float2 td = p - touch.xy;
+    float tr = max(dpx * 15.0, 1.0);
+    float water = clamp(touch.z, 0.0, 1.0) * exp(-dot(td, td) / (tr * tr));
+    float2 waterDir = td / max(length(td), 1.0);
+    base += waterDir * water * dpx * 5.0;
+
     // дисперсия: R, G, B преломляются по-разному
     float disp = (0.14 + 0.06 * g) * dispK;
     float2 sh = float2(vel * dpx * 2.0 * lensG, 0.0);
@@ -266,7 +274,13 @@ half4 main(float2 p) {
         col = blur3(pr, pg, pb, rad);
     }
 
-    // цвет стекла: линза чистая и сочная, панель дымчатая
+    // Цвет стекла: линза чистая и сочная, панель дымчатая.
+    // Световой валик вокруг касания имитирует водяной бугорок.
+    float waterRim = exp(-abs(length(td) - dpx * 7.0) / (dpx * 2.0)) * water;
+    col += float3(0.16, 0.21, 0.25) * waterRim * 0.42;
+    col += float3(0.42, 0.48, 0.52) * exp(-dot(td - float2(-dpx * 2.0, -dpx * 3.0),
+                                                  td - float2(-dpx * 2.0, -dpx * 3.0)) /
+                                             (dpx * dpx * 18.0)) * water * 0.24;
     float luma = dot(col, float3(0.299, 0.587, 0.114));
     col = mix(float3(luma), col, 1.0 + 0.30 * lensG);
     col = mix(col, float3(0.14, 0.12, 0.16), mix(0.15, 0.04, lensG) * tintK);
@@ -495,6 +509,9 @@ class GlassBar(BasePlugin):
         self.dragging = False
         self.hover = None
         self.down_x = 0.0
+        self.touch_x = 0.0
+        self.touch_y = 0.0
+        self.touch_strength = 0.0
         self.sx = 0.0
         self.sv = 0.0
         self.infl = 0.0
@@ -536,6 +553,12 @@ class GlassBar(BasePlugin):
              "subtitle": "Стекло поверх кнопки в левом верхнем углу", "default": True},
             {"type": "switch", "key": "glass_ttl", "title": "Стеклянный заголовок",
              "subtitle": "Парящая стеклянная капсула над названием экрана", "default": True},
+            {"type": "switch", "key": "glass_style_fallback", "title": "Стиль бара: стекло без шейдера",
+             "subtitle": "Круглая линза с классическим стеклом (как на фото 1). Выключено — AGSL-шейдер (фото 2)",
+             "default": False},
+            {"type": "switch", "key": "glass_anim_jelly", "title": "Желейная анимация (стиль 21.5)",
+             "subtitle": "Линза растягивается и раскачивается. Выключено — водяной бугорок (21.6)",
+             "default": False},
             {"type": "nav", "title": "Настройки панели", "subtitle": "Свечение, преломление, прозрачность, размытие",
              "icon": "tune", "screen": "glass_settings"},
         ]), 30)
@@ -564,7 +587,8 @@ class GlassBar(BasePlugin):
 
     def on_setting_changed(self, payload):
         if self.get_setting("glass_enabled", True):
-            self._post(self._setup, 0)
+            if self.handler is not None:
+                self._post(self._setup, 0)
         else:
             self._teardown_ui()
             self.native_ok = False
@@ -616,11 +640,21 @@ class GlassBar(BasePlugin):
         except Exception:
             self.err = "[" + str(self.stage) + "] error"
         try:
+            self._teardown_ui()
+        except Exception:
+            pass
+        try:
             self.toast("GlassBar: " + self.err[:140])
         except Exception:
             pass
         try:
             self.refresh()
+        except Exception:
+            pass
+        # Планируем повторную попытку сборки через 1.5 с
+        try:
+            if self.alive and self.handler is not None:
+                self._post(self._setup, 1500)
         except Exception:
             pass
 
@@ -709,6 +743,10 @@ class GlassBar(BasePlugin):
             self.w_bar = w
             self.stage = "shader"
             sh = self._try_shader()
+            # Если пользователь выбрал классический стиль — принудительно fallback
+            if sh and bool(self.get_setting("glass_style_fallback", False)):
+                sh = False
+                self.shader = None
             self.stage = "window"
             bar_h = dp(54)
             bar_top = dp(19) if sh else dp(11)
@@ -924,8 +962,13 @@ class GlassBar(BasePlugin):
         self.last_t = now
         if dt <= 0:
             return
-        k = 380.0                              # жёсткость пружины
-        c = 2.0 * 0.72 * math.sqrt(k)          # затухание: почти без качелей
+        jelly_mode = bool(self.get_setting("glass_anim_jelly", False))
+        if jelly_mode:
+            k = 380.0                              # жёсткость пружины (стиль 21.5)
+            c = 2.0 * 0.72 * math.sqrt(k)         # затухание: почти без качелей
+        else:
+            k = 300.0                              # упругое, без желейных перелётов
+            c = 2.0 * 1.0 * math.sqrt(k)          # критическое затухание
         steps = max(1, int(dt / 0.004))
         h = dt / steps
         for _ in range(steps):
@@ -933,14 +976,23 @@ class GlassBar(BasePlugin):
             self.sv += a * h
             self.sx += self.sv * h
         tw = float(self.tw)
-        # вторая, «желейная» пружина: форма догоняет скорость, перелетает и дрожит
-        kq = 420.0
-        cq = 2.0 * 0.30 * math.sqrt(kq)
-        qt = min(0.34, abs(self.sv) / (tw * 7.0)) * self.jelly
-        for _ in range(steps):
-            aq = kq * (qt - self.wq) - cq * self.wv
-            self.wv += aq * h
-            self.wq += self.wv * h
+        if jelly_mode:
+            # Вторая, «желейная» пружина: форма догоняет скорость, перелетает и дрожит
+            kq = 420.0
+            cq = 2.0 * 0.30 * math.sqrt(kq)
+            qt = min(0.34, abs(self.sv) / (tw * 7.0)) * self.jelly
+            for _ in range(steps):
+                aq = kq * (qt - self.wq) - cq * self.wv
+                self.wv += aq * h
+                self.wq += self.wv * h
+        else:
+            # Водяная пластика создаётся шейдером локально под пальцем
+            self.wq = 0.0
+            self.wv = 0.0
+            if not self.pressed and self.touch_strength > 0.0:
+                self.touch_strength *= math.exp(-dt * 5.5)
+                if self.touch_strength < 0.015:
+                    self.touch_strength = 0.0
         speed = abs(self.sv) / (tw * 7.0)
         dist = abs(self.sx - self.bub_target) / tw
         want = min(1.0, speed + dist * 0.7)
@@ -948,9 +1000,18 @@ class GlassBar(BasePlugin):
             want = 1.0  # пока палец на панели, линза остаётся надутой
         self.infl += (want - self.infl) * min(1.0, dt * 14.0)
         q = self.wq
-        self._set_lens(float(self.sx), float(1.0 + 0.04 * self.infl + q),
-                       float(1.0 + 0.03 * self.infl - 0.6 * q))
-        if abs(self.sx - self.bub_target) < 0.4 and abs(self.sv) < 3.0 and self.infl < 0.01 and abs(self.wq) < 0.004 and abs(self.wv) < 0.08 and not self.pressed:
+        if jelly_mode:
+            self._set_lens(float(self.sx), float(1.0 + 0.04 * self.infl + q),
+                           float(1.0 + 0.03 * self.infl - 0.6 * q))
+            stopped = (abs(self.sx - self.bub_target) < 0.4 and abs(self.sv) < 3.0
+                       and self.infl < 0.01 and abs(self.wq) < 0.004
+                       and abs(self.wv) < 0.08 and not self.pressed)
+        else:
+            self._set_lens(float(self.sx), 1.0, 1.0)
+            stopped = (abs(self.sx - self.bub_target) < 0.4 and abs(self.sv) < 3.0
+                       and self.infl < 0.01 and self.touch_strength <= 0.0
+                       and not self.pressed)
+        if stopped:
             self.infl = 0.0
             self.sv = 0.0
             self.wq = 0.0
@@ -1033,6 +1094,7 @@ class GlassBar(BasePlugin):
         sh.setFloatUniform("blurK", float(self.blur_amt / 100.0))
         sh.setFloatUniform("dispK", float(self.disp_amt / 100.0))
         sh.setFloatUniform("edgeK", float(max(self.edge_amt, 10.0) / 100.0))
+        sh.setFloatUniform("touch", float(self.touch_x), float(self.touch_y), 0.0)
         self.win_w, self.win_h, self.bar_top, self.bar_h = win_w, win_h, bar_top, bar_h
         self.cur_x = self._tab_x(self._sel_index())
         self._render_icons(self._sel_index())
@@ -1196,12 +1258,24 @@ class GlassBar(BasePlugin):
             g = max(0.0, min(1.0, self.infl * 1.3))
             if self.preview:
                 g = 1.0  # в примере линза всегда стеклянная
-            rest_w = self.tw - dp(6)
-            rest_h = self.bub_h - dp(22)
-            hw = (rest_w + (self.bub_w - rest_w) * g) * self.cur_sx / 2.0
-            hh = (rest_h + (self.bub_h - rest_h) * g) * self.cur_sy / 2.0
+            jelly_mode = bool(self.get_setting("glass_anim_jelly", False))
+            if jelly_mode:
+                rest_w = self.tw - dp(6)
+                rest_h = self.bub_h - dp(22)
+                hw = (rest_w + (self.bub_w - rest_w) * g) * self.cur_sx / 2.0
+                hh = (rest_h + (self.bub_h - rest_h) * g) * self.cur_sy / 2.0
+            else:
+                # Сохраняем исходный размер линзы в спокойном состоянии;
+                # при касании и движении её ширина и высота не меняются.
+                hw = (self.tw - dp(6)) / 2.0
+                hh = (self.bub_h - dp(22)) / 2.0
             v = max(-1.0, min(1.0, self.sv / (self.tw * 8.0))) if self.tw else 0.0
-            key = (round(cx, 1), round(cy, 1), round(hw, 1), round(hh, 1), round(g, 3), round(v, 3))
+            touch_x_ = self.touch_x if not jelly_mode else 0.0
+            touch_y_ = self.touch_y if not jelly_mode else 0.0
+            touch_s_ = self.touch_strength if not jelly_mode else 0.0
+            key = (round(cx, 1), round(cy, 1), round(hw, 1), round(hh, 1),
+                   round(g, 3), round(v, 3), round(touch_x_, 1),
+                   round(touch_y_, 1), round(touch_s_, 3))
             if key == self.last_push and not force:
                 return  # ничего не изменилось — не пересоздаём эффект
             self.last_push = key
@@ -1209,7 +1283,8 @@ class GlassBar(BasePlugin):
             sh.setFloatUniform("infl", float(g))
             sh.setFloatUniform("merge", float(dp(8) + self.infl * dp(5)))
             sh.setFloatUniform("vel", float(v))
-            sh.setFloatUniform("lean", float(v * 0.22 * self.jelly))
+            sh.setFloatUniform("lean", float(v * 0.22 * self.jelly) if jelly_mode else float(v * 0.08))
+            sh.setFloatUniform("touch", float(touch_x_), float(touch_y_), float(touch_s_))
             iv.setRenderEffect(self.RE.createRuntimeShaderEffect(sh, "content"))
         except Exception as e:
             self.shader = None
@@ -1248,7 +1323,11 @@ class GlassBar(BasePlugin):
                 return False
             act = int(e.getActionMasked())
             x = float(e.getX())
+            y = float(e.getY())
             if act == 0:
+                self.touch_x = float(self.pad + x)
+                self.touch_y = float(self.bar_top + y)
+                self.touch_strength = 1.0
                 self.pressed = True
                 self.dragging = False
                 self.down_x = x
@@ -1257,6 +1336,10 @@ class GlassBar(BasePlugin):
                 self._ensure_spring()
                 return True
             if act == 2:
+                self.touch_x = float(self.pad + x)
+                self.touch_y = float(self.bar_top + y)
+                self.touch_strength = 1.0
+                self._push()
                 if not self.dragging and abs(x - self.down_x) > self.dp(6):
                     self.dragging = True
                 if self.dragging:
@@ -1271,10 +1354,14 @@ class GlassBar(BasePlugin):
                         self._fill_tabs(idx, move=False)
                 return True
             if act == 1 or act == 3:
+                self.touch_x = float(self.pad + x)
+                self.touch_y = float(self.bar_top + y)
                 self.pressed = False
                 was_drag = self.dragging
                 self.dragging = False
                 self.hover = None
+                if self.touch_strength > 0.0:
+                    self._ensure_spring()
                 if act == 1:
                     idx = self._idx_at(x)
                     self._fill_tabs(idx)
