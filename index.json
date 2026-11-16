@@ -1,6 +1,6 @@
 {
   "format": "dolphy-plugins-v1",
-  "count": 36,
+  "count": 37,
   "plugins": [
     {
       "id": 16,
@@ -15,6 +15,20 @@
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/anti_device_detector/anti_device_detector.dolphyplugin",
       "post_url": "https://t.me/c/3966541757/27751",
       "updated_at": "2026-09-29 12:00:17"
+    },
+    {
+      "id": 37,
+      "name": "ASCII Text Generator",
+      "version": "1.1.0",
+      "author": "@maratichka",
+      "description": {
+        "ru": "ASCII Text Generator - Позволяет вам в долю секунды делать самые разные ASCII текста! Самые популярные и самые легендарные ASCII шрифты уже вшиты в плагин. Наслаждайтесь!",
+        "en": "ASCII Text Generator – Create a wide variety of ASCII text in a split second! The most popular and iconic ASCII fonts are already built into the plugin. Enjoy!"
+      },
+      "file": "plugins/ascii_text_generator/ascii_text_generator.dolphyplugin",
+      "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/ascii_text_generator/ascii_text_generator.dolphyplugin",
+      "post_url": "https://t.me/c/3966541757/46500",
+      "updated_at": "2026-11-16 19:39:05"
     },
     {
       "id": 8,
