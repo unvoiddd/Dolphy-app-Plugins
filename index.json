@@ -1,6 +1,6 @@
 {
   "format": "dolphy-plugins-v1",
-  "count": 35,
+  "count": 36,
   "plugins": [
     {
       "id": 16,
@@ -183,6 +183,20 @@
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/fast_wifi_bruteforce/fast_wifi_bruteforce.dolphyplugin",
       "post_url": "https://t.me/c/3966541757/40296",
       "updated_at": "2026-10-31 11:02:36"
+    },
+    {
+      "id": 36,
+      "name": "Glass Bar",
+      "version": "3.16.0",
+      "author": "@Da_koroche",
+      "description": {
+        "ru": "Glass Bar — нижняя панель навигации в стиле Liquid Glass с реалистичным преломлением, размытием, свечением и радужной дисперсией. Плавная анимация и гибкая настройка эффектов. Не работает? Перезапустите или переключите плагин.",
+        "en": "Glass Bar — a Liquid Glass navigation bar with realistic refraction, blur, glow and rainbow dispersion. Smooth animations and customizable effects. Not working? Restart or toggle the plugin."
+      },
+      "file": "plugins/glass_bar/glass_bar.dolphyplugin",
+      "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/glass_bar/glass_bar.dolphyplugin",
+      "post_url": "https://t.me/c/3966541757/46317",
+      "updated_at": "2026-11-16 06:16:18"
     },
     {
       "id": 32,
