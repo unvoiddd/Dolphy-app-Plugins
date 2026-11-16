@@ -1,0 +1,1716 @@
+__id__ = "glass_bar"
+__name__ = "Glass Bar"
+__version__ = "3.16.0"
+__author__ = "Claude"
+__description__ = "Liquid-glass панель: реальное преломление, дисперсия, слипание линзы с панелью, свечение"
+__icon__ = "rounded:blur_on"
+__permissions__ = []
+
+import json
+import math
+import re
+import time
+import traceback
+
+# Liquid-glass панель
+# -------------------
+# * В покое линза лежит внутри панели под выбранной вкладкой (как на твоём скриншоте).
+# * При переключении она «надувается» (становится выше и шире панели), скользит с мягким
+#   перелётом и сдувается обратно уже на новой вкладке.
+# * Размытие: целевой интервал обновления около 60 кадров/с (PixelCopy);
+#   многократно уменьшается с фильтрацией и растягивается обратно.
+# При любой ошибке показывается тост "GlassBar: ..." и возвращается обычная панель.
+
+BT_PATH = ("M17.71,7.71L12,2h-1v7.59L6.41,5 5,6.41 10.59,12 5,17.59 6.41,19 11,14.41V22h1l5.71,-5.71 "
+           "-4.3,-4.29 4.3,-4.29zM13,5.83l1.88,1.88L13,9.59V5.83zM14.88,16.29L13,18.17v-3.76l1.88,1.88z")
+EXT_PATH = ("M20.5,11H19V7c0,-1.1 -0.9,-2 -2,-2h-4V3.5C13,2.12 11.88,1 10.5,1S8,2.12 8,3.5V5H4c-1.1,0 "
+            "-1.99,0.9 -1.99,2v3.8H3.5c1.49,0 2.7,1.21 2.7,2.7s-1.21,2.7 -2.7,2.7H2V20c0,1.1 0.9,2 2,2h3.8"
+            "v-1.5c0,-1.49 1.21,-2.7 2.7,-2.7 1.49,0 2.7,1.21 2.7,2.7V22H17c1.1,0 2,-0.9 2,-2v-4h1.5c1.38,0 "
+            "2.5,-1.12 2.5,-2.5S21.88,11 20.5,11z")
+SET_PATH = ("M19.14,12.94c0.04,-0.3 0.06,-0.61 0.06,-0.94c0,-0.32 -0.02,-0.64 -0.07,-0.94l2.03,-1.58"
+            "c0.18,-0.14 0.23,-0.41 0.12,-0.61l-1.92,-3.32c-0.12,-0.22 -0.37,-0.29 -0.59,-0.22l-2.39,0.96"
+            "c-0.5,-0.38 -1.03,-0.7 -1.62,-0.94L14.4,2.81c-0.04,-0.24 -0.24,-0.41 -0.48,-0.41h-3.84"
+            "c-0.24,0 -0.43,0.17 -0.47,0.41L9.25,5.35C8.66,5.59 8.12,5.92 7.63,6.29L5.24,5.33"
+            "c-0.22,-0.08 -0.47,0 -0.59,0.22L2.74,8.87C2.62,9.08 2.66,9.34 2.86,9.48l2.03,1.58"
+            "C4.84,11.36 4.8,11.69 4.8,12s0.02,0.64 0.07,0.94l-2.03,1.58c-0.18,0.14 -0.23,0.41 -0.12,0.61"
+            "l1.92,3.32c0.12,0.22 0.37,0.29 0.59,0.22l2.39,-0.96c0.5,0.38 1.03,0.7 1.62,0.94l0.36,2.54"
+            "c0.05,0.24 0.24,0.41 0.48,0.41h3.84c0.24,0 0.44,-0.17 0.47,-0.41l0.36,-2.54"
+            "c0.59,-0.24 1.13,-0.56 1.62,-0.94l2.39,0.96c0.22,0.08 0.47,0 0.59,-0.22l1.92,-3.32"
+            "c0.12,-0.22 0.07,-0.47 -0.12,-0.61L19.14,12.94zM12,15.6c-1.98,0 -3.6,-1.62 -3.6,-3.6"
+            "s1.62,-3.6 3.6,-3.6s3.6,1.62 3.6,3.6S13.98,15.6 12,15.6z")
+
+# (маршрут, иконка, подпись, префиксы маршрутов, при которых вкладка активна)
+TABS = [
+    ("bluetooth", BT_PATH, "Bluetooth", ("bluetooth", "ble_section", "bt_")),
+    ("other", EXT_PATH, "Функции", ("other", "ir_", "nfc_", "lan_", "qr_", "tv_", "universal",
+                                    "flipper", "user_ir", "smarttv", "wifi_print", "audio_scanner",
+                                    "nrf_scanner", "network_diagnostic")),
+    ("settings", SET_PATH, "Настройки", ("settings", "accent_color", "theme_mode")),
+    ("plugin_manager", EXT_PATH, "Плагины", ("plugin",)),
+]
+
+# На каких экранах панель видна
+VISIBLE_ROUTES = ("", "bluetooth", "other", "settings", "plugin_manager")
+
+TICK_MS = 16
+ANIM_MS = 520
+BACK_HIDE = ("", "bluetooth", "other", "settings", "main_scaffold")
+AGSL_TTL = """
+uniform shader content;
+uniform float2 res;
+uniform float dpx;
+float sd(float2 p, float2 c, float2 hs) {
+    float r = hs.y;
+    float2 q = abs(p - c) - hs + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+half4 main(float2 p) {
+    float2 c = res * 0.5;
+    float2 hs = res * 0.5 - dpx * 5.0;
+    float d = sd(p, c, hs);
+    if (d > dpx * 8.0) return half4(0.0);
+    float a = clamp(0.5 - d, 0.0, 1.0);
+    float2 g = float2(sd(p + float2(1.0, 0.0), c, hs) - sd(p - float2(1.0, 0.0), c, hs),
+                      sd(p + float2(0.0, 1.0), c, hs) - sd(p - float2(0.0, 1.0), c, hs));
+    float gl0 = length(g);
+    float2 n = gl0 > 0.0001 ? g / gl0 : float2(0.0, -1.0);
+    float dep = max(-d, 0.0);
+    float m = hs.y * 0.35 * pow(1.0 - clamp(dep / (hs.y * 0.45), 0.0, 1.0), 2.0);
+    float2 off = -n * m;
+    float2 lo = float2(0.5);
+    float2 hi = res - 0.5;
+    float3 col = float3(content.eval(clamp(p + off * 0.88, lo, hi)).r,
+                        content.eval(clamp(p + off, lo, hi)).g,
+                        content.eval(clamp(p + off * 1.12, lo, hi)).b);
+    col = mix(col, float3(0.14, 0.12, 0.16), 0.10) + 0.02;
+    float2 L = normalize(float2(-0.55, -0.85));
+    float sp = pow(max(dot(n, L), 0.0), 2.0) + 0.55 * pow(max(dot(n, -L), 0.0), 2.0) + 0.12;
+    col += exp(-dep / (dpx * 1.2)) * sp * 0.50;
+    col = clamp(col, 0.0, 1.0);
+    float gl = exp(-max(d, 0.0) / (dpx * 3.0)) * 0.02;
+    float3 gc = float3(0.95, 0.8, 0.98);
+    return half4(float4(col * a + gc * gl * (1.0 - a), a + gl * (1.0 - a)));
+}
+"""
+AGSL_BTN = """
+uniform shader content;
+uniform float2 res;
+uniform float dpx;
+float sdSeg(float2 p, float2 a, float2 b) {
+    float2 pa = p - a;
+    float2 ba = b - a;
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+half4 main(float2 p) {
+    float2 c = res * 0.5;
+    float2 q = p - c;
+    float R = min(res.x, res.y) * 0.5 - dpx * 5.0;
+    float l = length(q);
+    float d = l - R;
+    if (d > dpx * 8.0) return half4(0.0);
+    float a = clamp(0.5 - d, 0.0, 1.0);
+    float2 n = l > 0.001 ? q / l : float2(0.0, -1.0);
+    float dep = max(-d, 0.0);
+    float m = R * 0.28 * pow(1.0 - clamp(dep / (R * 0.30), 0.0, 1.0), 2.0);
+    float2 off = -n * m;
+    float2 lo = float2(0.5);
+    float2 hi = res - 0.5;
+    float3 col = float3(content.eval(clamp(p + off * 0.88, lo, hi)).r,
+                        content.eval(clamp(p + off, lo, hi)).g,
+                        content.eval(clamp(p + off * 1.12, lo, hi)).b);
+    // центр закрываем непрозрачной заливкой: старая серая стрелка не видна, у кромки остаётся преломление
+    float cover = smoothstep(dpx * 3.0, dpx * 9.0, dep);
+    float3 fill = float3(0.17, 0.15, 0.20) + 0.04 * (1.0 - (q.y + R) / (2.0 * R));
+    col = mix(mix(col, float3(0.14, 0.12, 0.16), 0.12) + 0.03, fill, cover);
+    // своя стрелка «назад»
+    float2 A = float2(-0.36 * R, 0.0);
+    float da = min(sdSeg(q, A, float2(0.36 * R, 0.0)),
+                   min(sdSeg(q, A, float2(-0.08 * R, -0.30 * R)), sdSeg(q, A, float2(-0.08 * R, 0.30 * R))));
+    float aw = dpx * 1.25;
+    col = mix(col, float3(0.96, 0.93, 0.98), 1.0 - smoothstep(aw - 0.7, aw + 0.7, da));
+    float2 L = normalize(float2(-0.55, -0.85));
+    float sp = pow(max(dot(n, L), 0.0), 2.0) + 0.55 * pow(max(dot(n, -L), 0.0), 2.0) + 0.12;
+    col += exp(-dep / (dpx * 1.2)) * sp * 0.55;
+    col = clamp(col, 0.0, 1.0);
+    float gl = exp(-max(d, 0.0) / (dpx * 3.0)) * 0.02;
+    float3 gc = float3(0.95, 0.8, 0.98);
+    return half4(float4(col * a + gc * gl * (1.0 - a), a + gl * (1.0 - a)));
+}
+"""
+
+AGSL = """
+uniform shader content;
+uniform shader icons;
+uniform float2 res;
+uniform float4 bar;    // cx, cy, halfW, halfH (px)
+uniform float4 bub;    // линза: cx, cy, halfW, halfH (px)
+uniform float infl;
+uniform float merge;   // радиус слипания (px)
+uniform float vel;
+uniform float dpx;
+uniform float glowK;
+uniform float refr;
+uniform float lean;    // наклон линзы при движении
+uniform float dispK;   // сила радужной каймы
+uniform float edgeK;   // ширина полосы искажения
+uniform float tintK;   // непрозрачность заливки панели
+uniform float blurK;   // множитель размытия фона
+
+float sdBox(float2 p, float2 c, float2 hs) {
+    float r = min(hs.x, hs.y);
+    float2 q = abs(p - c) - hs + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+float smin2(float a, float b, float k) {
+    float h = max(k - abs(a - b), 0.0) / k;
+    return min(a, b) - h * h * k * 0.25;
+}
+float dB(float2 p) { return sdBox(p, bar.xy, bar.zw); }
+float dL(float2 p) { return sdBox(float2(p.x - lean * (p.y - bub.y), p.y), bub.xy, bub.zw); }
+float dU(float2 p) { return min(dB(p), dL(p)); }
+
+float2 gradU(float2 p) {
+    float e = 1.0;
+    float2 g = float2(dB(p + float2(e, 0.0)) - dB(p - float2(e, 0.0)),
+                      dB(p + float2(0.0, e)) - dB(p - float2(0.0, e)));
+    float l = length(g);
+    return l > 0.0001 ? g / l : float2(0.0, -1.0);
+}
+float2 gradL(float2 p) {
+    float e = 1.0;
+    float2 g = float2(dL(p + float2(e, 0.0)) - dL(p - float2(e, 0.0)),
+                      dL(p + float2(0.0, e)) - dL(p - float2(0.0, e)));
+    float l = length(g);
+    return l > 0.0001 ? g / l : float2(0.0, -1.0);
+}
+
+float2 cp(float2 q) { return clamp(q, float2(0.5), res - 0.5); }
+
+float3 tap3(float2 qr, float2 qg, float2 qb, float2 o) {
+    return float3(content.eval(cp(qr + o)).r, content.eval(cp(qg + o)).g, content.eval(cp(qb + o)).b);
+}
+
+float3 blur3(float2 qr, float2 qg, float2 qb, float rad) {
+    float3 s = tap3(qr, qg, qb, float2(0.0));
+    for (int i = 0; i < 6; i++) {
+        float a = 1.0472 * float(i) + 0.5;
+        s += tap3(qr, qg, qb, float2(cos(a), sin(a)) * rad);
+        s += tap3(qr, qg, qb, float2(cos(a + 0.5236), sin(a + 0.5236)) * rad * 0.5);
+    }
+    return s / 13.0;
+}
+
+// размытие, когда каналы не разведены (почти вся панель): 19 отсчётов, три кольца
+float3 blurMono(float2 q, float rad) {
+    float3 s = content.eval(cp(q)).rgb;
+    for (int i = 0; i < 6; i++) {
+        float a = 1.0472 * float(i) + 0.5;
+        s += content.eval(cp(q + float2(cos(a), sin(a)) * rad)).rgb;
+        s += content.eval(cp(q + float2(cos(a + 0.5236), sin(a + 0.5236)) * rad * 0.66)).rgb;
+        s += content.eval(cp(q + float2(cos(a + 0.2618), sin(a + 0.2618)) * rad * 0.33)).rgb;
+    }
+    return s / 19.0;
+}
+
+float spec(float2 n, float2 L) {
+    return pow(max(dot(n, L), 0.0), 2.0) + 0.55 * pow(max(dot(n, -L), 0.0), 2.0) + 0.12;
+}
+
+half4 main(float2 p) {
+    float du = dU(p);
+    float dl = dL(p);
+    if (du > dpx * 14.0) return half4(0.0);
+
+    float3 glowCol = float3(0.95, 0.80, 0.98);
+    float gl = 0.0;
+    if (glowK > 0.0) {
+        gl = exp(-max(du, 0.0) / (dpx * 4.0)) * 0.014;
+        gl += exp(-max(dl, 0.0) / (dpx * 5.0)) * (0.012 + 0.03 * infl) * infl;
+        gl *= glowK;
+    }
+    float a = clamp(0.5 - du, 0.0, 1.0);
+    if (a <= 0.0) return half4(float4(glowCol * gl, gl));
+
+    float2 nU = gradU(p);
+    float2 nL = gradL(p);
+    float db = dB(p);
+    float depU = max(-db, 0.0);
+    float depL = max(-dl, 0.0);
+    float lensIn = 1.0 - smoothstep(-1.0, 1.0, dl);
+    float g = clamp(infl, 0.0, 1.0);
+    float lensG = lensIn * g;
+
+    // преломление: панель (слабое) и линза (сильное увеличение + складка у кромки)
+    float tU = clamp(depU / (bar.w * 0.28 * edgeK), 0.0, 1.0);
+    float mU = bar.w * 0.26 * refr * pow(1.0 - tU, 2.0) * (1.0 - lensG);
+    float tL = clamp(depL / (bub.w * 0.32 * edgeK), 0.0, 1.0);
+    float mL = bub.w * (0.34 + 0.04 * infl) * refr * pow(1.0 - tL, 2.0) * lensG;
+    float mag = 0.03 * min(refr, 1.3) * lensG;
+
+    float2 base = p + (bub.xy - p) * mag;
+    float2 off = -nU * mU - nL * mL;
+
+    // дисперсия: R, G, B преломляются по-разному
+    float disp = (0.14 + 0.06 * g) * dispK;
+    float2 sh = float2(vel * dpx * 2.0 * lensG, 0.0);
+    float2 pr = base + off * (1.0 - disp) - sh;
+    float2 pg = base + off;
+    float2 pb = base + off * (1.0 + disp) + sh;
+
+    float rad = mix(dpx * 3.4, dpx * 1.2, lensG) * blurK;
+    float3 col;
+    if (distance(pr, pb) < 0.75) {
+        col = blurMono(pg, rad);
+    } else {
+        col = blur3(pr, pg, pb, rad);
+    }
+
+    // цвет стекла: линза чистая и сочная, панель дымчатая
+    float luma = dot(col, float3(0.299, 0.587, 0.114));
+    col = mix(float3(luma), col, 1.0 + 0.30 * lensG);
+    col = mix(col, float3(0.14, 0.12, 0.16), mix(0.15, 0.04, lensG) * tintK);
+    // в покое линза — плоская светлая таблетка без преломления
+    col = mix(col, float3(0.28, 0.26, 0.31), 0.40 * lensIn * (1.0 - g));
+    col += 0.015 + 0.03 * lensG;
+
+    // иконки и подписи проходят через то же преломление (и дисперсию по каналам)
+    float4 ir = float4(icons.eval(cp(pr)));
+    float4 ig = float4(icons.eval(cp(pg)));
+    float4 ib = float4(icons.eval(cp(pb)));
+    col = float3(col.r * (1.0 - ir.a) + ir.r,
+                 col.g * (1.0 - ig.a) + ig.g,
+                 col.b * (1.0 - ib.a) + ib.b);
+
+    float yN = clamp((p.y - (bar.y - bar.w)) / (2.0 * bar.w), 0.0, 1.0);
+    col += 0.03 * (1.0 - yN) * (1.0 - lensG);
+
+    float2 L = normalize(float2(-0.55 + vel * 0.4, -0.85));
+
+    // кромка панели
+    col += exp(-depU / (dpx * 1.1)) * spec(nU, L) * 0.35 * (1.0 - lensG);
+    // край панели просвечивает сквозь линзу
+    col += 0.20 * exp(-abs(db) / (dpx * 0.9)) * lensG * step(db, 0.0);
+
+    // кромка линзы: радужная обводка (R/B со сдвигом) + свет, «слипающийся» у края
+    float wR = dpx * 1.3;
+    float s1 = spec(nL, L);
+    float3 rim = float3(exp(-abs(dl + dpx * 0.8) / wR),
+                        exp(-abs(dl) / wR),
+                        exp(-abs(dl - dpx * 0.8) / wR));
+    col += rim * s1 * 0.70 * g;
+    float band = exp(-depL / (dpx * 5.5)) * lensG;
+    col += band * (pow(max(dot(nL, -L), 0.0), 1.5) * 0.16 + pow(max(dot(nL, L), 0.0), 2.0) * 0.12);
+    // тёмная канавка сразу за яркой кромкой: толстое стекло
+    col *= 1.0 - 0.16 * exp(-abs(depL - dpx * 3.4) / (dpx * 1.7)) * lensG;
+
+    if (glowK > 0.0) {
+        float cg = exp(-depL / (dpx * 3.0)) * lensG * (0.012 + 0.03 * g);
+        col += glowCol * cg * glowK;
+    }
+
+    col = clamp(col, 0.0, 1.0);
+    float3 outRgb = col * a + glowCol * gl * (1.0 - a);
+    float outA = a + gl * (1.0 - a);
+    return half4(float4(outRgb, outA));
+}
+"""
+
+CMDS = set("MmLlHhVvCcSsZz")
+NUM_RE = re.compile(r"[MmLlHhVvCcSsZz]|-?(?:\d+\.?\d*|\.\d+)(?:[eE]-?\d+)?")
+
+
+def argb(v):
+    return v - 0x100000000 if v >= 0x80000000 else v
+
+
+def make_path(d):
+    from java import jclass
+    p = jclass("android.graphics.Path")()
+    toks = NUM_RE.findall(d)
+    n = len(toks)
+    i = 0
+    cmd = ""
+    x = y = sx = sy = 0.0
+    px = py = None
+    while i < n:
+        t = toks[i]
+        if t in CMDS:
+            cmd = t
+            i += 1
+            if cmd in "Zz":
+                p.close()
+                x, y = sx, sy
+                px = py = None
+            continue
+        rel = cmd.islower()
+        c = cmd.upper()
+        if c == "M":
+            a, b = float(toks[i]), float(toks[i + 1])
+            i += 2
+            x, y = (x + a, y + b) if rel else (a, b)
+            p.moveTo(x, y)
+            sx, sy = x, y
+            cmd = "l" if rel else "L"
+            px = py = None
+        elif c == "L":
+            a, b = float(toks[i]), float(toks[i + 1])
+            i += 2
+            x, y = (x + a, y + b) if rel else (a, b)
+            p.lineTo(x, y)
+            px = py = None
+        elif c == "H":
+            a = float(toks[i])
+            i += 1
+            x = x + a if rel else a
+            p.lineTo(x, y)
+            px = py = None
+        elif c == "V":
+            a = float(toks[i])
+            i += 1
+            y = y + a if rel else a
+            p.lineTo(x, y)
+            px = py = None
+        elif c == "C":
+            v = [float(toks[i + k]) for k in range(6)]
+            i += 6
+            if rel:
+                v = [v[0] + x, v[1] + y, v[2] + x, v[3] + y, v[4] + x, v[5] + y]
+            p.cubicTo(v[0], v[1], v[2], v[3], v[4], v[5])
+            px, py = v[2], v[3]
+            x, y = v[4], v[5]
+        elif c == "S":
+            v = [float(toks[i + k]) for k in range(4)]
+            i += 4
+            if rel:
+                v = [v[0] + x, v[1] + y, v[2] + x, v[3] + y]
+            if px is None:
+                c1x, c1y = x, y
+            else:
+                c1x, c1y = 2 * x - px, 2 * y - py
+            p.cubicTo(c1x, c1y, v[0], v[1], v[2], v[3])
+            px, py = v[0], v[1]
+            x, y = v[2], v[3]
+        else:
+            i += 1
+    return p
+
+
+def make_proxies():
+    from java import dynamic_proxy, jclass
+    Runnable = jclass("java.lang.Runnable")
+    ClickL = jclass("android.view.View$OnClickListener")
+    PcL = jclass("android.view.PixelCopy$OnPixelCopyFinishedListener")
+    UpdL = jclass("android.animation.ValueAnimator$AnimatorUpdateListener")
+
+    class Run(dynamic_proxy(Runnable)):
+        def __init__(self, fn):
+            super().__init__()
+            self.fn = fn
+
+        def run(self):
+            self.fn()
+
+    class Clk(dynamic_proxy(ClickL)):
+        def __init__(self, fn):
+            super().__init__()
+            self.fn = fn
+
+        def onClick(self, v):
+            self.fn()
+
+    class Pcl(dynamic_proxy(PcL)):
+        def __init__(self, fn):
+            super().__init__()
+            self.fn = fn
+
+        def onPixelCopyFinished(self, result):
+            self.fn(int(result))
+
+    class Upd(dynamic_proxy(UpdL)):
+        def __init__(self, fn):
+            super().__init__()
+            self.fn = fn
+
+        def onAnimationUpdate(self, anim):
+            self.fn(float(anim.getAnimatedFraction()))
+
+    TouchL = jclass("android.view.View$OnTouchListener")
+
+    class Tch(dynamic_proxy(TouchL)):
+        def __init__(self, fn):
+            super().__init__()
+            self.fn = fn
+
+        def onTouch(self, v, event):
+            return bool(self.fn(event))
+
+    FrameL = jclass("android.view.Choreographer$FrameCallback")
+
+    class Frm(dynamic_proxy(FrameL)):
+        def __init__(self, fn):
+            super().__init__()
+            self.fn = fn
+
+        def doFrame(self, t):
+            self.fn()
+
+    return Run, Clk, Pcl, Upd, Tch, Frm
+
+
+class GlassBar(BasePlugin):
+    # ------------------------------------------------------------------ жизненный цикл
+    def on_plugin_load(self):
+        self.route = ""
+        self.native_ok = False
+        self.alive = True
+        self.shown = False
+        self.retries = 0
+        self.adjusted = 0
+        self.dlg = None
+        self.root = None
+        self.row = None
+        self.bub = None
+        self.anim = None
+        self.bub_target = None
+        self.targets = {}
+        self.busy = {}
+        self.pending = {}
+        self.rendered = {}
+        self.pcls = {}
+        self.bufs = None
+        self.cap_rect = None
+        self.cap_rect_t = 0.0
+        self.last_cap = 0.0
+        self.cur_idx = -1
+        self.pend_idx = 0
+        self.ov_route = ""
+        self.last_push = None
+        self.scale_amt = 50.0
+        self.fps_amt = 30.0
+        self.ovs = {}
+        self.handler = None
+        self.act = None
+        self.pressed = False
+        self.dragging = False
+        self.hover = None
+        self.down_x = 0.0
+        self.sx = 0.0
+        self.sv = 0.0
+        self.infl = 0.0
+        self.last_t = 0.0
+        self.w_bar = 0
+        self.sh = False
+        self.shader = None
+        self.RE = None
+        self.glass_iv = None
+        self.cur_x = 0.0
+        self.cur_sx = 1.0
+        self.cur_sy = 1.0
+        self.bub_top = 0
+        self.bub_h = 0
+        self.glow_amt = 30.0
+        self.refr_amt = 100.0
+        self.tint_amt = 100.0
+        self.blur_amt = 100.0
+        self.jelly_amt = 100.0
+        self.disp_amt = 100.0
+        self.edge_amt = 100.0
+        self.sh_failed = False
+        self.icons_bmp = None
+        self.preview = False
+        self.wq = 0.0
+        self.wv = 0.0
+        self.jelly = 1.0
+        self.err = ""
+        self.stage = "init"
+        self.t0 = time.time()
+        self.err_shown = False
+        self.hook_surface("bottom_bar", "bar", "replace", 100)
+        self.api.registerSettings("Glass Bar", json.dumps([
+            {"type": "header", "title": "Стеклянная панель"},
+            {"type": "switch", "key": "glass_enabled", "title": "Эффект стекла",
+             "subtitle": "Выключите, чтобы вернуть обычную плавающую панель",
+             "default": True},
+            {"type": "switch", "key": "glass_btn", "title": "Стеклянная кнопка «назад»",
+             "subtitle": "Стекло поверх кнопки в левом верхнем углу", "default": True},
+            {"type": "switch", "key": "glass_ttl", "title": "Стеклянный заголовок",
+             "subtitle": "Парящая стеклянная капсула над названием экрана", "default": True},
+            {"type": "nav", "title": "Настройки панели", "subtitle": "Свечение, преломление, прозрачность, размытие",
+             "icon": "tune", "screen": "glass_settings"},
+        ]), 30)
+        self._start()
+
+    def on_plugin_unload(self):
+        self._stop()
+
+    def on_plugin_disable(self):
+        self._stop()
+
+    def on_activity_create(self, activity):
+        if self.alive and self.handler is not None:
+            self._post(self._setup, 300)
+
+    def on_activity_destroy(self, activity):
+        self._teardown_ui()
+
+    def on_navigation(self, route):
+        self.route = str(route)
+        if not self.route.lower().startswith("plugin/"):
+            self.preview = False
+        if self.handler is not None:
+            self._post(self._sync, 0)
+        self.refresh()
+
+    def on_setting_changed(self, payload):
+        if self.get_setting("glass_enabled", True):
+            self._post(self._setup, 0)
+        else:
+            self._teardown_ui()
+            self.native_ok = False
+        self.refresh()
+
+    # ------------------------------------------------------------------ служебное
+    def _start(self):
+        try:
+            from java import jclass
+            Handler = jclass("android.os.Handler")
+            Looper = jclass("android.os.Looper")
+            self.handler = Handler(Looper.getMainLooper())
+            self.Run, self.Clk, self.Pcl, self.Upd, self.Tch, self.Frm = make_proxies()
+            self.choreo = jclass("android.view.Choreographer")
+            self.frame_cb = self.Frm(self._tick)
+            self.tick_run = self.Run(self._tick)
+            for key in ("bar", "bub", "glass", "btn", "ttl"):
+                self.pcls[key] = self.Pcl(self._make_copy_cb(key))
+            self._post(self._setup, 200)
+            self.handler.postDelayed(self.tick_run, 400)
+        except Exception as e:
+            self._fail(e)
+
+    def _stop(self):
+        self.alive = False
+        self._teardown_ui()
+
+    def _post(self, fn, delay=0):
+        try:
+            r = self.Run(fn)
+            if delay:
+                self.handler.postDelayed(r, delay)
+            else:
+                self.handler.post(r)
+        except Exception as e:
+            self._fail(e)
+
+    def _fail(self, e):
+        self.native_ok = False
+        try:
+            line = ""
+            try:
+                fr = traceback.extract_tb(e.__traceback__)
+                if fr:
+                    line = " @L" + str(fr[-1].lineno)
+            except Exception:
+                pass
+            self.err = "[" + str(self.stage) + "] " + type(e).__name__ + line + ": " + str(e)[:200]
+        except Exception:
+            self.err = "[" + str(self.stage) + "] error"
+        try:
+            self.toast("GlassBar: " + self.err[:140])
+        except Exception:
+            pass
+        try:
+            self.refresh()
+        except Exception:
+            pass
+
+    def _sel_index(self):
+        r = self.route.lower()
+        if r.startswith("plugin"):
+            return 3
+        for i, tab in enumerate(TABS):
+            if i == 3:
+                continue
+            if any(r.startswith(p) for p in tab[3]):
+                return i
+        return 0
+
+    def _route_visible(self):
+        return self.route.lower() in VISIBLE_ROUTES or self.preview
+
+    # ------------------------------------------------------------------ сборка окна
+    def _glass(self, h, base, filt, tint, stroke_w, stroke_col):
+        from java import jclass, jarray, jint
+        act = self.act
+        FrameLayout = jclass("android.widget.FrameLayout")
+        ImageView = jclass("android.widget.ImageView")
+        View = jclass("android.view.View")
+        GD = jclass("android.graphics.drawable.GradientDrawable")
+        GDO = jclass("android.graphics.drawable.GradientDrawable$Orientation")
+        FLP = jclass("android.widget.FrameLayout$LayoutParams")
+        PDM = jclass("android.graphics.PorterDuff$Mode")
+        radius = float(h) / 2.0
+
+        cont = FrameLayout(act)
+        bg = GD()
+        bg.setColor(argb(base))
+        bg.setCornerRadius(radius)
+        cont.setBackground(bg)
+        cont.setClipToOutline(True)
+
+        iv = ImageView(act)
+        iv.setScaleType(ImageView.ScaleType.FIT_XY)
+        iv.setColorFilter(argb(filt), PDM.SRC_ATOP)
+        cont.addView(iv, FLP(-1, -1))
+
+        tv = View(act)
+        tg = GD()
+        tg.setOrientation(GDO.TOP_BOTTOM)
+        tg.setColors(jarray(jint)([argb(c) for c in tint]))
+        tg.setCornerRadius(radius)
+        tg.setStroke(stroke_w, argb(stroke_col))
+        tv.setBackground(tg)
+        cont.addView(tv, FLP(-1, -1))
+        return cont, iv
+
+    def _setup(self):
+        if not self.alive or not self.get_setting("glass_enabled", True):
+            return
+        try:
+            from java import jclass
+            self.stage = "activity"
+            act = self.api.getActivity()
+            if act is None:
+                self.retries += 1
+                if self.retries == 12:
+                    self.err = "getActivity() вернул None"
+                    self.refresh()
+                if self.retries < 200:
+                    self._post(self._setup, 600)
+                return
+            self.stage = "teardown"
+            self._teardown_ui()
+            self.act = act
+            dens = act.getResources().getDisplayMetrics().density
+            self.dens = dens
+            dp = lambda v: int(v * dens + 0.5)
+            self.dp = dp
+
+            Dialog = jclass("android.app.Dialog")
+            FrameLayout = jclass("android.widget.FrameLayout")
+            LinearLayout = jclass("android.widget.LinearLayout")
+            ColorDrawable = jclass("android.graphics.drawable.ColorDrawable")
+            FLP = jclass("android.widget.FrameLayout$LayoutParams")
+
+            screen_w = int(act.getResources().getDisplayMetrics().widthPixels)
+            w = int(min(screen_w * 0.92, dp(460)) * 0.77)
+            self.pad = dp(14)               # запас по бокам, чтобы линза могла «надуваться»
+            self.tw = w // len(TABS)
+            self.w_bar = w
+            self.stage = "shader"
+            sh = self._try_shader()
+            self.stage = "window"
+            bar_h = dp(54)
+            bar_top = dp(19) if sh else dp(11)
+            win_h = dp(85) if sh else dp(77)
+            win_w = w + 2 * self.pad
+            bub_h = (bar_h + dp(12)) if sh else dp(45)
+            self.bub_w = int(self.tw * 1.18) if sh else (self.tw - dp(3))
+            bub_top = bar_top + (bar_h - bub_h) // 2
+
+            dlg = Dialog(act)
+            dlg.requestWindowFeature(1)
+
+            root = FrameLayout(act)
+
+            self.stage = "layers"
+            glass_iv = None
+            if sh:
+                View = jclass("android.view.View")
+                ImageView = jclass("android.widget.ImageView")
+                glass_iv = ImageView(act)
+                glass_iv.setScaleType(ImageView.ScaleType.FIT_XY)
+                root.addView(glass_iv, FLP(-1, -1))
+                bub = View(act)  # невидимый держатель состояния линзы (в окно не добавляется)
+            else:
+                bar, bar_iv = self._glass(
+                    bar_h, 0xCC1B1720, 0x26000000,
+                    [0x26FFFFFF, 0x06FFFFFF, 0x12FFFFFF], max(1, dp(1)), 0x44FFFFFF)
+                lpb = FLP(w, bar_h)
+                lpb.topMargin = bar_top
+                lpb.leftMargin = self.pad
+                root.addView(bar, lpb)
+
+                bub, bub_iv = self._glass(
+                    bub_h, 0xCC2A2430, 0x08000000,
+                    [0x38FFFFFF, 0x10FFFFFF, 0x20FFFFFF], max(2, dp(1)), 0x66FFFFFF)
+                lpu = FLP(self.bub_w, bub_h)
+                lpu.topMargin = bub_top
+                root.addView(bub, lpu)
+
+            self.stage = "row"
+            row = LinearLayout(act)
+            row.setOrientation(0)
+            # Android dispatches OnTouchListener events only when the view is clickable
+            # or long-clickable. Without this, the whole tab row can ignore taps/swipes.
+            row.setClickable(True)
+            row.setOnTouchListener(self.Tch(self._on_touch))
+            if sh:
+                row.setAlpha(0.0)  # настоящие иконки невидимы: ловят касания, рисует шейдер
+            lpr = FLP(w, bar_h)
+            lpr.topMargin = bar_top
+            lpr.leftMargin = self.pad
+            root.addView(row, lpr)
+
+            dlg.setContentView(root, FLP(win_w, win_h))
+
+            win = dlg.getWindow()
+            win.setBackgroundDrawable(ColorDrawable(0))
+            win.clearFlags(2)  # FLAG_DIM_BEHIND
+            win.addFlags(8 | 32)  # NOT_FOCUSABLE | NOT_TOUCH_MODAL
+            win.setLayout(win_w, win_h)
+            win.setGravity(80 | 1)  # BOTTOM | CENTER_HORIZONTAL
+            lp = win.getAttributes()
+            lp.y = dp(4)
+            lp.windowAnimations = 0
+            win.setAttributes(lp)
+
+            self.stage = "dialog"
+            self.dlg = dlg
+            self.root = root
+            self.row = row
+            self.bub = bub
+            # key -> (контейнер, картинка, отступ по x, отступ по y, конечная ширина блюра)
+            self.sh = sh
+            self.glass_iv = glass_iv
+            self.bub_top = bub_top
+            self.bub_h = bub_h
+            self._read_settings()
+            if sh:
+                self.targets = {"glass": (root, glass_iv, 0, 0, 720)}
+                self.busy = {"glass": False}
+                self.stage = "uniforms"
+                self._init_uniforms(win_w, win_h, bar_top, bar_h, w)
+            else:
+                self.targets = {
+                    "bar": (bar, bar_iv, 0, 0, 20),
+                    "bub": (bub, bub_iv, dp(3), dp(4), 36),
+                }
+                self.busy = {"bar": False, "bub": False}
+            self.adjusted = 0
+            self.bub_target = None
+            self.stage = "btn"
+            self._setup_ovs(act)
+            self.stage = "tabs"
+            self._fill_tabs()
+            self.native_ok = True
+            self.err = ""
+            self.stage = "show"
+            self._sync()
+            self.stage = "ok"
+            self.refresh()
+        except Exception as e:
+            self._fail(e)
+
+    def _icon(self, path_d, color):
+        from java import jclass, jint
+        size = self.dp(22)
+        Bitmap = jclass("android.graphics.Bitmap")
+        Cfg = jclass("android.graphics.Bitmap$Config")
+        bmp = Bitmap.createBitmap(size, size, Cfg.ARGB_8888)
+        canvas = jclass("android.graphics.Canvas")(bmp)
+        paint = jclass("android.graphics.Paint")(1)
+        paint.setColor(jint(color))
+        path = make_path(path_d)
+        m = jclass("android.graphics.Matrix")()
+        s = size / 24.0
+        m.setScale(s, s)
+        path.transform(m)
+        canvas.drawPath(path, paint)
+        return bmp
+
+    def _fill_tabs(self, idx=None, move=True):
+        if self.row is None:
+            return
+        from java import jclass
+        act = self.act
+        dp = self.dp
+        LinearLayout = jclass("android.widget.LinearLayout")
+        LLP = jclass("android.widget.LinearLayout$LayoutParams")
+        ImageView = jclass("android.widget.ImageView")
+        TextView = jclass("android.widget.TextView")
+
+        sel_idx = self._sel_index() if idx is None else idx
+        self.row.removeAllViews()
+        for i, (route, path_d, label, prefixes) in enumerate(TABS):
+            sel = (i == sel_idx)
+            col = LinearLayout(act)
+            col.setOrientation(1)
+            col.setGravity(17)
+
+            iv = ImageView(act)
+            iv.setImageBitmap(self._icon(path_d, argb(0xFFF3CCF7) if sel else argb(0xD9FFFFFF)))
+            col.addView(iv, LLP(dp(22), dp(22)))
+
+            tv = TextView(act)
+            tv.setText(label)
+            tv.setTextColor(argb(0xFFFFFFFF) if sel else argb(0xB3FFFFFF))
+            tv.setTextSize(10.5)
+            tv.setSingleLine(True)
+            tv.setGravity(17)
+            tlp = LLP(-2, -2)
+            tlp.topMargin = dp(1)
+            col.addView(tv, tlp)
+
+            def make_click(r, k):
+                def click():
+                    try:
+                        # линза начинает ехать сразу, не дожидаясь смены экрана
+                        self._post(lambda: self._fill_tabs(k), 0)
+                        self.navigate_app(r)
+                    except Exception as e:
+                        self._fail(e)
+                return click
+
+            # нажатия и перетаскивание обрабатывает вся строка целиком (_on_touch)
+            self.row.addView(col, LLP(0, -1, 1.0))
+
+        if self.sh:
+            self._render_icons(sel_idx)
+        if move:
+            self._spring_to(self._tab_x(sel_idx))
+
+    # --- пружинная физика линзы ------------------------------------------------
+    # Линза — это масса на пружине: её тянет к выбранной вкладке, она разгоняется,
+    # слегка перелетает и затухает. Размер зависит от скорости и расстояния:
+    # в движении надувается и вытягивается вдоль движения, у цели сдувается.
+    def _spring_to(self, x1):
+        if self.bub is None:
+            return
+        if self.bub_target is not None and abs(self.bub_target - x1) < 1.0:
+            return
+        first = self.bub_target is None
+        self.bub_target = x1
+        if first:
+            self._set_lens(float(x1), 1.0, 1.0)
+            self.sx = float(x1)
+            self.sv = 0.0
+            self.infl = 0.0
+            return
+        if self.anim is not None:
+            return  # пружина уже работает: у неё просто новая цель
+        import time
+        from java import jclass, jarray, jfloat
+        self.sx = float(self.bub.getTranslationX())
+        self.sv = 0.0
+        self.infl = 0.0
+        self.last_t = time.time()
+        VA = jclass("android.animation.ValueAnimator")
+        anim = VA.ofFloat(jarray(jfloat)([0.0, 1.0]))
+        anim.setDuration(1000)
+        anim.setRepeatCount(-1)
+        anim.setInterpolator(jclass("android.view.animation.LinearInterpolator")())
+        anim.addUpdateListener(self.Upd(self._spring_step))
+        anim.start()
+        self.anim = anim
+
+    def _spring_step(self, p):
+        bub = self.bub
+        if bub is None or self.bub_target is None:
+            return
+        import time
+        now = time.time()
+        dt = min(now - self.last_t, 1.0 / 30.0)
+        self.last_t = now
+        if dt <= 0:
+            return
+        k = 380.0                              # жёсткость пружины
+        c = 2.0 * 0.72 * math.sqrt(k)          # затухание: почти без качелей
+        steps = max(1, int(dt / 0.004))
+        h = dt / steps
+        for _ in range(steps):
+            a = -k * (self.sx - self.bub_target) - c * self.sv
+            self.sv += a * h
+            self.sx += self.sv * h
+        tw = float(self.tw)
+        # вторая, «желейная» пружина: форма догоняет скорость, перелетает и дрожит
+        kq = 420.0
+        cq = 2.0 * 0.30 * math.sqrt(kq)
+        qt = min(0.34, abs(self.sv) / (tw * 7.0)) * self.jelly
+        for _ in range(steps):
+            aq = kq * (qt - self.wq) - cq * self.wv
+            self.wv += aq * h
+            self.wq += self.wv * h
+        speed = abs(self.sv) / (tw * 7.0)
+        dist = abs(self.sx - self.bub_target) / tw
+        want = min(1.0, speed + dist * 0.7)
+        if self.pressed:
+            want = 1.0  # пока палец на панели, линза остаётся надутой
+        self.infl += (want - self.infl) * min(1.0, dt * 14.0)
+        q = self.wq
+        self._set_lens(float(self.sx), float(1.0 + 0.04 * self.infl + q),
+                       float(1.0 + 0.03 * self.infl - 0.6 * q))
+        if abs(self.sx - self.bub_target) < 0.4 and abs(self.sv) < 3.0 and self.infl < 0.01 and abs(self.wq) < 0.004 and abs(self.wv) < 0.08 and not self.pressed:
+            self.infl = 0.0
+            self.sv = 0.0
+            self.wq = 0.0
+            self.wv = 0.0
+            self._set_lens(float(self.bub_target), 1.0, 1.0)
+            try:
+                self.anim.cancel()
+            except Exception:
+                pass
+            self.anim = None
+
+    def _animate_to(self, x1):
+        if self.bub is None:
+            return
+        if self.bub_target is not None and abs(self.bub_target - x1) < 1.0:
+            return
+        prev = self.bub_target
+        self.bub_target = x1
+        if prev is None:
+            self.bub.setTranslationX(float(x1))
+            return
+        from java import jclass, jarray, jfloat
+        if self.anim is not None:
+            try:
+                self.anim.cancel()
+            except Exception:
+                pass
+        bub = self.bub
+        x0 = float(bub.getTranslationX())
+        VA = jclass("android.animation.ValueAnimator")
+        anim = VA.ofFloat(jarray(jfloat)([0.0, 1.0]))
+        anim.setDuration(ANIM_MS)
+        anim.setInterpolator(jclass("android.view.animation.LinearInterpolator")())
+
+        def update(p):
+            p = min(1.0, max(0.0, p))
+            # easeOutBack: мягкий перелёт и возврат
+            c1 = 1.25
+            c3 = c1 + 1.0
+            q = p - 1.0
+            e = 1.0 + c3 * q * q * q + c1 * q * q
+            bub.setTranslationX(float(x0 + (x1 - x0) * e))
+            # линза «надувается» в середине пути и сдувается к концу
+            s = math.sin(math.pi * p)
+            bub.setScaleX(float(1.0 + 0.30 * s))
+            bub.setScaleY(float(1.0 + 0.45 * s))
+
+        anim.addUpdateListener(self.Upd(update))
+        anim.start()
+        self.anim = anim
+
+    # ------------------------------------------------------------------ шейдер (Android 13+)
+    def _try_shader(self):
+        try:
+            from java import jclass
+            if int(jclass("android.os.Build$VERSION").SDK_INT) < 33:
+                return False
+            self.RE = jclass("android.graphics.RenderEffect")
+            self.shader = jclass("android.graphics.RuntimeShader")(AGSL)
+            return True
+        except Exception as e:
+            self.shader = None
+            if not self.sh_failed:
+                self.sh_failed = True
+                try:
+                    self.toast("GlassBar: шейдер недоступен, обычный режим (" + str(e)[:100] + ")")
+                except Exception:
+                    pass
+            return False
+
+    def _init_uniforms(self, win_w, win_h, bar_top, bar_h, w):
+        sh = self.shader
+        sh.setFloatUniform("res", float(win_w), float(win_h))
+        sh.setFloatUniform("bar", float(self.pad + w / 2.0), float(bar_top + bar_h / 2.0),
+                           float(w / 2.0), float(bar_h / 2.0))
+        sh.setFloatUniform("dpx", float(self.dens))
+        sh.setFloatUniform("glowK", float(self.glow_amt / 30.0))
+        sh.setFloatUniform("refr", float(self.refr_amt / 100.0))
+        sh.setFloatUniform("tintK", float(self.tint_amt / 100.0))
+        sh.setFloatUniform("blurK", float(self.blur_amt / 100.0))
+        sh.setFloatUniform("dispK", float(self.disp_amt / 100.0))
+        sh.setFloatUniform("edgeK", float(max(self.edge_amt, 10.0) / 100.0))
+        self.win_w, self.win_h, self.bar_top, self.bar_h = win_w, win_h, bar_top, bar_h
+        self.cur_x = self._tab_x(self._sel_index())
+        self._render_icons(self._sel_index())
+
+    DEFAULTS = {"glass_glow_amt": 30.0, "glass_refr_amt": 100.0,
+                "glass_tint_amt": 100.0, "glass_blur_amt": 100.0,
+                "glass_jelly_amt": 100.0, "glass_disp_amt": 100.0, "glass_edge_amt": 100.0,
+                "glass_scale_amt": 50.0, "glass_fps_amt": 30.0}
+
+    def _read_settings(self):
+        def val(k):
+            try:
+                return float(self.get_setting(k, self.DEFAULTS[k]))
+            except Exception:
+                return self.DEFAULTS[k]
+        self.glow_amt = val("glass_glow_amt")
+        self.refr_amt = val("glass_refr_amt")
+        self.tint_amt = val("glass_tint_amt")
+        self.blur_amt = val("glass_blur_amt")
+        self.jelly_amt = val("glass_jelly_amt")
+        self.jelly = self.jelly_amt / 100.0
+        self.disp_amt = val("glass_disp_amt")
+        self.edge_amt = val("glass_edge_amt")
+        self.scale_amt = val("glass_scale_amt")
+        self.fps_amt = val("glass_fps_amt")
+
+    def _apply_live(self):
+        # применяем настройки сразу, без пересборки окна
+        self._read_settings()
+        sh = self.shader
+        if sh is None or not self.sh:
+            return
+        try:
+            sh.setFloatUniform("glowK", float(self.glow_amt / 30.0))
+            sh.setFloatUniform("refr", float(self.refr_amt / 100.0))
+            sh.setFloatUniform("tintK", float(self.tint_amt / 100.0))
+            sh.setFloatUniform("blurK", float(self.blur_amt / 100.0))
+            sh.setFloatUniform("dispK", float(self.disp_amt / 100.0))
+            sh.setFloatUniform("edgeK", float(max(self.edge_amt, 10.0) / 100.0))
+            self._push(True)
+        except Exception as e:
+            self.stage = "settings"
+            self._fail(e)
+
+    def _slider_cb(self, key):
+        def cb(v):
+            self.set_setting(key, float(v))
+            self._apply_live()
+            self.refresh()
+        return cb
+
+    def _enabled_cb(self, v):
+        self.set_setting("glass_enabled", bool(v))
+        self.on_setting_changed(None)
+
+    def _reset_cb(self):
+        for k, v in self.DEFAULTS.items():
+            self.set_setting(k, v)
+        self._apply_live()
+        self.refresh()
+
+    def screen_glass_settings(self, ui, api, state):
+        self._read_settings()
+        if not self.preview:
+            self.preview = True
+            if self.handler is not None:
+                self._post(self._sync, 0)
+        W = "#FFFFFF"
+        W2 = "#CCFFFFFF"
+
+        def sl(label, key, val, lo, hi, steps):
+            # свой белый заголовок: у встроенного заголовка слайдера цвет не задаётся
+            return ui.column([
+                ui.text(label + ": " + str(int(val)), "titleSmall", W),
+                ui.slider(val, self._slider_cb(key), lo, hi, "", steps),
+            ], 0, 2)
+
+        return ui.scaffold(
+            title="Настройки панели",
+            content=ui.lazy_column([
+                ui.column([
+                    ui.text("Эффект стекла", "titleSmall", W),
+                    ui.text("Выключите, чтобы вернуть обычную панель", "bodySmall", W2),
+                    ui.switch(bool(self.get_setting("glass_enabled", True)), self._enabled_cb, "", ""),
+                ], 0, 2),
+                sl("Свечение", "glass_glow_amt", self.glow_amt, 0, 100, 19),
+                sl("Сила реверберации (преломление)", "glass_refr_amt", self.refr_amt, 0, 150, 14),
+                sl("Ширина кромки искажения", "glass_edge_amt", self.edge_amt, 30, 300, 26),
+                sl("Радужная кайма", "glass_disp_amt", self.disp_amt, 0, 300, 29),
+                sl("Затемнение панели", "glass_tint_amt", self.tint_amt, 0, 200, 19),
+                sl("Размытие фона", "glass_blur_amt", self.blur_amt, 0, 300, 29),
+                sl("Желейность", "glass_jelly_amt", self.jelly_amt, 0, 200, 19),
+                ui.text("Производительность", "titleMedium", W),
+                sl("Масштаб рендера, % (меньше — быстрее)", "glass_scale_amt", self.scale_amt, 25, 100, 14),
+                sl("Обновление фона, Гц (в покое)", "glass_fps_amt", self.fps_amt, 10, 120, 10),
+                ui.button("Сбросить по умолчанию", self._reset_cb),
+                ui.text("Панель внизу — живой пример: она меняется вместе со слайдерами.", "bodySmall", W2),
+                ui.spacer(120),
+            ], 16, 12))
+
+    def _render_icons(self, sel_idx):
+        # Иконки и подписи рисуем в bitmap размером с окно и отдаём шейдеру как второй вход.
+        if not self.sh or self.shader is None:
+            return
+        try:
+            from java import jclass, jint
+            dp = self.dp
+            Bitmap = jclass("android.graphics.Bitmap")
+            Cfg = jclass("android.graphics.Bitmap$Config")
+            Canvas = jclass("android.graphics.Canvas")
+            Paint = jclass("android.graphics.Paint")
+            Align = jclass("android.graphics.Paint$Align")
+            bmp = Bitmap.createBitmap(int(self.win_w), int(self.win_h), Cfg.ARGB_8888)
+            cv = Canvas(bmp)
+            tp = Paint(1)
+            tp.setTextAlign(Align.CENTER)
+            tp.setTextSize(float(10.5 * self.act.getResources().getDisplayMetrics().scaledDensity))
+            fm = tp.getFontMetrics()
+            asc = float(fm.ascent)
+            th = float(fm.descent) - asc
+            ip = Paint(1)
+            top = self.bar_top + (self.bar_h - (dp(22) + dp(1) + th)) / 2.0
+            for i, (route, path_d, label, prefixes) in enumerate(TABS):
+                sel = (i == sel_idx)
+                cx = self.pad + i * self.tw + self.tw / 2.0
+                icon = self._icon(path_d, argb(0xFFF3CCF7) if sel else argb(0xD9FFFFFF))
+                cv.drawBitmap(icon, float(cx - dp(11)), float(top), ip)
+                icon.recycle()
+                tp.setColor(jint(argb(0xFFFFFFFF)))
+                cv.drawText(label, float(cx), float(top + dp(22) + dp(1) - asc), tp)
+            BS = jclass("android.graphics.BitmapShader")
+            TM = jclass("android.graphics.Shader$TileMode")
+            self.shader.setInputShader("icons", BS(bmp, TM.CLAMP, TM.CLAMP))
+            self.icons_bmp = bmp
+            self._push(True)
+        except Exception as e:
+            self.stage = "icons"
+            self._fail(e)
+
+    def _set_lens(self, x, scx, scy):
+        self.cur_x, self.cur_sx, self.cur_sy = x, scx, scy
+        bub = self.bub
+        if bub is None:
+            return
+        bub.setTranslationX(float(x))
+        if self.sh:
+            self._push()
+        else:
+            bub.setScaleX(float(scx))
+            bub.setScaleY(float(scy))
+
+    def _push(self, force=False):
+        sh = self.shader
+        iv = self.glass_iv
+        if sh is None or iv is None or self.RE is None:
+            return
+        try:
+            dp = self.dp
+            cx = self.cur_x + self.bub_w / 2.0
+            cy = self.bub_top + self.bub_h / 2.0
+            g = max(0.0, min(1.0, self.infl * 1.3))
+            if self.preview:
+                g = 1.0  # в примере линза всегда стеклянная
+            rest_w = self.tw - dp(6)
+            rest_h = self.bub_h - dp(22)
+            hw = (rest_w + (self.bub_w - rest_w) * g) * self.cur_sx / 2.0
+            hh = (rest_h + (self.bub_h - rest_h) * g) * self.cur_sy / 2.0
+            v = max(-1.0, min(1.0, self.sv / (self.tw * 8.0))) if self.tw else 0.0
+            key = (round(cx, 1), round(cy, 1), round(hw, 1), round(hh, 1), round(g, 3), round(v, 3))
+            if key == self.last_push and not force:
+                return  # ничего не изменилось — не пересоздаём эффект
+            self.last_push = key
+            sh.setFloatUniform("bub", float(cx), float(cy), float(hw), float(hh))
+            sh.setFloatUniform("infl", float(g))
+            sh.setFloatUniform("merge", float(dp(8) + self.infl * dp(5)))
+            sh.setFloatUniform("vel", float(v))
+            sh.setFloatUniform("lean", float(v * 0.22 * self.jelly))
+            iv.setRenderEffect(self.RE.createRuntimeShaderEffect(sh, "content"))
+        except Exception as e:
+            self.shader = None
+            self._fail(e)
+
+    def _tab_x(self, i):
+        return float(self.pad + i * self.tw + (self.tw - self.bub_w) // 2)
+
+    def _idx_at(self, fx):
+        i = int(fx // self.tw)
+        return max(0, min(len(TABS) - 1, i))
+
+    def _ensure_spring(self):
+        if self.bub is None or self.anim is not None:
+            return
+        import time
+        from java import jclass, jarray, jfloat
+        self.sx = float(self.bub.getTranslationX())
+        self.sv = 0.0
+        self.infl = 0.0
+        self.last_t = time.time()
+        VA = jclass("android.animation.ValueAnimator")
+        anim = VA.ofFloat(jarray(jfloat)([0.0, 1.0]))
+        anim.setDuration(1000)
+        anim.setRepeatCount(-1)
+        anim.setInterpolator(jclass("android.view.animation.LinearInterpolator")())
+        anim.addUpdateListener(self.Upd(self._spring_step))
+        anim.start()
+        self.anim = anim
+
+    def _on_touch(self, e):
+        # Нажатие: линза надувается под пальцем. Движение: линза следует за пальцем
+        # (через пружину). Отпускание: выбирается вкладка под пальцем.
+        try:
+            if self.row is None or self.bub is None:
+                return False
+            act = int(e.getActionMasked())
+            x = float(e.getX())
+            if act == 0:
+                self.pressed = True
+                self.dragging = False
+                self.down_x = x
+                self.hover = self._idx_at(x)
+                self.bub_target = self._tab_x(self.hover)
+                self._ensure_spring()
+                return True
+            if act == 2:
+                if not self.dragging and abs(x - self.down_x) > self.dp(6):
+                    self.dragging = True
+                if self.dragging:
+                    lo = self.pad - self.dp(4)
+                    hi = self.pad + self.w_bar - self.bub_w + self.dp(4)
+                    lx = self.pad + x - self.bub_w / 2.0
+                    self.bub_target = float(max(lo, min(hi, lx)))
+                    self._ensure_spring()
+                    idx = self._idx_at(x)
+                    if idx != self.hover:
+                        self.hover = idx
+                        self._fill_tabs(idx, move=False)
+                return True
+            if act == 1 or act == 3:
+                self.pressed = False
+                was_drag = self.dragging
+                self.dragging = False
+                self.hover = None
+                if act == 1:
+                    idx = self._idx_at(x)
+                    self._fill_tabs(idx)
+                    self._ensure_spring()
+                    self.navigate_app(TABS[idx][0])
+                else:
+                    self._fill_tabs()
+                    self._ensure_spring()
+                return True
+            return True
+        except Exception as ex:
+            self._fail(ex)
+            return False
+
+    def _sync(self):
+        if self.dlg is None:
+            return
+        try:
+            self._sync_ovs()
+            self._fill_tabs()
+            if self._route_visible():
+                if not self.shown:
+                    self.dlg.show()
+                    self.shown = True
+            else:
+                if self.shown:
+                    self.dlg.hide()
+                    self.shown = False
+        except Exception as e:
+            self.stage = "sync"
+            self._fail(e)
+
+    def _teardown_ui(self):
+        ovs = self.ovs
+        self.ovs = {}
+        self.ov_route = ""
+        for o in ovs.values():
+            try:
+                o["dlg"].dismiss()
+            except Exception:
+                pass
+        dlg = self.dlg
+        self.dlg = None
+        self.root = None
+        self.row = None
+        if self.anim is not None:
+            try:
+                self.anim.cancel()
+            except Exception:
+                pass
+        self.anim = None
+        self.bub = None
+        self.glass_iv = None
+        self.shader = None
+        self.sh = False
+        self.bub_target = None
+        self.targets = {}
+        self.shown = False
+        self.busy = {}
+        for bmp in list(self.rendered.values()):
+            try:
+                bmp.recycle()
+            except Exception:
+                pass
+        self.rendered = {}
+        for bmp in list(self.pending.values()):
+            try:
+                bmp.recycle()
+            except Exception:
+                pass
+        self.pending = {}
+        self.bufs = None
+        self.cap_rect = None
+        self.cur_idx = -1
+        self.last_push = None
+        if dlg is not None:
+            try:
+                dlg.dismiss()
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------ блюр
+    def _tick(self):
+        if not self.alive:
+            return
+        try:
+            if (not self.native_ok and not self.err and not self.err_shown
+                    and self.get_setting("glass_enabled", True) and time.time() - self.t0 > 5.0):
+                self.err_shown = True
+                self.err = "[" + str(self.stage) + "] настройка не завершилась"
+                self.refresh()
+        except Exception:
+            pass
+        try:
+            if self.dlg is not None and self.shown:
+                self._adjust_position()
+                for key in tuple(self.targets.keys()):
+                    self._capture(key)
+        except Exception:
+            for k in list(self.busy.keys()):
+                self.busy[k] = False
+        try:
+            self._anim_ovs()
+            for k in ("btn", "ttl"):
+                self._capture_ov(k)
+        except Exception:
+            self.busy["btn"] = False
+            self.busy["ttl"] = False
+        try:
+            self.choreo.getInstance().postFrameCallback(self.frame_cb)
+        except Exception:
+            pass
+
+    def _adjust_position(self):
+        # Если окно оказалось под системной навигацией, поднимаем его.
+        if self.adjusted >= 3 or self.root is None or self.root.getWidth() <= 0:
+            return
+        from java import jarray, jint
+        decor = self.act.getWindow().getDecorView()
+        loc = jarray(jint)([0, 0])
+        dloc = jarray(jint)([0, 0])
+        self.root.getLocationOnScreen(loc)
+        decor.getLocationOnScreen(dloc)
+        bottom_gap = (dloc[1] + decor.getHeight()) - (loc[1] + self.root.getHeight())
+        inset = 0
+        ins = decor.getRootWindowInsets()
+        if ins is not None:
+            inset = int(ins.getSystemWindowInsetBottom())
+        desired = inset + self.dp(2)
+        diff = desired - bottom_gap
+        self.adjusted += 1
+        if abs(diff) > self.dp(4):
+            win = self.dlg.getWindow()
+            lp = win.getAttributes()
+            lp.y = int(lp.y + diff)
+            win.setAttributes(lp)
+
+    def _mk_ov(self, act, src, x, y, w, h):
+        from java import jclass
+        Dialog = jclass("android.app.Dialog")
+        FL = jclass("android.widget.FrameLayout")
+        FLP = jclass("android.widget.FrameLayout$LayoutParams")
+        IV = jclass("android.widget.ImageView")
+        ColorDrawable = jclass("android.graphics.drawable.ColorDrawable")
+        d = Dialog(act)
+        d.requestWindowFeature(1)
+        root = FL(act)
+        iv = IV(act)
+        iv.setScaleType(IV.ScaleType.FIT_XY)
+        root.addView(iv, FLP(-1, -1))
+        d.setContentView(root, FLP(w, h))
+        win = d.getWindow()
+        win.setBackgroundDrawable(ColorDrawable(0))
+        win.clearFlags(2)
+        win.addFlags(8 | 16 | 32 | 256 | 512)  # не фокусируется, не ловит касания, поверх всего экрана
+        win.setLayout(w, h)
+        win.setGravity(51)  # TOP | LEFT
+        lp = win.getAttributes()
+        lp.x = int(x)
+        lp.y = int(y)
+        lp.windowAnimations = 0
+        win.setAttributes(lp)
+        sh = jclass("android.graphics.RuntimeShader")(src)
+        sh.setFloatUniform("res", float(w), float(h))
+        sh.setFloatUniform("dpx", float(self.dens))
+        iv.setRenderEffect(self.RE.createRuntimeShaderEffect(sh, "content"))
+        return {"dlg": d, "iv": iv, "x": int(x), "y": int(y), "w": int(w), "h": int(h),
+                "shown": False, "last": 0.0}
+
+    def _setup_ovs(self, act):
+        # Стеклянные накладки поверх родных элементов (положение — доля ширины экрана, как в Dolphy)
+        if not self.sh:
+            return
+        dp = self.dp
+        W = int(act.getResources().getDisplayMetrics().widthPixels)
+        pad = 2 * dp(6)
+        try:
+            if self.get_setting("glass_btn", True):
+                D = int(0.084 * W) + pad
+                self.ovs["btn"] = self._mk_ov(act, AGSL_BTN, 0.0755 * W - D / 2.0, 0.164 * W - D / 2.0, D, D)
+            if self.get_setting("glass_ttl", True):
+                tw_ = int(0.50 * W) + pad
+                th_ = int(0.105 * W) + pad
+                self.ovs["ttl"] = self._mk_ov(act, AGSL_TTL, 0.5 * W - tw_ / 2.0, 0.164 * W - th_ / 2.0, tw_, th_)
+        except Exception as e:
+            try:
+                self.toast("GlassBar накладки: " + str(e)[:100])
+            except Exception:
+                pass
+
+    def _ov_x(self, o):
+        o["cx"] = o["x"] + o["off"]
+        win = o["dlg"].getWindow()
+        lp = win.getAttributes()
+        lp.x = int(o["cx"])
+        win.setAttributes(lp)
+
+    def _start_ov_anim(self, o, delay):
+        now = time.time()
+        o["off"] = -float(o["x"] + o["w"])  # старт за левым краем экрана
+        o["v"] = 0.0
+        o["anim"] = True
+        o["t0"] = now + delay
+        o["tl"] = o["t0"]
+        self._ov_x(o)
+
+    def _anim_ovs(self):
+        # пружина с лёгким перелётом: накладки выезжают слева направо
+        now = time.time()
+        for o in self.ovs.values():
+            if not o.get("anim") or now < o["t0"]:
+                continue
+            dt = min(now - o["tl"], 1.0 / 30.0)
+            o["tl"] = now
+            if dt <= 0:
+                continue
+            n = max(1, int(dt / 0.004))
+            h = dt / n
+            for _ in range(n):
+                o["v"] += (-230.0 * o["off"] - 2.0 * 0.5 * math.sqrt(230.0) * o["v"]) * h
+                o["off"] += o["v"] * h
+            if abs(o["off"]) < 0.5 and abs(o["v"]) < 5.0:
+                o["off"] = 0.0
+                o["v"] = 0.0
+                o["anim"] = False
+            self._ov_x(o)
+
+    def _sync_ovs(self):
+        r = self.route.lower()
+        want = r not in BACK_HIDE
+        fresh = want and r != self.ov_route
+        self.ov_route = r if want else ""
+        for k, o in self.ovs.items():
+            if want:
+                if fresh:
+                    self._start_ov_anim(o, 0.07 if k == "ttl" else 0.0)
+                if not o["shown"]:
+                    o["dlg"].show()
+                    o["shown"] = True
+            elif o["shown"]:
+                o["dlg"].hide()
+                o["shown"] = False
+
+    def _capture_ov(self, key):
+        o = self.ovs.get(key)
+        if o is None or not o["shown"] or self.busy.get(key):
+            return
+        now = time.time()
+        if now - o["last"] < (0.0 if o.get("anim") else 1.0 / max(10.0, self.fps_amt)):
+            return
+        o["last"] = now
+        from java import jclass, jarray, jint
+        decor = self.act.getWindow().getDecorView()
+        dloc = jarray(jint)([0, 0])
+        decor.getLocationOnScreen(dloc)
+        cx = int(o.get("cx", o["x"])) - int(dloc[0])
+        if cx + o["w"] <= 8:
+            return
+        l = max(0, cx)
+        t = max(0, o["y"] - int(dloc[1]))
+        r = min(int(decor.getWidth()), cx + o["w"])
+        bt = min(int(decor.getHeight()), t + o["h"])
+        if r - l < 16 or bt - t < 16:
+            return
+        Bitmap = jclass("android.graphics.Bitmap")
+        Cfg = jclass("android.graphics.Bitmap$Config")
+        bmp = Bitmap.createBitmap(r - l, bt - t, Cfg.ARGB_8888)
+        self.pending[key] = bmp
+        self.busy[key] = True
+        jclass("android.view.PixelCopy").request(self.act.getWindow(), jclass("android.graphics.Rect")(l, t, r, bt),
+                                                 bmp, self.pcls[key], self.handler)
+
+    def _capture_glass(self):
+        tgt = self.targets.get("glass")
+        if tgt is None or self.busy.get("glass"):
+            return
+        now = time.time()
+        active = self.pressed or self.infl > 0.02 or abs(self.sv) > 2.0
+        interval = 0.0 if active else (1.0 / max(10.0, self.fps_amt))
+        if now - self.last_cap < interval * 0.9:
+            return
+        view = tgt[0]
+        if view.getWidth() <= 0:
+            return
+        from java import jclass, jarray, jint
+        if self.cap_rect is None or now - self.cap_rect_t > 0.4:
+            decor = self.act.getWindow().getDecorView()
+            loc = jarray(jint)([0, 0])
+            dloc = jarray(jint)([0, 0])
+            view.getLocationOnScreen(loc)
+            decor.getLocationOnScreen(dloc)
+            l = max(0, int(loc[0] - dloc[0]))
+            t = max(0, int(loc[1] - dloc[1]))
+            r = min(int(decor.getWidth()), l + int(view.getWidth()))
+            b = min(int(decor.getHeight()), t + int(view.getHeight()))
+            self.cap_rect = (l, t, r, b)
+            self.cap_rect_t = now
+        l, t, r, b = self.cap_rect
+        if r - l < 16 or b - t < 16:
+            return
+        sc = max(0.25, min(1.0, self.scale_amt / 100.0))
+        bw = max(8, int((r - l) * sc))
+        bh = max(4, int((b - t) * sc))
+        Bitmap = jclass("android.graphics.Bitmap")
+        Cfg = jclass("android.graphics.Bitmap$Config")
+        bufs = self.bufs
+        if bufs is None or int(bufs[0].getWidth()) != bw or int(bufs[0].getHeight()) != bh:
+            bufs = [Bitmap.createBitmap(bw, bh, Cfg.ARGB_8888), Bitmap.createBitmap(bw, bh, Cfg.ARGB_8888)]
+            self.bufs = bufs
+            self.cur_idx = -1
+        idx = 1 if self.cur_idx == 0 else 0  # пишем в буфер, который сейчас не показывается
+        self.pend_idx = idx
+        self.pending["glass"] = bufs[idx]
+        self.busy["glass"] = True
+        self.last_cap = now
+        Rect = jclass("android.graphics.Rect")
+        jclass("android.view.PixelCopy").request(self.act.getWindow(), Rect(l, t, r, b), bufs[idx],
+                                                 self.pcls["glass"], self.handler)
+
+    def _capture(self, key):
+        if key == "glass":
+            return self._capture_glass()
+        tgt = self.targets.get(key)
+        if tgt is None or self.busy.get(key):
+            return
+        view, iv, ix, iy, stop_w = tgt
+        if view.getWidth() <= 0:
+            return
+        from java import jclass, jarray, jint
+        decor = self.act.getWindow().getDecorView()
+        loc = jarray(jint)([0, 0])
+        dloc = jarray(jint)([0, 0])
+        view.getLocationOnScreen(loc)
+        decor.getLocationOnScreen(dloc)
+        # учитываем масштаб линзы во время анимации
+        vw = int(view.getWidth() * float(view.getScaleX()))
+        vh = int(view.getHeight() * float(view.getScaleY()))
+        l = int(loc[0] - dloc[0]) + ix
+        t = int(loc[1] - dloc[1]) + iy
+        r = int(loc[0] - dloc[0]) + vw - ix
+        b = int(loc[1] - dloc[1]) + vh - iy
+        dw = int(decor.getWidth())
+        dh = int(decor.getHeight())
+        l = max(0, l)
+        t = max(0, t)
+        r = min(dw, r)
+        b = min(dh, b)
+        if r - l < 16 or b - t < 16:
+            return
+        Bitmap = jclass("android.graphics.Bitmap")
+        Cfg = jclass("android.graphics.Bitmap$Config")
+        Rect = jclass("android.graphics.Rect")
+        PixelCopy = jclass("android.view.PixelCopy")
+        bmp = Bitmap.createBitmap(max(8, (r - l) // 2), max(4, (b - t) // 2), Cfg.ARGB_8888)
+        self.pending[key] = bmp
+        self.busy[key] = True
+        PixelCopy.request(self.act.getWindow(), Rect(l, t, r, b), bmp, self.pcls[key], self.handler)
+
+    def _make_copy_cb(self, key):
+        def cb(result):
+            self._on_copy(key, result)
+        return cb
+
+    def _on_copy(self, key, result):
+        self.busy[key] = False
+        bmp = self.pending.pop(key, None)
+        if key in ("btn", "ttl"):
+            o = self.ovs.get(key)
+            if result == 0 and o is not None and bmp is not None:
+                try:
+                    o["iv"].setImageBitmap(bmp)
+                except Exception:
+                    pass
+            return
+        if key == "glass":
+            tgt = self.targets.get(key)
+            if result == 0 and tgt is not None and bmp is not None:
+                try:
+                    tgt[1].setImageBitmap(bmp)
+                    self.cur_idx = self.pend_idx
+                except Exception:
+                    pass
+            return
+        try:
+            tgt = self.targets.get(key)
+            if result != 0 or tgt is None or bmp is None:
+                if bmp is not None:
+                    bmp.recycle()
+                return
+            from java import jclass
+            Bitmap = jclass("android.graphics.Bitmap")
+            stop_w = tgt[4]
+            w = int(bmp.getWidth())
+            h = int(bmp.getHeight())
+            b = bmp
+            # Уменьшаем только до нужной детализации, освобождая промежуточные bitmap.
+            while w > stop_w:
+                nw = max(stop_w, w // 2)
+                nh = max(5, h // 2)
+                scaled = Bitmap.createScaledBitmap(b, nw, nh, True)
+                if b is not bmp:
+                    b.recycle()
+                b = scaled
+                w, h = nw, nh
+            if b is not bmp:
+                bmp.recycle()
+            old = self.rendered.get(key)
+            tgt[1].setImageBitmap(b)
+            self.rendered[key] = b
+            if old is not None and old is not b:
+                old.recycle()
+        except Exception:
+            try:
+                if bmp is not None and not bmp.isRecycled():
+                    bmp.recycle()
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------ штатная панель
+    def screen_bar(self, ui, api, state):
+        if self.native_ok and self.get_setting("glass_enabled", True):
+            return ui.spacer(height=1)
+
+        # запасной вариант: обычная плавающая панель
+        def go(route):
+            def click():
+                self.navigate_app(route)
+            return click
+        bar = ui.floating_toolbar([
+            ui.toolbar_item("bluetooth", go("bluetooth"), label="Bluetooth"),
+            ui.toolbar_item("extension", go("other"), label="Функции"),
+            ui.toolbar_item("settings", go("settings"), label="Настройки"),
+        ])
+        if self.err:
+            return ui.column([
+                ui.text("GlassBar: " + self.err, "labelSmall", "error", 6),
+                bar,
+            ], padding=4, spacing=4)
+        return bar
