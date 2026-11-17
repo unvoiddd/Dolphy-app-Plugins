@@ -1,8 +1,8 @@
 __id__ = "glass_bar"
 __name__ = "Glass Bar"
-__version__ = "3.19.0"
+__version__ = "3.55.0"
 __author__ = "@Da_koroche"
-__description__ = "Liquid-glass панель: преломление, дисперсия, слипание линзы, свечение, окно логов с копированием"
+__description__ = "Liquid-glass панель и стекло на экране Bluetooth: преломление, дисперсия, линза, анимации, окно логов"
 __icon__ = "rounded:blur_on"
 __permissions__ = []
 
@@ -367,6 +367,240 @@ half4 main(float2 p) {
 }
 """
 
+# Стекло на экране Bluetooth (координаты сняты со скриншота шириной 1165 px; всё считается долями ширины экрана)
+SCR_REF_W = 1165.0
+SCR_REF_BOTTOM = 2448.0   # нижняя граница области контента на скриншоте: 2576 px минус ~128 px системной панели
+SCR_PILL_X0 = 44.0        # левый край переключателя All/BLE/Advert
+SCR_SEG_X0 = 66.0         # внутренняя дорожка переключателя: три равные секции
+SCR_SEG_X1 = 1098.0
+SCR_NAMES = ("All", "BLE", "Advert")
+# (ключ, секция: None — всегда, 0 — только «All»; x0, y0, x1, y1; радиус; ширина кромки dp; фаза блика; задержка появления, с; якорь снизу)
+SCR_ELEMS = (
+    ("pill", None, 44.0, 147.0, 1120.0, 322.0, 88.0, 11.0, 0.0, 0.00, False),
+    ("card", 0, 44.0, 1187.0, 1120.0, 2078.0, 76.0, 13.0, 1.7, 0.10, True),
+    ("dev", 0, 132.0, 1274.0, 1033.0, 1429.0, 58.0, 9.0, 3.1, 0.20, True),
+    ("go", 0, 132.0, 1836.0, 1033.0, 1990.0, 77.0, 9.0, 4.6, 0.28, True),
+)
+
+AGSL_RIM = """
+uniform shader content;
+uniform float2 res;
+uniform float dpx;
+uniform float rad;
+uniform float band;
+uniform float pad;
+uniform float t;
+uniform float intro;
+uniform float vis;
+uniform float pulse;
+uniform float seed;
+uniform float k;
+float sd(float2 p, float2 c, float2 hs, float r) {
+    float2 q = abs(p - c) - hs + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+half4 main(float2 p) {
+    float f = vis * clamp(intro * 1.6, 0.0, 1.0);
+    float2 c = res * 0.5;
+    float2 hs = res * 0.5 - pad;
+    float r = min(rad, min(hs.x, hs.y));
+    float d = sd(p, c, hs, r);
+    if (d > dpx * 10.0 || f <= 0.002) return half4(0.0);
+    float a = clamp(0.5 - d, 0.0, 1.0);
+    float dep = max(-d, 0.0);
+    float2 q0 = p - c;
+    float yN = clamp(0.5 + q0.y / (2.0 * hs.y), 0.0, 1.0);
+    // лёгкая вуаль по всей поверхности: середина остаётся живым интерфейсом
+    float Av = a * (0.035 + 0.06 * (1.0 - yN)) * k;
+    float3 Cv = float3(0.92, 0.90, 1.0);
+    if (dep > band * 1.5) {
+        return half4(float4(Cv * Av * f, Av * f));
+    }
+    float2 g = float2(sd(p + float2(1.0, 0.0), c, hs, r) - sd(p - float2(1.0, 0.0), c, hs, r),
+                      sd(p + float2(0.0, 1.0), c, hs, r) - sd(p - float2(0.0, 1.0), c, hs, r));
+    float gl0 = length(g);
+    float2 n = gl0 > 0.0001 ? g / gl0 : float2(0.0, -1.0);
+    float3 cr = float3(0.0);
+    float Ab = 0.0;
+    if (dep < band) {
+        float tt = clamp(dep / band, 0.0, 1.0);
+        float m = band * 0.95 * pow(1.0 - tt, 2.0) * k;
+        float2 off = -n * m;
+        float2 lo = float2(0.5);
+        float2 hi = res - 0.5;
+        cr = float3(content.eval(clamp(p + off * 0.86, lo, hi)).r,
+                    content.eval(clamp(p + off, lo, hi)).g,
+                    content.eval(clamp(p + off * 1.14, lo, hi)).b);
+        Ab = a * (1.0 - smoothstep(band * 0.45, band, dep)) * 0.92;
+    }
+    float A = Av + Ab * (1.0 - Av);
+    float3 P = Cv * Av + cr * Ab * (1.0 - Av);
+    // бегущий по кромке блик, «пробег» света при появлении и вспышка при импульсе
+    float ang = t * 0.45 + seed;
+    float2 L = float2(cos(ang), sin(ang));
+    float edge = exp(-dep / (dpx * 1.3));
+    float sp = pow(max(dot(n, L), 0.0), 3.0) + 0.45 * pow(max(dot(n, -L), 0.0), 3.0) + 0.10;
+    float th = atan(q0.y, q0.x) / 6.2831853 + 0.5;
+    float dth = abs(th - intro);
+    dth = min(dth, 1.0 - dth);
+    float sweep = exp(-dth * dth * 260.0) * (1.0 - smoothstep(0.88, 1.0, intro)) * step(0.001, intro);
+    float s = edge * (sp * 0.50 + sweep * 1.1 + pulse * 0.6) * a * k;
+    // радужная кайма по кромке
+    float wR = dpx * 1.2;
+    float3 rim = float3(exp(-abs(d + dpx * 0.8) / wR), exp(-abs(d) / wR), exp(-abs(d - dpx * 0.8) / wR));
+    float rs = (0.55 * pow(max(dot(n, L), 0.0), 2.0) + 0.10) * 0.55 * a * k;
+    P += rim * rs;
+    A = clamp(A + rim.g * rs * 0.7, 0.0, 1.0);
+    P += float3(s);
+    A = clamp(A + s * 0.85, 0.0, 1.0);
+    // тёмный жёлоб сразу за кромкой: толстое стекло
+    float gv = 0.16 * exp(-abs(dep - dpx * 3.6) / (dpx * 1.8)) * a * k;
+    P *= (1.0 - gv);
+    A = A + gv * (1.0 - A);
+    // внешнее свечение
+    float go = exp(-max(d, 0.0) / (dpx * 3.2)) * (0.05 + 0.10 * pulse) * (1.0 - a) * k;
+    P += float3(0.95, 0.80, 0.98) * go;
+    A = clamp(A + go, 0.0, 1.0);
+    P = min(P, float3(A));
+    return half4(float4(P * f, A * f));
+}
+"""
+
+AGSL_SEG = """
+uniform shader content;
+uniform shader icons;
+uniform float2 res;
+uniform float dpx;
+uniform float rad;
+uniform float pad;
+uniform float t;
+uniform float intro;
+uniform float vis;
+uniform float pulse;
+uniform float seed;
+uniform float4 lens;
+uniform float lensA;
+uniform float stretch;
+uniform float infl;
+uniform float2 tilt;
+uniform float4 sty;
+uniform float k;
+float sd(float2 p, float2 c, float2 hs, float r) {
+    float2 q = abs(p - c) - hs + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+float2 sdn(float2 p, float2 c, float2 hs, float r) {
+    float2 g = float2(sd(p + float2(1.0, 0.0), c, hs, r) - sd(p - float2(1.0, 0.0), c, hs, r),
+                      sd(p + float2(0.0, 1.0), c, hs, r) - sd(p - float2(0.0, 1.0), c, hs, r));
+    float l = length(g);
+    return l > 0.0001 ? g / l : float2(0.0, -1.0);
+}
+half4 main(float2 p) {
+    float f = vis * clamp(intro * 1.6, 0.0, 1.0);
+    float2 c = res * 0.5;
+    float2 hs = res * 0.5 - pad + dpx * 0.6;
+    float r = min(rad + dpx * 0.6, min(hs.x, hs.y));
+    float d = sd(p, c, hs, r);
+    if (d > dpx * 10.0 || f <= 0.002) return half4(0.0);
+    float a = clamp(0.5 - d, 0.0, 1.0);
+    float dep = max(-d, 0.0);
+    float2 n = sdn(p, c, hs, r);
+    float2 lo = float2(0.5);
+    float2 hi = res - 0.5;
+    // Фон берём из левого поля снимка на той же высоте: родной переключатель под окном закрыт целиком.
+    float2 wv = float2(sin(p.y * 0.045 + t * 1.7 + tilt.x * 2.0), cos(p.x * 0.035 - t * 1.3 + tilt.y * 2.0)) * dpx * 1.6 * sty.y;
+    wv += tilt * dpx * 5.0;
+    float2 wd = -n * dpx * 5.0 * exp(-dep / (dpx * 4.0));
+    float2 bq = clamp(float2(2.0, p.y) + wv + wd, lo, hi);
+    float bo = dpx * 2.5;
+    float3 bg = (content.eval(bq).rgb * 2.0
+                 + content.eval(clamp(bq + float2(bo, 0.0), lo, hi)).rgb
+                 + content.eval(clamp(bq - float2(bo, 0.0), lo, hi)).rgb
+                 + content.eval(clamp(bq + float2(0.0, bo), lo, hi)).rgb
+                 + content.eval(clamp(bq - float2(0.0, bo), lo, hi)).rgb) / 6.0;
+    float yN = clamp((p.y - (c.y - hs.y)) / (2.0 * hs.y), 0.0, 1.0);
+    // Дорожка почти прозрачная: фон страницы плюс лёгкая дымка.
+    float3 col = bg * sty.z + float3(0.012, 0.012, 0.018) + 0.012 * (1.0 - yN);
+    // матовость: мелкое зерно вместо гладкого стекла
+    float nz = fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453) - 0.5;
+    col += nz * sty.w;
+    // Две диагональные световые полосы медленно скользят по стеклу.
+    float u = (p.x * 0.82 + p.y * 0.57) / res.y;
+    float ph = fract(u * 0.55 - t * 0.06 + seed * 0.13);
+    float z = (ph - 0.5) * 7.0;
+    col += float3(0.030, 0.030, 0.042) * exp(-z * z) * k;
+    float ang = t * 0.45 + seed;
+    float2 L = float2(cos(ang), sin(ang));
+    float edge = exp(-dep / (dpx * 1.3));
+    float sp = pow(max(dot(n, L), 0.0), 3.0) + 0.45 * pow(max(dot(n, -L), 0.0), 3.0) + 0.12;
+    float2 q0 = p - c;
+    float th = atan(q0.y, q0.x) / 6.2831853 + 0.5;
+    float dth = abs(th - intro);
+    dth = min(dth, 1.0 - dth);
+    float sweep = exp(-dth * dth * 260.0) * (1.0 - smoothstep(0.88, 1.0, intro)) * step(0.001, intro);
+    col += edge * (sp * 0.38 + sweep * 0.8 + pulse * 0.3) * k;
+    col += exp(-dep / (dpx * 6.0)) * 0.05;
+    float wR = dpx * 1.2;
+    float3 rim = float3(exp(-abs(d + dpx * 0.8) / wR), exp(-abs(d) / wR), exp(-abs(d - dpx * 0.8) / wR));
+    col += rim * (0.30 * pow(max(dot(n, L), 0.0), 2.0) + 0.06) * 0.40 * k;
+    col *= 1.0 - 0.10 * exp(-abs(dep - dpx * 3.4) / (dpx * 1.7));
+    float sideK = pow(abs(n.x), 4.0);
+    col += float3(0.85, 0.80, 1.0) * sideK * exp(-dep / (dpx * 4.0)) * 0.10 * k * sty.x;
+    // Линза: прозрачное стекло, которое увеличивает подписи и преломляет их у кромки.
+    float2 lc = float2(lens.x + lens.z * 0.5, lens.y + lens.w * 0.5);
+    float wob = sin(t * 2.6 + lc.y * 0.03) * 0.010 * (1.0 + 2.0 * stretch);
+    float2 lhs = float2(lens.z * 0.5 * (1.0 + 0.10 * stretch + 0.10 * infl + wob),
+                        lens.w * 0.5 * (1.0 + 0.05 * stretch + 0.08 * infl + wob * 0.6)) - dpx * 1.0;
+    float lr = lhs.y;
+    float dl = sd(p, lc, lhs, lr);
+    float la = clamp(0.5 - dl, 0.0, 1.0) * lensA;
+    float depl = max(-dl, 0.0);
+    float2 nl = sdn(p, lc, lhs, lr);
+    col *= 1.0 - 0.20 * exp(max(dl, 0.0) / (-dpx * 3.5)) * lensA * (1.0 - la);
+    float yl = clamp((p.y - (lc.y - lhs.y)) / (2.0 * lhs.y), 0.0, 1.0);
+    float3 lcol = col * 0.94 + float3(0.020, 0.018, 0.030) + 0.020 * (1.0 - yl) + 0.02 * infl;
+    float2 L2 = float2(cos(ang + 1.3), sin(ang + 1.3));
+    float s2 = pow(max(dot(nl, L2), 0.0), 3.0) + 0.45 * pow(max(dot(nl, -L2), 0.0), 3.0) + 0.14;
+    lcol += exp(-depl / (dpx * 1.3)) * (s2 * 0.40 + pulse * 0.3);
+    float3 rl = float3(exp(-abs(dl + dpx * 0.8) / wR), exp(-abs(dl) / wR), exp(-abs(dl - dpx * 0.8) / wR));
+    lcol += rl * (0.30 * pow(max(dot(nl, L2), 0.0), 2.0) + 0.06) * 0.45;
+    lcol += nz * 0.018;
+    lcol *= 1.0 - 0.16 * exp(-abs(depl - dpx * 3.2) / (dpx * 1.6));
+    col = mix(col, lcol, la);
+    col += (nl.x * tilt.x + nl.y * tilt.y) * 0.04 * la;
+    float rr = length(p - c) / (res.x * 0.5);
+    col += float3(0.70, 0.62, 1.0) * exp(-pow(rr - intro * 1.2, 2.0) * 60.0) * 0.12 * f * (1.0 - intro);
+    // Подписи: вне линзы обычные, внутри увеличены, со складкой у кромки и радужной дисперсией.
+    float tt = clamp(depl / (lhs.y * 0.55), 0.0, 1.0);
+    float em = lhs.y * 0.32 * pow(1.0 - tt, 2.0);
+    float mag = 1.14 + 0.12 * infl;
+    float2 bs = lc + (p - lc) / mag;
+    float2 off = -nl * em;
+    float ar = float4(icons.eval(clamp(bs + off * 0.85, lo, hi))).a;
+    float ag = float4(icons.eval(clamp(bs + off, lo, hi))).a;
+    float ab = float4(icons.eval(clamp(bs + off * 1.15, lo, hi))).a;
+    float a0 = float4(icons.eval(clamp(p, lo, hi))).a;
+    float3 cov = mix(float3(a0), float3(ar, ag, ab), la);
+    float3 lab = mix(float3(0.66, 0.64, 0.72), float3(0.90, 0.89, 0.93), la);
+    col = float3(mix(col.r, lab.r, cov.r), mix(col.g, lab.g, cov.g), mix(col.b, lab.b, cov.b));
+    col = clamp(col, 0.0, 1.0);
+    float go = exp(-max(d, 0.0) / (dpx * 3.2)) * (0.05 + 0.10 * pulse) * (1.0 - a) * k;
+    go += pow(abs(n.x), 3.0) * exp(-max(d, 0.0) / (dpx * 6.0)) * 0.12 * (0.8 + 0.2 * sin(t * 1.5)) * (1.0 - a) * k * sty.x;
+    float3 P = col * a + float3(0.95, 0.80, 0.98) * go;
+    float A = clamp(a + go, 0.0, 1.0);
+    P = min(P, float3(A));
+    return half4(float4(P * f, A * f));
+}
+"""
+
+SCR_PM_REF_W = 905.0
+# (ключ, x0, y0, x1, y1, seed, задержка появления, с) — иконки шапки вкладки «Плагины»
+SCR_PM = (
+    ("pm_add", 649.0, 113.0, 717.0, 181.0, 0.0, 0.00),
+    ("pm_store", 726.0, 113.0, 794.0, 181.0, 1.3, 0.08),
+    ("pm_gear", 801.0, 113.0, 869.0, 181.0, 2.6, 0.16),
+)
+ANIM_KEYS = ("light", "opacity", "pulse", "rot")
 CMDS = set("MmLlHhVvCcSsZz")
 NUM_RE = re.compile(r"[MmLlHhVvCcSsZz]|-?(?:\d+\.?\d*|\.\d+)(?:[eE]-?\d+)?")
 
@@ -546,6 +780,8 @@ class GlassBar(BasePlugin):
         self.ov_route = ""
         self.last_push = None
         self.scale_amt = 50.0
+        self.bk = 1.0
+        self.bdp = lambda v: int(v * 3 + 0.5)
         self.fps_amt = 30.0
         self.ovs = {}
         self.handler = None
@@ -590,6 +826,40 @@ class GlassBar(BasePlugin):
         self.stage = "init"
         self.t0 = time.time()
         self.err_shown = False
+        self.scr = {}
+        self.scr_dead = False
+        self.scr_fx = True
+        self.scr_sel = None
+        self.scr_cand = -1
+        self.scr_cand_n = 0
+        self.scr_miss = 0
+        self.scr_tl = 0.0
+        self.scr_t0 = time.time()
+        self.scr_S = 1.0
+        self.scr_lx = 0.0
+        self.scr_lv = 0.0
+        self.scr_lt = 0.0
+        self.scr_la = 0.0
+        self.scr_st = 0.0
+        self.scr_opt = None
+        self.scr_press = False
+        self.scr_infl = 0.0
+        self.scr_rl_t = 0.0
+        self.scr_pause_until = 0.0
+        self.tilt_id = None
+        self.tilt_x = 0.0
+        self.tilt_y = 0.0
+        self.tilt_tx = 0.0
+        self.tilt_ty = 0.0
+        self.tilt_tl = 0.0
+        self.tilt_n = 0
+        self.watch_on = False
+        self.watch_rb_t = 0.0
+        self.cap_t = {}
+        self.scr_fails = 0
+        self.anim_j = None
+        self.anim_t0 = 0.0
+        self.anim_cur = {}
         self.hook_surface("bottom_bar", "bar", "replace", 100)
         self.api.registerSettings("Glass Bar", json.dumps([
             {"type": "header", "title": "Стеклянная панель"},
@@ -612,10 +882,28 @@ class GlassBar(BasePlugin):
             {"type": "switch", "key": "glass_logs", "title": "Окно логов",
              "subtitle": "Стеклянная панель с логами плагина над кнопками и кнопка «Копировать»",
              "default": True},
+            {"type": "switch", "key": "glass_tilt", "title": "Наклон: вода в стекле",
+             "subtitle": "Фон и блик смещаются при наклоне телефона (датчик)", "default": False},
+            {"type": "switch", "key": "haptic_sections", "title": "Вибрация при смене секции",
+             "subtitle": "Короткий отклик, когда переключается All, BLE или Advert", "default": False},
+            {"type": "slider", "key": "glass_bar_scale", "title": "Масштаб интерфейса стекла",
+             "subtitle": "Размер нижней стеклянной панели с вкладками (70–130%)",
+             "min": 70, "max": 130, "default": 100, "steps": 59},
+            {"type": "switch", "key": "glass_scr", "title": "Стекло на экране Bluetooth",
+             "subtitle": "Матовый стеклянный переключатель All/BLE/Advert вместо родного (тап и перетаскивание) и кромка-стекло вокруг карточки и кнопок",
+             "default": True},
+            {"type": "switch", "key": "glass_scr_fx", "title": "Анимации стекла на экране",
+             "subtitle": "Появление с «пробегом» света, живой блик по кромке, вспышка при смене секции",
+             "default": True},
+            {"type": "slider", "key": "glass_scr_dy_top", "title": "Сдвиг стекла сверху, dp",
+             "subtitle": "Калибровка: переключатель All/BLE/Advert", "min": -30, "max": 30, "default": 0, "steps": 59},
+            {"type": "slider", "key": "glass_scr_dy_bot", "title": "Сдвиг стекла снизу, dp",
+             "subtitle": "Калибровка: карточка с кнопками", "min": -60, "max": 60, "default": 0, "steps": 119},
             {"type": "nav", "title": "Настройки панели", "subtitle": "Свечение, преломление, прозрачность, размытие",
              "icon": "tune", "screen": "glass_settings"},
         ]), 30)
         self._log("Glass Bar " + str(globals().get("__version__", "?")) + " загружен")
+        self._anim_load()
         self._log_device()
         self._start()
 
@@ -626,7 +914,9 @@ class GlassBar(BasePlugin):
         self._stop()
 
     def on_activity_create(self, activity):
-        self._log("activity create")
+        self._log("activity create (маршрут=" + (self.route or "-") + ")")
+        self.scr_miss = 0
+        self._scr_watch_start()
         if self.alive and self.handler is not None:
             self._post(self._setup, 300)
 
@@ -637,6 +927,8 @@ class GlassBar(BasePlugin):
     def on_navigation(self, route):
         self.route = str(route)
         self.nav_pending = None
+        self.scr_miss = 0
+        self._scr_watch_start()
         lc = getattr(self, "last_nav_call", 0.0)
         late = (" (+" + str(int((time.time() - lc) * 1000)) + " мс после navigate_app)") if lc and time.time() - lc < 10.0 else ""
         self._log("nav → " + self.route + late)
@@ -667,7 +959,8 @@ class GlassBar(BasePlugin):
             self.choreo = jclass("android.view.Choreographer")
             self.frame_cb = self.Frm(self._tick)
             self.tick_run = self.Run(self._tick)
-            for key in ("bar", "bub", "glass", "btn", "ttl", "log", "probe"):
+            self.watch_run = self.Run(self._scr_watch)
+            for key in ("bar", "bub", "glass", "btn", "ttl", "log", "probe", "s_pill", "s_card", "s_dev", "s_go", "s_pm_add", "s_pm_store", "s_pm_gear"):
                 self.pcls[key] = self.Pcl(self._make_copy_cb(key))
             self._post(self._setup, 200)
             self.handler.postDelayed(self.tick_run, 400)
@@ -676,6 +969,12 @@ class GlassBar(BasePlugin):
 
     def _stop(self):
         self.alive = False
+        self.watch_on = False
+        self._tilt_stop()
+        try:
+            self.handler.removeCallbacks(self.watch_run)
+        except Exception:
+            pass
         self._teardown_ui()
 
     def _post(self, fn, delay=0):
@@ -798,6 +1097,14 @@ class GlassBar(BasePlugin):
             self.dens = dens
             dp = lambda v: int(v * dens + 0.5)
             self.dp = dp
+            try:
+                bk = float(self.get_setting("glass_bar_scale", 100)) / 100.0
+            except Exception:
+                bk = 1.0
+            bk = max(0.7, min(1.3, bk))
+            self.bk = bk
+            bdp = lambda v: int(v * dens * bk + 0.5)
+            self.bdp = bdp
 
             Dialog = jclass("android.app.Dialog")
             FrameLayout = jclass("android.widget.FrameLayout")
@@ -806,8 +1113,9 @@ class GlassBar(BasePlugin):
             FLP = jclass("android.widget.FrameLayout$LayoutParams")
 
             screen_w = int(act.getResources().getDisplayMetrics().widthPixels)
-            w = int(min(screen_w * 0.92, dp(460)) * 0.77)
-            self.pad = dp(14)               # запас по бокам, чтобы линза могла «надуваться»
+            w = int(min(screen_w * 0.92, dp(460)) * 0.77 * bk)
+            w = max(dp(120), min(w, screen_w - 2 * bdp(14) - dp(8)))
+            self.pad = bdp(14)               # запас по бокам, чтобы линза могла «надуваться»
             self.tw = w // len(TABS)
             self.w_bar = w
             self.stage = "shader"
@@ -817,12 +1125,12 @@ class GlassBar(BasePlugin):
                 sh = False
                 self.shader = None
             self.stage = "window"
-            bar_h = dp(54)
-            bar_top = dp(19) if sh else dp(11)
-            win_h = dp(85) if sh else dp(77)
+            bar_h = bdp(54)
+            bar_top = bdp(19) if sh else bdp(11)
+            win_h = bdp(85) if sh else bdp(77)
             win_w = w + 2 * self.pad
-            bub_h = (bar_h + dp(12)) if sh else dp(45)
-            self.bub_w = int(self.tw * 1.18) if sh else (self.tw - dp(3))
+            bub_h = (bar_h + bdp(12)) if sh else bdp(45)
+            self.bub_w = int(self.tw * 1.18) if sh else (self.tw - bdp(3))
             bub_top = bar_top + (bar_h - bub_h) // 2
 
             dlg = Dialog(act)
@@ -908,6 +1216,12 @@ class GlassBar(BasePlugin):
             self.bub_target = None
             self.stage = "btn"
             self._setup_ovs(act)
+            self.stage = "scr"
+            try:
+                self._setup_scr(act)
+            except Exception as se:
+                self._scr_kill()
+                self._log("ERR стекло экрана: " + type(se).__name__ + ": " + str(se)[:160])
             self.stage = "log"
             try:
                 self._setup_log(act, w, win_h - bar_top)
@@ -929,7 +1243,7 @@ class GlassBar(BasePlugin):
 
     def _icon(self, path_d, color):
         from java import jclass, jint
-        size = self.dp(22)
+        size = self.bdp(22)
         Bitmap = jclass("android.graphics.Bitmap")
         Cfg = jclass("android.graphics.Bitmap$Config")
         bmp = Bitmap.createBitmap(size, size, Cfg.ARGB_8888)
@@ -949,7 +1263,7 @@ class GlassBar(BasePlugin):
             return
         from java import jclass
         act = self.act
-        dp = self.dp
+        dp = self.bdp
         LinearLayout = jclass("android.widget.LinearLayout")
         LLP = jclass("android.widget.LinearLayout$LayoutParams")
         ImageView = jclass("android.widget.ImageView")
@@ -970,7 +1284,7 @@ class GlassBar(BasePlugin):
             tv = TextView(act)
             tv.setText(label)
             tv.setTextColor(argb(0xFFFFFFFF) if sel else argb(0xB3FFFFFF))
-            tv.setTextSize(10.5)
+            tv.setTextSize(float(10.5 * self.bk))
             tv.setSingleLine(True)
             tv.setGravity(17)
             tlp = LLP(-2, -2)
@@ -1046,7 +1360,7 @@ class GlassBar(BasePlugin):
         else:
             k = 300.0                              # упругое, без желейных перелётов
             c = 2.0 * 1.0 * math.sqrt(k)          # критическое затухание
-        steps = max(1, int(dt / 0.004))
+        steps = max(1, int(dt / 0.008))
         h = dt / steps
         for _ in range(steps):
             a = -k * (self.sx - self.bub_target) - c * self.sv
@@ -1164,7 +1478,7 @@ class GlassBar(BasePlugin):
         sh.setFloatUniform("res", float(win_w), float(win_h))
         sh.setFloatUniform("bar", float(self.pad + w / 2.0), float(bar_top + bar_h / 2.0),
                            float(w / 2.0), float(bar_h / 2.0))
-        sh.setFloatUniform("dpx", float(self.dens))
+        sh.setFloatUniform("dpx", float(self.dens * self.bk))
         sh.setFloatUniform("glowK", float(self.glow_amt / 30.0))
         sh.setFloatUniform("refr", float(self.refr_amt / 100.0))
         sh.setFloatUniform("tintK", float(self.tint_amt / 100.0))
@@ -1278,7 +1592,7 @@ class GlassBar(BasePlugin):
             return
         try:
             from java import jclass, jint
-            dp = self.dp
+            dp = self.bdp
             Bitmap = jclass("android.graphics.Bitmap")
             Cfg = jclass("android.graphics.Bitmap$Config")
             Canvas = jclass("android.graphics.Canvas")
@@ -1288,7 +1602,7 @@ class GlassBar(BasePlugin):
             cv = Canvas(bmp)
             tp = Paint(1)
             tp.setTextAlign(Align.CENTER)
-            tp.setTextSize(float(10.5 * self.act.getResources().getDisplayMetrics().scaledDensity))
+            tp.setTextSize(float(10.5 * self.bk * self.act.getResources().getDisplayMetrics().scaledDensity))
             fm = tp.getFontMetrics()
             asc = float(fm.ascent)
             th = float(fm.descent) - asc
@@ -1329,7 +1643,7 @@ class GlassBar(BasePlugin):
         if sh is None or iv is None or self.RE is None:
             return
         try:
-            dp = self.dp
+            dp = self.bdp
             cx = self.cur_x + self.bub_w / 2.0
             cy = self.bub_top + self.bub_h / 2.0
             g = max(0.0, min(1.0, self.infl * 1.3))
@@ -1739,6 +2053,7 @@ class GlassBar(BasePlugin):
                 lw["dlg"].dismiss()
             except Exception:
                 pass
+        self._scr_kill()
         ovs = self.ovs
         self.ovs = {}
         self.ov_route = ""
@@ -1851,6 +2166,10 @@ class GlassBar(BasePlugin):
             self.busy["btn"] = False
             self.busy["ttl"] = False
         try:
+            self._scr_tick()
+        except Exception as sx:
+            self._scr_fail(sx)
+        try:
             self.choreo.getInstance().postFrameCallback(self.frame_cb)
         except Exception:
             pass
@@ -1944,8 +2263,35 @@ class GlassBar(BasePlugin):
         lp.x = int(o["cx"])
         win.setAttributes(lp)
 
+    def _ttl_fixed(self, o):
+        # страница «Плагины»: капсула заголовка сразу фиксированного размера (35% ширины), по центру, без подгонки
+        W = float(self.act.getResources().getDisplayMetrics().widthPixels)
+        tw = 0.35 * W
+        tx = W / 2.0 - tw / 2.0
+        o["tw"] = tw
+        o["tx"] = tx
+        o["wf"] = tw
+        o["xf"] = tx
+        o["probe_at"] = None
+        nw = int(round(tw))
+        nx = int(round(tx))
+        if nw != o["w"] or nx != o["x"]:
+            o["w"] = nw
+            o["x"] = nx
+            o["dlg"].getWindow().setLayout(nw, int(o["h"]))
+            lp = o["root"].getLayoutParams()
+            lp.width = nw
+            o["root"].setLayoutParams(lp)
+            o["sh"].setFloatUniform("res", float(nw), float(o["h"]))
+            o["iv"].setRenderEffect(self.RE.createRuntimeShaderEffect(o["sh"], "content"))
+
+    def _is_pm(self):
+        return "plugin" in str(self.route).lower()
+
     def _start_ov_anim(self, o, delay):
         now = time.time()
+        if o is self.ovs.get("ttl") and self._is_pm():
+            self._ttl_fixed(o)
         o["off"] = -float(o["x"] + o["w"])  # старт за левым краем экрана
         o["v"] = 0.0
         o["anim"] = True
@@ -1966,7 +2312,7 @@ class GlassBar(BasePlugin):
             o["tl"] = now
             if dt <= 0:
                 continue
-            n = max(1, int(dt / 0.004))
+            n = max(1, int(dt / 0.008))
             h = dt / n
             for _ in range(n):
                 o["v"] += (-230.0 * o["off"] - 2.0 * 0.5 * math.sqrt(230.0) * o["v"]) * h
@@ -2005,7 +2351,7 @@ class GlassBar(BasePlugin):
         pp = o["p"]
         pv = o["pv"]
         if dt > 0.0 and (pp != 0.0 or pv != 0.0):
-            n = max(1, int(dt / 0.004))
+            n = max(1, int(dt / 0.008))
             h = dt / n
             for _ in range(n):
                 pv += (-420.0 * pp - 2.0 * 0.32 * math.sqrt(420.0) * pv) * h
@@ -2030,6 +2376,11 @@ class GlassBar(BasePlugin):
     # снимаем полосу экрана на уровне заголовка (окна плагина в PixelCopy окна Activity не попадают),
     # находим светлые пиксели текста и растягиваем/сжимаем капсулу по найденным границам.
     def _title_probe(self, o, now):
+        if self._is_pm():
+            if o.get("tw") is None or abs(o["w"] - o["tw"]) > 1.0:
+                self._ttl_fixed(o)
+            o["probe_at"] = None
+            return
         pa = o.get("probe_at")
         if pa is None or now < pa or not o["shown"] or self.busy.get("probe"):
             return
@@ -2096,6 +2447,10 @@ class GlassBar(BasePlugin):
             win_w = text_w + 2 * dp(26) + 2 * dp(5)
             win_w = max(float(dp(130)), min(win_w, float(self.probe_dw - dp(12))))
             cx = max(win_w / 2.0 + dp(6), min(text_cx, self.probe_dw - win_w / 2.0 - dp(6)))
+            if "plugin" in str(self.route).lower():
+                # страница «Плагины»: капсула всегда фиксированного размера по центру
+                win_w = 0.35 * float(self.probe_dw)
+                cx = float(self.probe_dw) / 2.0
             o["tw"] = float(win_w)
             o["tx"] = float(cx - win_w / 2.0)
             self._log("заголовок: текст " + str(int(text_w)) + " px, капсула " + str(int(win_w)) + " px")
@@ -2104,6 +2459,8 @@ class GlassBar(BasePlugin):
 
     def _title_fit(self, o, now):
         if not o["shown"]:
+            return
+        if self._is_pm():
             return
         t_prev = o.get("fit_t", 0.0)
         o["fit_t"] = now
@@ -2175,7 +2532,7 @@ class GlassBar(BasePlugin):
         if o is None or not o["shown"] or self.busy.get(key):
             return
         now = time.time()
-        if now - o["last"] < (0.0 if o.get("anim") else 1.0 / max(10.0, self.fps_amt)):
+        if now - o["last"] < 1.0 / max(20.0, float(getattr(self, "fps_amt", 30))):
             return
         o["last"] = now
         from java import jclass, jarray, jint
@@ -2205,7 +2562,7 @@ class GlassBar(BasePlugin):
             return
         now = time.time()
         active = self.pressed or self.infl > 0.02 or abs(self.sv) > 2.0
-        interval = 0.0 if active else (1.0 / max(10.0, self.fps_amt))
+        interval = (1.0 / 30.0) if active else (1.0 / max(10.0, self.fps_amt))
         if now - self.last_cap < interval * 0.9:
             return
         view = tgt[0]
@@ -2253,6 +2610,10 @@ class GlassBar(BasePlugin):
         if tgt is None or self.busy.get(key):
             return
         view, iv, ix, iy, stop_w = tgt
+        nowc = time.time()
+        if nowc - self.cap_t.get(key, 0.0) < 1.0 / max(20.0, float(getattr(self, "fps_amt", 30))):
+            return
+        self.cap_t[key] = nowc
         if view.getWidth() <= 0:
             return
         from java import jclass, jarray, jint
@@ -2297,6 +2658,12 @@ class GlassBar(BasePlugin):
             self.pc_err[key] = result
             if result != 0:
                 self._log("WARN PixelCopy[" + str(key) + "] result=" + str(result))
+        if key.startswith("s_"):
+            try:
+                self._scr_on_copy(key, result)
+            except Exception as sc:
+                self._scr_fail(sc)
+            return
         if key == "probe":
             self._on_probe(bmp, result)
             return
@@ -2360,6 +2727,789 @@ class GlassBar(BasePlugin):
                     bmp.recycle()
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------ стекло на экране Bluetooth
+    # Переключатель All/BLE/Advert закрыт целиком стеклянным окном (оно ловит касания и передаёт их хосту);
+    # остальные элементы получают накладки-окна, которые рисуют кромку стекла (преломление, радужная кайма,
+    # блик, жёлоб) и лёгкую вуаль, середина остаётся живым интерфейсом хоста. Положение задано по
+    # скриншоту (доли ширины экрана), плюс калибровка сдвигом в настройках. Секция All/BLE/Advert
+    # определяется по яркости переключателя на снимке окна, а не по недокументированным событиям.
+    def _fval(self, key, default):
+        try:
+            return float(self.get_setting(key, default))
+        except Exception:
+            return float(default)
+
+    def _scr_rt_ok(self, o):
+        r = self.route.lower()
+        if o.get("rt") == "pm":
+            return r == "plugin_manager"
+        return r in ("", "bluetooth")
+
+    def _scr_route_ok(self):
+        # маршрут ещё не известен (после возврата в приложение) — показываем, как на Bluetooth
+        r = self.route.lower()
+        return r in ("", "bluetooth", "plugin_manager")
+
+    def _scr_layout(self, act):
+        from java import jarray, jint
+        dm = act.getResources().getDisplayMetrics()
+        S = float(dm.widthPixels) / SCR_REF_W
+        decor = act.getWindow().getDecorView()
+        dloc = jarray(jint)([0, 0])
+        decor.getLocationOnScreen(dloc)
+        dh = float(decor.getHeight())
+        if dh < 100.0:
+            dh = float(dm.heightPixels)
+        inset = 0.0
+        ins = decor.getRootWindowInsets()
+        if ins is not None:
+            inset = float(ins.getSystemWindowInsetBottom())
+        return S, float(dloc[1]) + dh - inset, inset
+
+    def _seg_labels(self, o, S):
+        # Подписи секций рисуем в bitmap размером с окно и отдаём шейдеру вторым входом
+        from java import jclass, jint
+        Bitmap = jclass("android.graphics.Bitmap")
+        Cfg = jclass("android.graphics.Bitmap$Config")
+        Canvas = jclass("android.graphics.Canvas")
+        Paint = jclass("android.graphics.Paint")
+        Align = jclass("android.graphics.Paint$Align")
+        w, h = int(o["w"]), int(o["h"])
+        bmp = Bitmap.createBitmap(w, h, Cfg.ARGB_8888)
+        cv = Canvas(bmp)
+        tp = Paint(1)
+        tp.setTextAlign(Align.CENTER)
+        tp.setTextSize(float(34.0 * S))
+        tp.setColor(jint(argb(0xFFFFFFFF)))
+        try:
+            tf = jclass("android.graphics.Typeface")
+            tp.setTypeface(tf.create("sans-serif-medium", 0))
+        except Exception:
+            pass
+        fm = tp.getFontMetrics()
+        base = h / 2.0 - (float(fm.ascent) + float(fm.descent)) / 2.0
+        segw = (SCR_SEG_X1 - SCR_SEG_X0) / 3.0 * S
+        left0 = (SCR_SEG_X0 - SCR_PILL_X0) * S + o["pad"]
+        for i in range(3):
+            cv.drawText(SCR_NAMES[i], float(left0 + segw * (i + 0.5)), float(base), tp)
+        BS = jclass("android.graphics.BitmapShader")
+        TM = jclass("android.graphics.Shader$TileMode")
+        o["sh"].setInputShader("icons", BS(bmp, TM.CLAMP, TM.CLAMP))
+        o["lbl"] = bmp
+
+    def _scr_fwd_only(self, o, ev):
+        try:
+            self._scr_fwd(o, ev)
+        except Exception as e:
+            self._log("ERR передача касания: " + type(e).__name__ + ": " + str(e)[:120])
+        return True
+
+    def _scr_fwd(self, o, ev, action=None):
+        # передаём родному интерфейсу копию касания (координаты окна → координаты Activity)
+        from java import jclass, jarray, jint
+        decor = self.act.getWindow().getDecorView()
+        dloc = jarray(jint)([0, 0])
+        decor.getLocationOnScreen(dloc)
+        cp = jclass("android.view.MotionEvent").obtain(ev)
+        if action is not None:
+            cp.setAction(int(action))
+        cp.offsetLocation(float(o["x"] - int(dloc[0])), float(o["y"] - int(dloc[1])))
+        decor.dispatchTouchEvent(cp)
+        cp.recycle()
+
+    def _scr_tap_host(self, o, ev, idx):
+        # после перетаскивания «нажимаем» центр нужной секции родного переключателя
+        from java import jclass, jarray, jint
+        decor = self.act.getWindow().getDecorView()
+        dloc = jarray(jint)([0, 0])
+        decor.getLocationOnScreen(dloc)
+        S = self.scr_S
+        segw = (SCR_SEG_X1 - SCR_SEG_X0) / 3.0 * S
+        left0 = (SCR_SEG_X0 - SCR_PILL_X0) * S + o["pad"]
+        fx = float(o["x"] - int(dloc[0]) + left0 + segw * (idx + 0.5))
+        fy = float(o["y"] - int(dloc[1]) + o["h"] / 2.0)
+        ME = jclass("android.view.MotionEvent")
+        for act_ in (0, 1):
+            cp = ME.obtain(ev)
+            cp.setAction(act_)
+            cp.setLocation(fx, fy)
+            try:
+                cp.setDownTime(ev.getEventTime())
+            except Exception:
+                pass
+            decor.dispatchTouchEvent(cp)
+            cp.recycle()
+
+    def _scr_touch(self, o, ev):
+        # Касания переключателя: тап уходит хосту как есть; перетаскивание двигает линзу за пальцем,
+        # а при отпускании хосту отправляется нажатие на выбранную секцию.
+        try:
+            a = int(ev.getActionMasked())
+            x = float(ev.getX())
+            y = float(ev.getY())
+            S = self.scr_S
+            segw = (SCR_SEG_X1 - SCR_SEG_X0) / 3.0 * S
+            left0 = (SCR_SEG_X0 - SCR_PILL_X0) * S + o["pad"]
+            slop = float(self.dp(10))
+            if a == 0:
+                o["dx"] = x
+                o["dy"] = y
+                o["drag"] = False
+                self.scr_press = True
+                self._scr_fwd(o, ev)
+            elif a == 2:
+                if o["dx"] is None:
+                    return True
+                if not o["drag"] and abs(x - o["dx"]) > slop:
+                    o["drag"] = True
+                    self._scr_fwd(o, ev, 3)  # хост получает отмену жеста
+                if o["drag"]:
+                    self.scr_lt = max(self._scr_lens_x(0), min(self._scr_lens_x(2), x - o["lw"] / 2.0))
+                else:
+                    self._scr_fwd(o, ev)
+            elif a == 1 or a == 3:
+                self.scr_press = False
+                was_drag = o["drag"]
+                started = o["dx"] is not None
+                o["drag"] = False
+                o["dx"] = None
+                if a == 1 and was_drag:
+                    idx = max(0, min(2, int((x - left0) // segw)))
+                    self.scr_opt = (idx, time.time())
+                    self.scr_lt = self._scr_lens_x(idx)
+                    self._log("перетаскивание → секция " + SCR_NAMES[idx])
+                    if idx != self.scr_sel:
+                        self._scr_tap_host(o, ev, idx)
+                elif a == 1 and started:
+                    self._scr_fwd(o, ev)
+                    idx = int((x - left0) // segw)
+                    if 0 <= idx <= 2 and idx != self.scr_sel:
+                        self.scr_opt = (idx, time.time())
+                        self.scr_lt = self._scr_lens_x(idx)
+                        self._log("касание: секция " + SCR_NAMES[idx])
+                else:
+                    if started and not was_drag:
+                        self._scr_fwd(o, ev)
+                    self.scr_lt = self._scr_lens_x(self.scr_sel if self.scr_sel is not None else 0)
+        except Exception as e:
+            self.scr_press = False
+            self._log("ERR касание переключателя: " + type(e).__name__ + ": " + str(e)[:120])
+        return True
+
+    def _mk_scr(self, act, key, sec, x, y, w, h, rad, band, seed, delay, pad, seg=False, fwd=False):
+        from java import jclass
+        Dialog = jclass("android.app.Dialog")
+        FL = jclass("android.widget.FrameLayout")
+        FLP = jclass("android.widget.FrameLayout$LayoutParams")
+        IV = jclass("android.widget.ImageView")
+        ColorDrawable = jclass("android.graphics.drawable.ColorDrawable")
+        Bitmap = jclass("android.graphics.Bitmap")
+        Cfg = jclass("android.graphics.Bitmap$Config")
+        x, y, w, h = int(x), int(y), int(w), int(h)
+        d = Dialog(act)
+        d.requestWindowFeature(1)
+        root = FL(act)
+        iv = IV(act)
+        iv.setScaleType(IV.ScaleType.FIT_XY)
+        root.addView(iv, FLP(-1, -1))
+        d.setContentView(root, FLP(w, h))
+        win = d.getWindow()
+        win.setBackgroundDrawable(ColorDrawable(0))
+        win.clearFlags(2)
+        # накладка не ловит касания (16); заменяющий переключатель их ловит и передаёт хосту
+        win.addFlags((8 | 32 | 256 | 512) if (seg or fwd) else (8 | 16 | 32 | 256 | 512))
+        win.setLayout(w, h)
+        win.setGravity(51)  # TOP | LEFT
+        lp = win.getAttributes()
+        lp.x = x
+        lp.y = y
+        lp.windowAnimations = 0
+        win.setAttributes(lp)
+        sh = jclass("android.graphics.RuntimeShader")(AGSL_SEG if seg else AGSL_RIM)
+        sh.setFloatUniform("res", float(w), float(h))
+        sh.setFloatUniform("dpx", float(self.dens))
+        sh.setFloatUniform("rad", float(rad))
+        sh.setFloatUniform("pad", float(pad))
+        sh.setFloatUniform("t", 0.8)
+        sh.setFloatUniform("intro", 0.0)
+        sh.setFloatUniform("vis", 0.0)
+        sh.setFloatUniform("pulse", 0.0)
+        sh.setFloatUniform("seed", float(seed))
+        sh.setFloatUniform("k", 1.0)
+        if seg:
+            sh.setFloatUniform("lens", 0.0, 0.0, 1.0, 1.0)
+            sh.setFloatUniform("lensA", 0.0)
+            sh.setFloatUniform("stretch", 0.0)
+            sh.setFloatUniform("infl", 0.0)
+            sh.setFloatUniform("tilt", 0.0, 0.0)
+            sh.setFloatUniform("sty", 1.0, 1.0, 0.9, 0.022)
+        else:
+            sh.setFloatUniform("band", float(band))
+        bw = max(8, int(w))
+        bh = max(8, int(h))
+        bufs = [Bitmap.createBitmap(bw, bh, Cfg.ARGB_8888), Bitmap.createBitmap(bw, bh, Cfg.ARGB_8888)]
+        o = {"key": key, "sec": sec, "dlg": d, "iv": iv, "sh": sh, "x": x, "y": y, "w": w, "h": h,
+             "pad": int(pad), "delay": float(delay), "bufs": bufs, "cur": 1, "pidx": 0, "seg": seg,
+             "on": False, "shown": False, "have": False, "vis": 0.0, "intro": 0.0, "introv": 0.0,
+             "intro_at": 0.0, "pulse": 0.0, "last": 0.0, "push_t": 0.0, "pk": None, "err": 0,
+             "dx": None, "dy": None, "drag": False, "rt": "pm" if fwd else "bt"}
+        if seg:
+            self._seg_labels(o, self.scr_S)
+            root.setClickable(True)
+            root.setOnTouchListener(self.Tch(lambda ev: self._scr_touch(o, ev)))
+        elif fwd:
+            root.setClickable(True)
+            root.setOnTouchListener(self.Tch(lambda ev: self._scr_fwd_only(o, ev)))
+        iv.setRenderEffect(self.RE.createRuntimeShaderEffect(sh, "content"))
+        return o
+
+    def _setup_scr(self, act):
+        self.scr = {}
+        self.scr_dead = False
+        self.scr_fails = 0
+        self.scr_pause_until = 0.0
+        self.scr_miss = 0
+        self.scr_cand = -1
+        self.scr_cand_n = 0
+        self.scr_fx = bool(self.get_setting("glass_scr_fx", True))
+        self.scr_tl = 0.0
+        self.scr_t0 = time.time()
+        self.scr_opt = None
+        self.scr_la = 0.0
+        self.scr_st = 0.0
+        self.scr_press = False
+        self.scr_infl = 0.0
+        self.scr_rl_t = 0.0
+        if self.RE is None or not self.get_setting("glass_scr", True):
+            self._log("стекло экрана: выключено" + (" (нужен Android 13+ и AGSL)" if self.RE is None else " в настройках"))
+            return
+        S, base, inset = self._scr_layout(act)
+        self.scr_S = S
+        dens = float(self.dens)
+        dy_top = self._fval("glass_scr_dy_top", 0.0) * dens
+        dy_bot = self._fval("glass_scr_dy_bot", 0.0) * dens
+        pad = self._pad()
+        self._log("стекло экрана: S=" + str(round(S, 3)) + " низ=" + str(int(base)) + " inset=" + str(int(inset))
+                  + " dy_top=" + str(int(dy_top)) + " dy_bot=" + str(int(dy_bot)))
+        for (key, sec, x0, y0, x1, y1, r, band, seed, delay, bot) in SCR_ELEMS:
+            top = (base - (SCR_REF_BOTTOM - y0) * S + dy_bot) if bot else (y0 * S + dy_top)
+            o = self._mk_scr(act, key, sec, x0 * S - pad, top - pad, (x1 - x0) * S + 2 * pad,
+                             (y1 - y0) * S + 2 * pad, r * S, band * dens, seed, delay, pad, key == "pill")
+            self.scr[key] = o
+            self._log("  слой " + key + ": x=" + str(o["x"]) + " y=" + str(o["y"]) + " " + str(o["w"]) + "x" + str(o["h"])
+                      + (" (заменяет родной переключатель)" if o["seg"] else ""))
+        spm = S * SCR_REF_W / SCR_PM_REF_W
+        for (key, x0, y0, x1, y1, seed, delay) in SCR_PM:
+            o = self._mk_scr(act, key, None, x0 * spm - pad, y0 * spm + dy_top - pad,
+                             (x1 - x0) * spm + 2 * pad, (y1 - y0) * spm + 2 * pad,
+                             (x1 - x0) / 2.0 * spm, 4.0 * dens, seed, delay, pad, False, True)
+            o["kb"] = 0.42  # базовая яркость кругов шапки: спокойнее, без пёстрой каймы
+            self.scr[key] = o
+            self._log("  слой " + key + ": x=" + str(o["x"]) + " y=" + str(o["y"]) + " " + str(o["w"]) + "x" + str(o["h"]))
+        pill = self.scr["pill"]
+        pill["lw"] = (SCR_SEG_X1 - SCR_SEG_X0) / 3.0 * S
+        pill["lh"] = (295.0 - 175.0) * S
+        pill["lt"] = pad + (175.0 - 147.0) * S
+        self._tilt_start()
+        self.scr_lt = self._scr_lens_x(self.scr_sel if self.scr_sel is not None else 0)
+        self.scr_lx = self.scr_lt
+        self.scr_lv = 0.0
+
+    def _pad(self):
+        # Толщина стеклянной кромки: настройка «Масштаб стекла» (70–130%). Элементы не двигаются.
+        try:
+            k = 1.0
+        except Exception:
+            k = 1.0
+        return self.dp(12) * k
+
+    def _tilt_start(self):
+        # Датчик наклона (акселерометр): сверено с документацией — getAndroid().sensorStart(type, onEvent).
+        # Формат события в документации не описан, поэтому разбираем защитно и пишем первые события в лог.
+        self._tilt_stop()
+        if not self.get_setting("glass_tilt", False):
+            return
+        try:
+            self.tilt_id = self.api.getAndroid().sensorStart(1, lambda ev: self._tilt_on(ev))
+            self._log("наклон: датчик " + ("включён" if self.tilt_id else "недоступен"))
+        except Exception as e:
+            self.tilt_id = None
+            self._log("ERR датчик наклона: " + type(e).__name__ + ": " + str(e)[:120])
+
+    def _tilt_stop(self):
+        sid = self.tilt_id
+        self.tilt_id = None
+        self.tilt_x = 0.0
+        self.tilt_y = 0.0
+        if sid:
+            try:
+                self.api.getAndroid().sensorStop(sid)
+            except Exception:
+                pass
+
+    def _tilt_on(self, ev):
+        try:
+            d = json.loads(str(ev))
+            vals = d if isinstance(d, list) else (d.get("values") or d.get("v") or [])
+            ax = float(vals[0])
+            ay = float(vals[1])
+        except Exception:
+            if self.tilt_n < 3:
+                self._log("наклон: не разобрано событие: " + str(ev)[:160])
+                self.tilt_n += 1
+            return
+        if self.tilt_n < 2:
+            self._log("наклон: событие: " + str(ev)[:160])
+            self.tilt_n += 1
+        self.tilt_tx = max(-1.0, min(1.0, -ax / 9.8))
+        self.tilt_ty = max(-1.0, min(1.0, ay / 9.8))
+
+    def _buzz(self):
+        try:
+            self.api.getAndroid().vibrate(12)
+        except Exception:
+            pass
+
+    def _scr_lens_x(self, idx):
+        # левый край линзы в координатах окна переключателя
+        pill = self.scr.get("pill")
+        pad = pill["pad"] if pill is not None else 0
+        segw = (SCR_SEG_X1 - SCR_SEG_X0) / 3.0
+        return (SCR_SEG_X0 - SCR_PILL_X0) * self.scr_S + pad + segw * self.scr_S * idx
+
+    def _scr_place(self, o, x):
+        ix = int(round(x))
+        if ix != o["x"]:
+            o["x"] = ix
+            win = o["dlg"].getWindow()
+            lp = win.getAttributes()
+            lp.x = ix
+            win.setAttributes(lp)
+
+    def _scr_relayout(self):
+        # Положение стеклянных окон пересчитываем по текущей геометрии декора: после возврата в
+        # приложение (без закрытия) декор и системные отступы могут отличаться от момента сборки.
+        if not self.scr or self.act is None or self.scr_dead:
+            return
+        from java import jarray, jint
+        S, base, inset = self._scr_layout(self.act)
+        dens = float(self.dens)
+        dy_top = self._fval("glass_scr_dy_top", 0.0) * dens
+        dy_bot = self._fval("glass_scr_dy_bot", 0.0) * dens
+        decor = self.act.getWindow().getDecorView()
+        dloc = jarray(jint)([0, 0])
+        decor.getLocationOnScreen(dloc)
+        pad = self._pad()
+        spm = S * SCR_REF_W / SCR_PM_REF_W
+        for (key, x0, y0, x1, y1, seed, delay) in SCR_PM:
+            o = self.scr.get(key)
+            if o is None:
+                continue
+            nx = int(round(x0 * spm - pad + float(dloc[0])))
+            ny = int(round(float(dloc[1]) + y0 * spm + dy_top - pad))
+            if abs(nx - o["x"]) > 1 or abs(ny - o["y"]) > 1:
+                o["x"] = nx
+                o["y"] = ny
+                win = o["dlg"].getWindow()
+                lp = win.getAttributes()
+                lp.x = nx
+                lp.y = ny
+                win.setAttributes(lp)
+        for (key, sec, x0, y0, x1, y1, r, band, seed, delay, bot) in SCR_ELEMS:
+            o = self.scr.get(key)
+            if o is None:
+                continue
+            top = (base - (SCR_REF_BOTTOM - y0) * S + dy_bot) if bot else (float(dloc[1]) + y0 * S + dy_top)
+            nx = int(round(x0 * S - pad + float(dloc[0])))
+            ny = int(round(top - pad))
+            if abs(nx - o["x"]) > 1 or abs(ny - o["y"]) > 1:
+                self._log("стекло: сдвиг «" + key + "» " + str(o["x"]) + "," + str(o["y"]) + " → " + str(nx) + "," + str(ny))
+                o["x"] = nx
+                o["y"] = ny
+                win = o["dlg"].getWindow()
+                lp = win.getAttributes()
+                lp.x = nx
+                lp.y = ny
+                win.setAttributes(lp)
+
+    def _scr_watch_start(self):
+        if self.watch_on or not self.alive or self.handler is None:
+            return
+        self.watch_on = True
+        self.handler.postDelayed(self.watch_run, 40)
+
+    def _scr_watch(self):
+        # Проверка стеклянных окон каждые 5 мс, но только пока открыт экран Bluetooth.
+        # Окно, которое должно быть показано, но не видно, показываем снова; если окон нет — пересобираем
+        # (не чаще раза в секунду).
+        self.watch_on = False
+        if not self.alive or self.handler is None or not self._scr_route_ok():
+            return
+        try:
+            if self.act is not None:
+                if self.scr:
+                    for o in tuple(self.scr.values()):
+                        if o.get("shown") and not o["dlg"].isShowing():
+                            o["dlg"].show()
+                            o["have"] = False
+                            self._log("стекло: окно «" + str(o["key"]) + "» восстановлено")
+                elif self.native_ok and self.get_setting("glass_scr", True):
+                    now = time.time()
+                    if now - self.watch_rb_t > 1.0:
+                        self.watch_rb_t = now
+                        self._log("стекло: окон нет, пересборка")
+                        self._post(self._setup, 0)
+        except Exception as e:
+            self._log("ERR проверка стекла: " + type(e).__name__ + ": " + str(e)[:120])
+        if self.alive and self.handler is not None and self._scr_route_ok():
+            self.watch_on = True
+            self.handler.postDelayed(self.watch_run, 40)
+
+    def _scr_kill(self):
+        scr = getattr(self, "scr", None) or {}
+        self.scr = {}
+        for o in scr.values():
+            try:
+                o["dlg"].dismiss()
+            except Exception:
+                pass
+
+    def _scr_fail(self, e):
+        self.scr_fails += 1
+        if self.scr_fails >= 20:
+            self._scr_kill()
+            self.scr_dead = True
+            self._log("ERR стекло экрана отключено после 20 сбоев подряд: " + type(e).__name__ + ": " + str(e)[:140])
+            try:
+                self.toast("GlassBar: стекло экрана отключено (" + str(e)[:80] + ")")
+            except Exception:
+                pass
+        else:
+            # окна не трогаем: пауза на 1,5 с, и захват продолжится сам
+            self.scr_pause_until = time.time() + 1.5
+            if self.scr_fails == 1:
+                self._log("стекло: сбой захвата (" + type(e).__name__ + "), пауза 1.5 с, окна сохранены")
+
+    def _scr_set_sel(self, idx):
+        old = self.scr_sel
+        self.scr_sel = idx
+        self.scr_opt = None
+        if not (self.scr.get("pill") or {}).get("drag"):
+            self.scr_lt = self._scr_lens_x(idx)
+        self._log("секция Bluetooth: " + SCR_NAMES[idx])
+        if self.get_setting("haptic_sections", False):
+            self._buzz()
+        o = self.scr.get("pill")
+        if old is not None and self.scr_fx and o is not None:
+            o["pulse"] = 1.0
+
+    def _scr_detect(self, o, bmp):
+        S = self.scr_S
+        w = int(bmp.getWidth())
+        h = int(bmp.getHeight())
+        sx = w / float(o["w"])
+        sy = h / float(o["h"])
+        segw = (SCR_SEG_X1 - SCR_SEG_X0) / 3.0 * S
+        left0 = (SCR_SEG_X0 - SCR_PILL_X0) * S + o["pad"]
+        yy = max(0, min(h - 1, int(o["h"] * 0.5 * sy)))
+        lum = []
+        for i in range(3):
+            acc = 0.0
+            for fr in (0.16, 0.84):
+                xx = max(0, min(w - 1, int((left0 + segw * i + segw * fr) * sx)))
+                pv = int(bmp.getPixel(xx, yy)) & 0xFFFFFFFF
+                acc += 0.299 * ((pv >> 16) & 255) + 0.587 * ((pv >> 8) & 255) + 0.114 * (pv & 255)
+            lum.append(acc / 2.0)
+        best = -1
+        bd = 0.0
+        for i in range(3):
+            oth = [lum[j] for j in range(3) if j != i]
+            diff = abs(lum[i] - (oth[0] + oth[1]) / 2.0)
+            if diff > bd and abs(oth[0] - oth[1]) < diff * 0.5:
+                best = i
+                bd = diff
+        if best < 0 or bd < 22.0:
+            self.scr_miss += 1
+            return
+        self.scr_miss = 0
+        if best == self.scr_cand:
+            self.scr_cand_n += 1
+        else:
+            self.scr_cand = best
+            self.scr_cand_n = 1
+        if o.get("drag"):
+            return  # палец ведёт линзу: снимок хоста не должен её перебивать
+        opt = self.scr_opt
+        if opt is not None:
+            # ждём переключения: промежуточная подсветка хоста (например, на All) не считается выбором
+            if best == opt[0]:
+                self.scr_opt = None
+                if best != self.scr_sel:
+                    self._scr_set_sel(best)
+            return
+        if self.scr_cand_n >= 2 and best != self.scr_sel:
+            self._scr_set_sel(best)
+
+    def _scr_capture(self, o, now, animating):
+        k = "s_" + o["key"]
+        if self.busy.get(k):
+            return
+        if o["key"] == "pill":
+            iv = (1.0 / 30.0) if animating else (1.0 / 12.0)
+        elif o["rt"] == "pm":
+            iv = 1.0 / 30.0  # кнопки шапки «Плагины»: всегда живые
+        else:
+            iv = (1.0 / 30.0) if animating else (1.0 / 4.0)
+        if now - o["last"] < iv:
+            return
+        cb = self.pcls.get(k)
+        if cb is None:
+            return
+        from java import jclass, jarray, jint
+        decor = self.act.getWindow().getDecorView()
+        dloc = jarray(jint)([0, 0])
+        decor.getLocationOnScreen(dloc)
+        l = o["x"] - int(dloc[0])
+        t = o["y"] - int(dloc[1])
+        r = l + o["w"]
+        b = t + o["h"]
+        if l < 0 or t < 0 or r > int(decor.getWidth()) or b > int(decor.getHeight()):
+            return  # окно вышло за экран: снимок исказился бы
+        o["last"] = now
+        idx = 1 - o["cur"]
+        o["pidx"] = idx
+        self.busy[k] = True
+        jclass("android.view.PixelCopy").request(self.act.getWindow(), jclass("android.graphics.Rect")(l, t, r, b),
+                                                 o["bufs"][idx], cb, self.handler)
+
+    def _scr_on_copy(self, key, result):
+        o = self.scr.get(key[2:])
+        if o is None or result != 0:
+            return
+        o["err"] = 0
+        self.scr_fails = 0
+        bmp = o["bufs"][o["pidx"]]
+        o["iv"].setImageBitmap(bmp)
+        o["cur"] = o["pidx"]
+        o["have"] = True
+        if o["key"] == "pill":
+            self._scr_detect(o, bmp)
+
+    # ------------------------------------------------------------------ журнал анимации
+    # glass_anim.json в приватной папке плагина (создаётся редактором). Дорожки: light, opacity, pulse, rot.
+    def _anim_load(self):
+        self.anim_j = None
+        try:
+            txt = self.api.getAndroid().filesRead("glass_anim.json")
+            if txt is None:
+                return
+            j = json.loads(str(txt))
+            tracks = j.get("tracks", {})
+            clean = {}
+            for k in ANIM_KEYS:
+                pts = sorted(tracks.get(k, []), key=lambda p: float(p["t"]))
+                if pts:
+                    clean[k] = [(float(p["t"]), float(p["v"]), str(p.get("ease", "lin"))) for p in pts]
+            dur = float(j.get("dur", 2.0))
+            if dur <= 0.05:
+                dur = 2.0
+            self.anim_j = {"dur": dur, "loop": bool(j.get("loop", True)), "tracks": clean}
+            self.anim_t0 = time.time()
+            self._log("журнал анимации: " + str(j.get("name", "без имени")) + ", " + str(round(dur, 2))
+                      + " с, дорожек " + str(len(clean)))
+        except Exception as e:
+            self.anim_j = None
+            self._log("ERR журнал анимации: " + type(e).__name__ + ": " + str(e)[:140])
+
+    def _ease(self, name, x):
+        if name == "in":
+            return x * x
+        if name == "out":
+            return 1.0 - (1.0 - x) * (1.0 - x)
+        if name == "inout":
+            return 0.5 * (1.0 - math.cos(math.pi * x))
+        return x
+
+    def _anim_eval(self, pts, t):
+        if t <= pts[0][0]:
+            return pts[0][1]
+        if t >= pts[-1][0]:
+            return pts[-1][1]
+        for i in range(len(pts) - 1):
+            t0, v0, e = pts[i]
+            t1, v1, _ = pts[i + 1]
+            if t0 <= t <= t1:
+                x = 0.0 if t1 <= t0 else (t - t0) / (t1 - t0)
+                return v0 + (v1 - v0) * self._ease(e, x)
+        return pts[-1][1]
+
+    def _anim_now(self):
+        j = self.anim_j
+        if j is None:
+            return {}
+        t = time.time() - self.anim_t0
+        d = j["dur"]
+        t = (t % d) if j["loop"] else min(t, d)
+        return {k: self._anim_eval(p, t) for k, p in j["tracks"].items()}
+
+    def _anim_xform(self, o):
+        # Появление как в версии 25: масштаб 84% → 100% с перелётом.
+        x = min(max(o["intro"], 0.0), 1.12)
+        sc = 0.84 + 0.16 * x
+        return sc, sc, 0.0, 0.0
+
+    def _scr_push(self, o, t):
+        sh = o["sh"]
+        sh.setFloatUniform("t", float(t))
+        sh.setFloatUniform("intro", float(o["intro"]))
+        av = self.anim_cur
+        sh.setFloatUniform("pulse", float(min(1.0, o["pulse"] + max(0.0, av.get("pulse", 0.0)))))
+        sh.setFloatUniform("k", float(max(0.0, av.get("light", 1.0))) * float(o.get("kb", 1.0)))
+        sh.setFloatUniform("vis", float(o["vis"] * min(1.0, max(0.0, av.get("opacity", 1.0)))))
+        o["iv"].setRotation(float(av.get("rot", 0.0)))
+        if o["seg"]:
+            sh.setFloatUniform("lens", float(self.scr_lx), float(o["lt"]), float(o["lw"]), float(o["lh"]))
+            sh.setFloatUniform("lensA", float(self.scr_la))
+            sh.setFloatUniform("stretch", float(self.scr_st))
+            sh.setFloatUniform("infl", float(self.scr_infl))
+            sh.setFloatUniform("tilt", float(self.tilt_x), float(self.tilt_y))
+            sh.setFloatUniform("sty", 1.0, 1.0, 0.9, 0.022)
+        sx, sy, tx, ty = self._anim_xform(o)
+        o["iv"].setScaleX(float(sx))
+        o["iv"].setScaleY(float(sy))
+        o["iv"].setTranslationX(float(tx))
+        o["iv"].setTranslationY(float(ty))
+        o["iv"].setRenderEffect(self.RE.createRuntimeShaderEffect(sh, "content"))
+
+    def _scr_tick(self):
+        scr = self.scr
+        if not scr or self.scr_dead or self.act is None:
+            return
+        if time.time() < self.scr_pause_until:
+            return
+        if not self._scr_route_ok() and not any(o.get("shown") for o in scr.values()):
+            return
+        now = time.time()
+        if now - self.scr_rl_t > 0.5:
+            self.scr_rl_t = now
+            try:
+                self._scr_relayout()
+            except Exception as rx:
+                self._log("ERR пересчёт стекла: " + type(rx).__name__ + ": " + str(rx)[:120])
+        dt = (now - self.scr_tl) if self.scr_tl > 0.0 else 0.0
+        self.scr_tl = now
+        dt = min(max(dt, 0.0), 0.05)
+        fx = self.scr_fx
+        route_ok = self._scr_route_ok()
+        sel = self.scr_sel
+        t = (now - self.scr_t0) if fx else 0.8
+        tdt = min(max(now - self.tilt_tl, 0.0), 0.05) if self.tilt_tl else 0.0
+        self.tilt_tl = now
+        kx = 1.0 - math.exp(-tdt * 5.0)
+        self.tilt_x += (self.tilt_tx - self.tilt_x) * kx
+        self.tilt_y += (self.tilt_ty - self.tilt_y) * kx
+        self.anim_cur = self._anim_now()
+        opt = self.scr_opt
+        if opt is not None and now - opt[1] > 2.5:
+            # хост так и не подтвердил: снимаем ожидание и ставим линзу на фактически выбранную секцию
+            self.scr_opt = None
+            if sel is not None and not (self.scr.get("pill") or {}).get("drag"):
+                self.scr_lt = self._scr_lens_x(sel)
+        self.scr_la += ((1.0 if sel is not None else 0.0) - self.scr_la) * (1.0 - math.exp(-dt * 10.0))
+        self.scr_infl += ((1.0 if self.scr_press else 0.0) - self.scr_infl) * (1.0 - math.exp(-dt * 14.0))
+        if self.scr_infl < 0.002:
+            self.scr_infl = 0.0
+        for key, o in tuple(scr.items()):
+            want = self._scr_rt_ok(o) and (o["sec"] is None or o["sec"] == sel)
+            if want and not o["on"]:
+                o["on"] = True
+                o["intro"] = 0.0 if fx else 1.0
+                o["introv"] = 0.0
+                o["intro_at"] = now + o["delay"]
+                o["pulse"] = 0.0
+                if o["seg"]:
+                    self.scr_lx = self.scr_lt
+                    self.scr_lv = 0.0
+                if not o["shown"]:
+                    o["dlg"].show()
+                    o["shown"] = True
+            elif not want and o["on"]:
+                o["on"] = False
+            o["vis"] += ((1.0 if want else 0.0) - o["vis"]) * (1.0 - math.exp(-dt * (10.0 if want else 14.0)))
+            if not want and o["shown"] and o["vis"] < 0.01:
+                o["dlg"].hide()
+                o["shown"] = False
+                o["vis"] = 0.0
+                o["have"] = False
+            if not o["shown"]:
+                if o["seg"]:
+                    self.scr_press = False
+                continue
+            moving = False
+            if o["seg"] and o["on"]:
+                x = self.scr_lx
+                v = self.scr_lv
+                tx = self.scr_lt
+                if abs(tx - x) > 0.3 or abs(v) > 3.0:
+                    kk = 900.0 if o["drag"] else 420.0
+                    zz = 0.9 if o["drag"] else 0.42
+                    n = max(1, int(dt / 0.008))
+                    hh = dt / n
+                    for _ in range(n):
+                        v += (-kk * (x - tx) - 2.0 * zz * math.sqrt(kk) * v) * hh
+                        x += v * hh
+                    if abs(tx - x) < 0.3 and abs(v) < 3.0:
+                        x = tx
+                        v = 0.0
+                    self.scr_lx = x
+                    self.scr_lv = v
+                    moving = True
+                    self.scr_st = min(1.0, abs(v) / (o["lw"] * 6.0))
+                    if fx:
+                        o["pulse"] = max(o["pulse"], min(0.5 if o["drag"] else 1.0, abs(v) / (o["lw"] * 5.0)))
+                else:
+                    self.scr_st = 0.0
+            running = False
+            if o["on"] and o["have"] and now >= o["intro_at"] and (o["intro"] != 1.0 or o["introv"] != 0.0):
+                x = o["intro"]
+                v = o["introv"]
+                n = max(1, int(dt / 0.008))
+                hh = dt / n
+                for _ in range(n):
+                    v += (-110.0 * (x - 1.0) - 2.0 * 0.42 * math.sqrt(110.0) * v) * hh
+                    x += v * hh
+                if abs(x - 1.0) < 0.002 and abs(v) < 0.01:
+                    x = 1.0
+                    v = 0.0
+                o["intro"] = x
+                o["introv"] = v
+                running = True
+            if fx and o["pulse"] > 0.0:
+                o["pulse"] *= math.exp(-dt * 3.2)
+                if o["pulse"] < 0.01:
+                    o["pulse"] = 0.0
+            animating = moving or running or o["pulse"] > 0.01 or bool(self.anim_j) or bool(self.tilt_id) or (o["seg"] and (self.scr_press or self.scr_infl > 0.01))
+            try:
+                self._scr_capture(o, now, animating)
+            except Exception as ce:
+                self.busy["s_" + key] = False
+                o["err"] += 1
+                if o["err"] >= 20:
+                    raise ce
+            if o["vis"] < 0.01:
+                continue
+            live = o["rt"] == "pm"  # кнопки шапки «Плагины»: плавно, без округления времени
+            tq = round(t, 3) if (animating or live) else round(t, 1)
+            pk = (round(o["vis"], 3), round(o["intro"], 3), round(o["pulse"], 3), tq if fx else 0.0)
+            pk = pk + tuple(round(x, 2) for x in self.anim_cur.values())
+            if o["seg"]:
+                pk = pk + (round(self.scr_lx, 1), round(self.scr_la, 2), round(self.scr_st, 2), round(self.scr_infl, 2), round(self.tilt_x, 2), round(self.tilt_y, 2))
+            interval = 0.0 if live else ((1.0 / 40.0) if animating else ((1.0 / 12.0) if fx else 0.0))
+            if pk != o["pk"] and now - o["push_t"] >= interval:
+                o["pk"] = pk
+                o["push_t"] = now
+                self._scr_push(o, t)
 
     # ------------------------------------------------------------------ штатная панель
     def screen_bar(self, ui, api, state):
