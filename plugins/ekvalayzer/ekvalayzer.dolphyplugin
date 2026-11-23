@@ -1,0 +1,1727 @@
+__id__ = "dolphy_eq"
+__name__ = "Эквалайзер"
+__version__ = "1.4.40"
+__author__ = "@Da_koroche"
+__description__ = "Эквалайзер с Liquid Glass и HD-пиксельной анимацией DOLPHY"
+__icon__ = "rounded:graphic_eq"
+__permissions__ = []
+
+import json
+import math
+import random
+import threading
+import time
+
+# Эквалайзер на системных аудиоэффектах Android (android.media.audiofx), как у Wavelet:
+#   Equalizer, BassBoost, Virtualizer, LoudnessEnhancer.
+# Эффекты вешаются на глобальную сессию 0 и на аудиосессии, найденные у играющих плееров.
+# Что реально сработает, зависит от прошивки: на части устройств глобальные эффекты отключены.
+
+FX = "android.media.audiofx."
+POLL_MS = 3000
+GLASSBAR_PREFS = "dolphy_cross_plugin_state"
+ISO31 = [20, 25, 31, 40, 50, 63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 630, 800, 1000, 1250,
+         1600, 2000, 2500, 3150, 4000, 5000, 6300, 8000, 10000, 12500, 16000, 20000]
+
+PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<style>
+:root{--a:#ececec;--g1:rgba(255,255,255,.105);--g2:rgba(255,255,255,.018);--rim:rgba(255,255,255,.27)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;overflow:hidden;color:#fff;font-family:sans-serif;user-select:none;-webkit-user-select:none;touch-action:none}
+body{background:radial-gradient(120% 80% at 15% 0%,rgba(236,236,236,.30),transparent 60%),radial-gradient(100% 70% at 100% 100%,rgba(150,150,150,.22),transparent 60%),rgba(14,14,14,.55)}
+html.inline body{background:#1b1720;overflow-y:auto;touch-action:pan-y}
+#app{position:relative;z-index:2;display:flex;flex-direction:column;gap:10px;height:100%;padding:34px 12px 14px}
+html.inline #app{height:auto;min-height:100%;padding:6px}
+.glass{position:relative;border-radius:22px;background:linear-gradient(145deg,rgba(255,255,255,.105),rgba(255,255,255,.012) 42%,rgba(20,16,28,.075));
+ -webkit-backdrop-filter:blur(14px) saturate(185%) contrast(1.06);backdrop-filter:blur(14px) saturate(185%) contrast(1.06);
+ border:1px solid rgba(255,255,255,.24);
+ box-shadow:inset 0 1px 0 rgba(255,255,255,.48),inset 0 -1px 0 rgba(255,255,255,.07),inset 1px 0 0 rgba(255,255,255,.13),0 8px 28px rgba(0,0,0,.30),0 0 18px rgba(236,236,236,.07);overflow:hidden}
+.glass:before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(118deg,rgba(255,255,255,.17),transparent 24%,transparent 72%,rgba(255,255,255,.035));opacity:.85}
+.glass{animation:up .42s cubic-bezier(.16,1,.3,1) both;animation-play-state:paused;will-change:transform,opacity}
+html.go .glass{animation-play-state:running}
+.k{transition:transform .12s}
+.top{display:flex;align-items:center;gap:10px;padding:10px 14px}
+.ttl{flex:1;font-size:20px;font-weight:700}.ttl small{display:block;font-size:11px;font-weight:400;color:#ffffffb0;margin-top:2px}
+.ib{width:40px;height:40px;border-radius:20px;display:flex;align-items:center;justify-content:center;font-size:18px;
+ background:linear-gradient(145deg,rgba(255,255,255,.30),rgba(255,255,255,.06));border:1px solid var(--rim);box-shadow:inset 0 1px 0 rgba(255,255,255,.6)}
+@keyframes knobSquash{0%{transform:scaleX(1)}30%{transform:scaleX(1.3)}65%{transform:scaleX(.9)}100%{transform:scaleX(1)}}
+@keyframes swGlow{0%{box-shadow:0 0 0 rgba(255,255,255,0)}40%{box-shadow:0 0 24px rgba(255,255,255,.5)}100%{box-shadow:0 0 16px rgba(255,255,255,.28)}}
+.sw{width:60px;height:34px;border-radius:17px;position:relative;background:linear-gradient(180deg,rgba(0,0,0,.5),rgba(255,255,255,.07));border:1px solid rgba(255,255,255,.28);box-shadow:inset 0 2px 6px rgba(0,0,0,.6),inset 0 -1px 0 rgba(255,255,255,.12);transition:background .4s ease,box-shadow .4s ease,transform .18s cubic-bezier(.3,1.4,.6,1)}.sw:active{transform:scale(.96)}.c,.ib,.btn{transition:transform .15s,background .25s}.c:active,.ib:active,.btn:active{transform:scale(.93)}
+.sw:after{content:"";position:absolute;top:3px;left:3px;width:26px;height:26px;border-radius:13px;background:radial-gradient(circle at 34% 28%,#ffffff 0%,#e9e9e9 35%,#9a9a9a 85%,#6e6e6e 100%);box-shadow:0 3px 8px rgba(0,0,0,.55),inset 0 -2px 3px rgba(0,0,0,.25);transition:left .42s cubic-bezier(.34,1.56,.64,1),width .18s ease}.sw:active:after{width:32px}
+.sw.on{background:linear-gradient(180deg,#f7f7f7,#bdbdbd);border-color:rgba(255,255,255,.75);box-shadow:0 0 16px rgba(255,255,255,.3),inset 0 1px 0 rgba(255,255,255,.8);}.sw.on:after{left:29px;animation:knobSquash .45s cubic-bezier(.3,1.2,.5,1)}.sw.on:active:after{left:27px}.sw:after{z-index:1}
+.sw::before{content:"";position:absolute;top:3px;left:3px;width:26px;height:26px;border-radius:13px;z-index:2;pointer-events:none;background:linear-gradient(135deg,rgba(255,255,255,.6),rgba(255,255,255,.04) 48%,rgba(255,255,255,.22));border:1px solid rgba(255,255,255,.65);box-shadow:inset 0 1px 2px rgba(255,255,255,.9),0 0 6px rgba(255,255,255,.2);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);transition:left .42s cubic-bezier(.34,1.56,.64,1),width .18s ease}
+.sw:active::before{width:32px}
+.sw.on::before{left:29px;animation:knobSquash .45s cubic-bezier(.3,1.2,.5,1)}
+.sw.on:active::before{left:27px}
+
+#chips{display:flex;flex-wrap:wrap;gap:6px;padding:10px}
+.c{padding:7px 13px;border-radius:16px;font-size:13px;background:linear-gradient(145deg,rgba(255,255,255,.20),rgba(255,255,255,.04));border:1px solid rgba(255,255,255,.26);box-shadow:inset 0 1px 0 rgba(255,255,255,.4)}
+.c.on{background:linear-gradient(145deg,rgba(236,236,236,.95),rgba(236,236,236,.55));color:#161616;border-color:rgba(255,255,255,.7)}
+.grow{flex:1;min-height:230px;padding:8px 4px}
+html.inline .grow{height:300px;flex:none}
+#bands{display:flex;gap:1px;height:100%;touch-action:none}
+.b{flex:1;display:flex;flex-direction:column;align-items:center;min-width:0}
+.v{font-size:9px;height:13px;color:var(--a);white-space:nowrap}.l{font-size:9px;height:13px;color:#ffffffa0;white-space:nowrap}
+.t{position:relative;flex:1;width:100%}
+.t:before{content:"";position:absolute;left:50%;top:6px;bottom:6px;width:8px;margin-left:-4px;border-radius:4px;background:rgba(0,0,0,.28);box-shadow:inset 0 1px 3px rgba(0,0,0,.5),0 1px 0 rgba(255,255,255,.18)}
+.z{position:absolute;left:18%;right:18%;height:1px;background:rgba(255,255,255,.35)}
+.f{position:absolute;left:50%;width:8px;margin-left:-4px;border-radius:4px;background:linear-gradient(90deg,rgba(255,255,255,.75),var(--a) 40%,rgba(236,236,236,.6));box-shadow:0 0 10px rgba(236,236,236,.6)}
+.k{position:absolute;left:50%;width:22px;height:22px;margin:-11px 0 0 -11px;border-radius:11px;background:radial-gradient(circle at 32% 28%,#fff 0%,rgba(255,255,255,.85) 28%,rgba(205,205,205,.55) 70%);border:1px solid rgba(255,255,255,.9);box-shadow:0 3px 8px rgba(0,0,0,.45),inset 0 -2px 3px rgba(120,120,120,.4)}
+.pan{padding:12px 14px}
+.row{display:flex;align-items:center;gap:10px;margin:7px 0;font-size:13px}.row label{width:132px;color:#ffffffd0}.row output{width:52px;text-align:right;color:var(--a);font-size:12px}
+input[type=range]{-webkit-appearance:none;flex:1;height:26px;background:transparent;touch-action:pan-x}
+input[type=range]::-webkit-slider-runnable-track{height:8px;border-radius:4px;background:rgba(0,0,0,.28);box-shadow:inset 0 1px 3px rgba(0,0,0,.5)}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;height:24px;margin-top:-8px;border-radius:12px;background:radial-gradient(circle at 32% 28%,#fff,rgba(205,205,205,.6) 70%);border:1px solid #fff;box-shadow:0 3px 8px rgba(0,0,0,.45)}
+.opt{display:flex;align-items:center;justify-content:space-between;margin:8px 0;font-size:13px}
+.btn{margin-top:8px;text-align:center;padding:11px;border-radius:16px;background:linear-gradient(145deg,rgba(255,255,255,.22),rgba(255,255,255,.05));border:1px solid var(--rim);box-shadow:inset 0 1px 0 rgba(255,255,255,.5);font-size:14px}
+.shd .glass{background:transparent!important;border-color:transparent!important;box-shadow:none!important;-webkit-backdrop-filter:none!important;backdrop-filter:none!important}
+.shd .glass:before,.shd .glass:after{display:none!important;content:none!important}
+.shd #chips .c,.shd .top .ib{background:transparent!important;border-color:transparent!important;box-shadow:none!important}
+.shd #chips .c:not(.on){color:rgba(255,255,255,.94)}
+.shd .top .sw{background:rgba(12,8,18,.24);border-color:rgba(255,255,255,.18)}
+.shd .pan .btn{background:rgba(20,16,30,.20);border-color:rgba(255,255,255,.28);box-shadow:inset 0 1px 0 rgba(255,255,255,.24)}
+.shd #chips .c.on{background:rgba(236,236,236,.22);color:#fff;border-color:rgba(255,255,255,.32)}
+.shd .top .sw.on{background:rgba(236,236,236,.42)}
+body.shd{background:none}
+html.shd body{background:none}
+.sc{overflow-y:auto;touch-action:pan-y;max-height:34vh}
+html.inline .sc{max-height:none}
+
+/* GLASS BAR optimized mode: monochrome vector UI inspired by Wavelet */
+html.opt-mode body{background:#090909;color:#f7f7f7}
+html.opt-mode #app{gap:9px}
+.sw,.btn,.c{transition:background-color .25s ease,border-color .25s ease,box-shadow .25s ease}
+.shd .sw,.shd .btn,.shd .c{background:transparent!important;border-color:rgba(255,255,255,.38)!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.22)!important}
+.shd .sw.on{background:rgba(255,255,255,.16)!important}
+.shd .k{background:radial-gradient(circle at 32% 28%,#fff,rgba(255,255,255,.72) 42%,rgba(200,200,200,.18) 78%)!important;border-color:rgba(255,255,255,.7)!important}
+html{background:#000!important}
+body{background:transparent!important}
+#bg,#lens{position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none}
+#bg{z-index:-1}
+#dolph-pixels{position:fixed;inset:0;width:100vw;height:100vh;z-index:0;pointer-events:none;image-rendering:pixelated;opacity:.78}
+#lens{z-index:50}
+html.opt-mode .glass{background:#111;border:1px solid #3b3b3b;backdrop-filter:none;-webkit-backdrop-filter:none;
+ box-shadow:0 5px 18px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.08);border-radius:20px}
+html.opt-mode .top{background:linear-gradient(145deg,#191919,#0d0d0d);border-color:#454545}
+html.opt-mode .ttl{letter-spacing:-.35px}
+html.opt-mode .ttl small{color:#aaa}
+html.opt-mode .ib{background:#171717;border:1px solid #555;box-shadow:none;color:#fff}
+html.opt-mode .sw{background:#262626;border:1px solid #666;transition:background .12s,transform .12s}
+html.opt-mode .sw:after{background:#f5f5f5;box-shadow:none;transition:left .12s linear}
+html.opt-mode .sw.on{background:#f2f2f2;border-color:#fff}
+html.opt-mode .sw.on:after{background:#080808}
+html.opt-mode #chips{background:#101010;border-color:#383838}
+html.opt-mode .c{background:#171717;border:1px solid #444;box-shadow:none;color:#ddd}
+html.opt-mode .c.on{background:#f3f3f3;color:#080808;border-color:#fff}
+html.opt-mode .grow{background-color:#0d0d0d;position:relative;isolation:isolate}
+html.opt-mode .grow:before{content:"";position:absolute;inset:8px 10px 8px;pointer-events:none;z-index:-1;opacity:.22;
+ background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 260' fill='none'%3E%3Cpath d='M0 170 C65 170 65 90 130 90 S195 210 260 210 325 45 390 45 455 185 520 185 585 105 650 105 715 155 800 155' stroke='%23ffffff' stroke-width='2'/%3E%3Cpath d='M0 205 C80 205 80 150 160 150 S240 225 320 225 400 110 480 110 560 195 640 195 720 145 800 145' stroke='%23ffffff' stroke-width='1' opacity='.55'/%3E%3C/svg%3E");background-size:100% 100%;background-repeat:no-repeat}
+html.opt-mode .b .v{color:#fff}
+html.opt-mode .b .l{color:#999}
+html.opt-mode .t:before{background:#252525;box-shadow:inset 0 1px 3px #000}
+html.opt-mode .z{background:#777}
+html.opt-mode .f{background:#f2f2f2;box-shadow:0 0 8px rgba(255,255,255,.18)}
+html.opt-mode .k{background:#fff;border:1px solid #fff;box-shadow:0 2px 5px #000,inset 0 -2px 3px #bbb}
+html.opt-mode .pan{background:#101010;border-color:#3c3c3c}
+html.opt-mode .row label{color:#ddd}
+html.opt-mode .row output{color:#fff}
+html.opt-mode input[type=range]::-webkit-slider-runnable-track{background:#292929;box-shadow:inset 0 1px 3px #000}
+html.opt-mode input[type=range]::-webkit-slider-thumb{background:#f5f5f5;border:1px solid #fff;box-shadow:0 2px 5px #000}
+html.opt-mode .btn{background:#171717;border:1px solid #555;box-shadow:none}
+html.opt-mode .btn:active,html.opt-mode .c:active{background:#333}
+html.opt-mode .sc{scrollbar-color:#555 transparent}
+html.opt-mode .glass{transition:none!important}
+html.opt-mode .k,html.opt-mode .sw:after,html.opt-mode .ib,html.opt-mode .btn{transition-duration:.10s}
+
+/* No GLASS BAR installed/active: EQ remains a plain opaque interface, never faux glass. */
+html.no-glass-mode body,html.no-glass-mode{background:#101010!important;color:#f2f2f2}
+html.no-glass-mode .glass,html.no-glass-mode .top,html.no-glass-mode #chips,
+html.no-glass-mode .grow,html.no-glass-mode .pan{
+ background:#191919!important;border:1px solid #353535!important;border-radius:16px!important;
+ -webkit-backdrop-filter:none!important;backdrop-filter:none!important;
+ box-shadow:none!important;filter:none!important
+}
+html.no-glass-mode .glass:before,html.no-glass-mode .glass:after,
+html.no-glass-mode .grow:before,html.no-glass-mode .grow:after{display:none!important;content:none!important}
+html.no-glass-mode .glass{transition:background-color .12s ease,border-color .12s ease!important}
+html.no-glass-mode .top{background:#202020!important}
+html.no-glass-mode .c,html.no-glass-mode .btn,html.no-glass-mode .ib{background:#242424!important;border:1px solid #454545!important;box-shadow:none!important}
+html.no-glass-mode .c.on{background:#eeeeee!important;color:#111!important}
+html.no-glass-mode .sw{box-shadow:none!important}
+
+/* Лёгкий режим: тот же вид, но без дорогих эффектов (анимации, размытие подложки, фильтры) */
+html.lite *,html.lite *:before,html.lite *:after{animation:none!important;transition:none!important;will-change:auto!important;text-shadow:none!important;filter:none!important}
+html.lite #lens{display:none!important}
+html.lite #dolph-pixels{opacity:.48}
+html.lite .glass{box-shadow:inset 0 1px 0 rgba(255,255,255,.4)!important}
+/* Liquid Glass fallback for devices without RuntimeShader. On AGSL devices
+   the native underlay shader supplies refraction; CSS adds only restrained
+   blur/saturation and edge lighting. */
+.glass,.top,#chips,.pan{-webkit-backdrop-filter:blur(9px) saturate(175%) contrast(1.07);backdrop-filter:blur(9px) saturate(175%) contrast(1.07)}
+html.shd .glass,html.shd .top,html.shd #chips,html.shd .pan{-webkit-backdrop-filter:none;backdrop-filter:none}
+html:not(.lite) .glass{box-shadow:inset 0 1px 0 rgba(255,255,255,.48),inset 0 -1px 0 rgba(255,255,255,.07),0 4px 12px rgba(0,0,0,.35)!important}
+/* Стеклянные полосы и ползунки */
+.t:before{background:linear-gradient(90deg,rgba(255,255,255,.10),rgba(255,255,255,.02) 50%,rgba(255,255,255,.10))!important;border:1px solid rgba(255,255,255,.22)!important;box-shadow:inset 0 1px 3px rgba(0,0,0,.5)!important}
+.f{background:linear-gradient(90deg,rgba(255,255,255,.58),rgba(255,255,255,.16) 50%,rgba(255,255,255,.52))!important;border:1px solid rgba(255,255,255,.45)!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.6)!important}
+.k,input[type=range]::-webkit-slider-thumb{background:radial-gradient(circle at 32% 26%,rgba(255,255,255,.95),rgba(255,255,255,.36) 46%,rgba(255,255,255,.08) 74%)!important;border:1px solid rgba(255,255,255,.72)!important;box-shadow:0 2px 6px rgba(0,0,0,.45),inset 0 -2px 3px rgba(255,255,255,.25)!important}
+input[type=range]::-webkit-slider-runnable-track{background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.14))!important;border:1px solid rgba(255,255,255,.24)!important;box-shadow:inset 0 1px 3px rgba(0,0,0,.5)!important}
+html.lite .k,html.lite input[type=range]::-webkit-slider-thumb{box-shadow:inset 0 -2px 3px rgba(255,255,255,.25)!important}
+</style></head><body>
+<div id="app">
+ <div class="glass top"><div class="ttl">Эквалайзер<small id="st">…</small></div><div id="pw" class="sw"></div><div id="x" class="ib">✕</div></div>
+ <div class="glass" id="chips"></div>
+ <div class="glass grow"><div id="bands"></div></div>
+ <div class="glass pan sc" id="low"></div>
+</div>
+<script>
+var Q=new URLSearchParams(location.search),K=Q.get('k'),FULL=Q.get('m')!=='inline';
+if(!FULL){document.documentElement.className='inline';document.getElementById('x').style.display='none'}
+// Apply bridge mode before first paint to prevent a glass flash.
+document.documentElement.classList.toggle('no-glass-mode',Q.get('gb')!=='1');
+document.documentElement.classList.toggle('lite',Q.get('opt')==='1');window.__lite=(Q.get('opt')==='1');window.__plain=(Q.get('gb')!=='1');
+var RSIG='',S=null,sig='',pend={},tmr=null,P={},PAINT=false,lastTap={t:0,i:-1},bandsEl=document.getElementById('bands');
+function api(p){return fetch('/'+p+(p.indexOf('?')<0?'?':'&')+'k='+K).then(function(r){return r.text()})}
+function lab(h){return h>=1000?(h/1000).toFixed(h<10000?1:0).replace('.0','')+'k':String(h)}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+function build(){
+ var c=document.getElementById('chips'),h='';
+ [['Система',0],['10',10],['15',15],['31',31]].forEach(function(o){h+='<div class="c'+(S.nb==o[1]?' on':'')+'" data-n="'+o[1]+'">'+o[0]+'</div>'});
+ S.presets.forEach(function(n,i){h+='<div class="c" data-p="'+i+'">'+n+'</div>'});
+ h+='<div class="c'+(PAINT?' on':'')+'" data-paint="1">✍ Рисовать</div>';
+ c.innerHTML=h;
+ bandsEl.innerHTML='';
+ S.hz.forEach(function(hz){var d=document.createElement('div');d.className='b';
+  d.innerHTML='<div class="v"></div><div class="t"><div class="z"></div><div class="f"></div><div class="k"></div></div><div class="l">'+lab(hz)+'</div>';bandsEl.appendChild(d)});
+ sig=S.hz.join(',')+'|'+S.nb;draw();low()}
+var DC=null;
+function dcache(){var rows=bandsEl.children;DC=[];for(var i=0;i<rows.length;i++){var d=rows[i];DC.push({t:d.querySelector('.t'),f:d.querySelector('.f'),k:d.querySelector('.k'),z:d.querySelector('.z'),v:d.querySelector('.v')})}}
+function draw(only){
+ var rows=bandsEl.children;if(!DC||DC.length!==rows.length||(DC.length&&!DC[0].t.isConnected))dcache();
+ if(!DC.length)return;
+ var H=DC[0].t.clientHeight-12,z=(0-S.lo)/(S.hi-S.lo),i0=0,i1=DC.length;
+ if(only!==undefined){i0=only;i1=only+1}
+ for(var i=i0;i<i1;i++){var c=DC[i];if(!c)continue;var f=(S.lv[i]-S.lo)/(S.hi-S.lo),top=6+(1-Math.max(f,z))*H,hh=Math.abs(f-z)*H;
+  c.f.style.top=top+'px';c.f.style.height=hh+'px';c.k.style.top=(6+(1-f)*H)+'px';c.z.style.top=(6+(1-z)*H)+'px';
+  c.v.textContent=(S.lv[i]>0?'+':'')+S.lv[i].toFixed(S.hz.length>15?0:1)}}
+var lowSig='';
+function low(){
+ var e=document.getElementById('low');
+ var ns=JSON.stringify([S.bass,S.virt,S.loud,S.glob,S.auto,S.on,S.st,S.opt,S.gb,S.shx]);
+ if(ns===lowSig){
+  document.getElementById('pw').className='sw'+(S.on?' on':'');
+  document.getElementById('st').textContent=S.st;
+  return;
+ }
+ lowSig=ns;
+ function rg(l,k,max,val,fmt){return '<div class="row"><label>'+l+'</label><input type="range" min="0" max="'+max+'" value="'+val+'" data-k="'+k+'"><output>'+fmt(val)+'</output></div>'}
+ e.innerHTML=rg('Бас','eq_bass',100,Math.round(S.bass/10),function(v){return v+' %'})
+  +rg('Виртуализатор','eq_virt',100,Math.round(S.virt/10),function(v){return v+' %'})
+  +rg('Громкость','eq_loud',150,Math.round(S.loud/10),function(v){return '+'+(v/10).toFixed(1)+' дБ'})
+  +'<div class="opt">Глобальная сессия (все приложения)<div class="sw'+(S.glob?' on':'')+'" data-f="eq_global"></div></div>'
+  +'<div class="opt">Сессии играющих плееров<div class="sw'+(S.auto?' on':'')+'" data-f="eq_auto"></div></div>'
+  +'<div class="btn" data-reset="1">Сбросить всё</div>';
+ document.getElementById('pw').className='sw'+(S.on?' on':'');
+ document.documentElement.classList.toggle('lite',!!S.opt);window.__lite=!!S.opt;window.__plain=!S.gb;window.__shx=!!S.shx;
+ document.getElementById('st').textContent=S.st}
+// --- полосы: несколько пальцев одновременно, каждый ведёт свою полосу
+function idxAt(x){var r=bandsEl.getBoundingClientRect();return clamp(Math.floor((x-r.left)/r.width*S.hz.length),0,S.hz.length-1)}
+function dbAt(y){var t=bandsEl.querySelector('.t').getBoundingClientRect(),f=clamp((y-t.top-6)/(t.height-12),0,1);return Math.round((S.hi-f*(S.hi-S.lo))*2)/2}
+function setLv(i,db){S.lv[i]=db;pend[i]=db}
+function flush(){tmr=null;var d=[];for(var i in pend)d.push(i+':'+pend[i]);pend={};if(d.length)api('sets?d='+d.join(','))}
+function sched(){if(!tmr)tmr=setTimeout(flush,33)}
+window.addEventListener('pointerdown',function(){api('busy?v=1')},true);
+window.addEventListener('pointerup',function(){api('busy?v=0')},true);
+window.addEventListener('pointercancel',function(){api('busy?v=0')},true);
+bandsEl.addEventListener('pointerdown',function(e){
+ if(!S)return;e.preventDefault();bandsEl.setPointerCapture(e.pointerId);
+ var i=idxAt(e.clientX),now=Date.now();
+ if(lastTap.i===i&&now-lastTap.t<320){setLv(i,0);lastTap.t=0}else{lastTap={t:now,i:i};setLv(i,dbAt(e.clientY))}
+ P[e.pointerId]={i:i,db:S.lv[i]};draw(i);sched()});
+bandsEl.addEventListener('pointermove',function(e){
+ var p=P[e.pointerId];if(!p)return;e.preventDefault();
+ var db=dbAt(e.clientY),i=PAINT?idxAt(e.clientX):p.i;
+ if(PAINT&&i!==p.i){var a=p.i,n=Math.abs(i-a);for(var s=1;s<=n;s++){var j=a+(i>a?s:-s);setLv(j,Math.round((p.db+(db-p.db)*s/n)*2)/2)}}
+ else setLv(i,db);
+ p.i=i;p.db=db;draw(i);sched()});
+function up(e){delete P[e.pointerId]}
+bandsEl.addEventListener('pointerup',up);bandsEl.addEventListener('pointercancel',up);
+// --- остальное
+var chipDown=null;document.getElementById('chips').addEventListener('pointerdown',function(e){chipDown=e.target});
+document.getElementById('chips').addEventListener('click',function(e){var t=e.target;var same=(chipDown===t);chipDown=null;if(!same)return;
+ if(t.dataset.n!==undefined)api('n?v='+t.dataset.n).then(poll);
+ else if(t.dataset.p!==undefined)api('preset?i='+t.dataset.p).then(poll);
+ else if(t.dataset.paint){PAINT=!PAINT;t.classList.toggle('on',PAINT)}});
+document.getElementById('pw').addEventListener('click',function(){api('on?v='+(S.on?0:1)).then(poll)});
+document.getElementById('x').addEventListener('click',function(){api('close')});
+var lowEl=document.getElementById('low'),LOWB=false;
+lowEl.addEventListener('pointerdown',function(){LOWB=true});
+window.addEventListener('pointerup',function(){setTimeout(function(){LOWB=false},400)});
+var fxPending={},fxTimer=0;
+function flushFx(){fxTimer=0;Object.keys(fxPending).forEach(function(k){api('fx?key='+k+'&v='+fxPending[k])});fxPending={}}
+lowEl.addEventListener('input',function(e){var t=e.target;if(t.dataset.k){t.nextSibling.textContent=t.dataset.k=='eq_loud'?'+'+(t.value/10).toFixed(1)+' дБ':t.value+' %';
+ fxPending[t.dataset.k]=t.value*10;if(fxTimer)clearTimeout(fxTimer);fxTimer=setTimeout(flushFx,55)}});
+lowEl.addEventListener('click',function(e){var t=e.target;
+ if(t.dataset.f){var key=t.dataset.f,next=!t.classList.contains('on');
+  t.classList.toggle('on',next);if(key==='eq_global')S.glob=next;else if(key==='eq_auto')S.auto=next;
+  api('flag?key='+key+'&v='+(next?1:0)).then(poll).catch(function(){poll()});}
+ else if(t.dataset.reset)api('reset').then(poll)});
+function go(){document.documentElement.classList.add('go')}
+requestAnimationFrame(go);
+var GL=[].slice.call(document.querySelectorAll('.glass'));
+GL.forEach(function(e){e.addEventListener('animationend',function(){e.style.willChange='auto'})});
+var KF='@keyframes up{',i_,u_,LT=!!window.__lite;
+for(i_=0;!LT&&i_<=20;i_++){u_=i_/20;KF+=(u_*56.67).toFixed(2)+'%{opacity:'+u_.toFixed(3)+';transform:translateY(calc(var(--d,600px)*'+(-(1-u_*u_)).toFixed(4)+')) scale('+(0.965+0.035*u_).toFixed(4)+')}' }
+for(i_=1;!LT&&i_<=10;i_++){u_=i_/10;KF+=(56.67+u_*43.33).toFixed(2)+'%{opacity:1;transform:translateY('+(-10*Math.sin(Math.PI*u_)).toFixed(2)+'px) scale('+(1+0.006*Math.sin(Math.PI*u_)).toFixed(4)+')}' }
+KF+='}';var KS=document.createElement('style');KS.textContent=KF;document.head.appendChild(KS);
+if(!window.__lite)GL.forEach(function(e,i){e.style.animationDelay=((GL.length-1-i)*.018)+'s'});
+function ty(e){try{return new DOMMatrix(getComputedStyle(e).transform).m42}catch(x){return 0}}
+function rects(){
+ if(!FULL||window.__lite||!window.__shx)return;var d=window.devicePixelRatio||1,out=[];
+ GL.forEach(function(g){var b=g.getBoundingClientRect();g.style.setProperty('--d',Math.round(b.top-ty(g)+b.height+20)+'px')});
+ function add(el,r){var b=el.getBoundingClientRect();if(b.width<2||b.height<2)return;
+  var g=el.classList.contains('glass')?el:(el.closest('.glass')||el),k=GL.indexOf(g);
+  out.push([b.left*d,(b.top-ty(g))*d,b.width*d,b.height*d,(r<0?Math.min(b.width,b.height)/2:r)*d,(GL.length-1-k)*.16,(g.getBoundingClientRect().top-ty(g)+g.getBoundingClientRect().height+20)*d].map(function(v){return Math.round(v*100)/100}).join(','))}
+ document.querySelectorAll('.glass').forEach(function(e){add(e,22)});
+ document.querySelectorAll('#chips .c').forEach(function(e){add(e,-1)});
+ document.querySelectorAll('.top .ib').forEach(function(e){add(e,-1)});
+document.querySelectorAll('.sw,.btn,.k').forEach(function(e){add(e,-1)});
+ var q=out.join(';');if(q===RSIG)return;RSIG=q;api('rects?dpr='+d+'&d='+encodeURIComponent(q))}
+new ResizeObserver(function(){rects()}).observe(document.getElementById('app'));
+window.addEventListener('resize',rects);
+function poll(){api('state').then(function(t){if(Object.keys(P).length||tmr)return;var s=JSON.parse(t),g=s.hz.join(',')+'|'+s.nb;
+ document.documentElement.classList.toggle('shd',!!s.shd);document.documentElement.classList.toggle('lite',!!s.opt);window.__lite=!!s.opt;window.__plain=!s.gb;window.__shx=!!s.shx;document.documentElement.classList.toggle('no-glass-mode',!s.gb);if(!s.shx)go();if(!s.opt)setTimeout(rects,60);
+ var act=LOWB;S=s;if(g!=sig||!bandsEl.children.length)build();else{draw();if(!act)low()}}).catch(function(){})}
+poll();setInterval(poll,4000);
+</script><canvas id="bg"></canvas><canvas id="dolph-pixels"></canvas><canvas id="lens"></canvas>
+<script>
+(function(){
+// DOLPHY pixel swimmer: tiny internal framebuffer, nearest-neighbour upscale.
+// 12 fps cap keeps the decorative layer inexpensive on Adreno 830.
+var C=document.getElementById('dolph-pixels');if(!C)return;
+var ctx=C.getContext('2d',{alpha:true});if(!ctx)return;
+var W=144,H=256,PIXEL_DENSITY=3,frame=0,last=0,scale=1,raf=0;
+C.width=W*PIXEL_DENSITY;C.height=H*PIXEL_DENSITY;ctx.imageSmoothingEnabled=false;
+var dolphin=[
+'..................b..',
+'...........bbbbbbbb..',
+'......bbbbbbbbbbbbbb.',
+'...bbbbbbbbbbbbbbbbbb',
+'.bbbbbbbbbbbbbbbbbbbbb',
+'bbbbbbbbbbbbbbbbbbbbbb',
+'.bbbbbbbbbbbbbbbbbbbbb',
+'...bbbbbbbbbbbbbbbbbb.',
+'......bbbbbbbbbbbbb...',
+'..........bbbbbbb......',
+'.............bbb........'
+];
+var bubbles=[{x:22,y:48,s:2,v:.20},{x:37,y:83,s:1,v:.31},{x:112,y:116,s:2,v:.24},{x:96,y:32,s:1,v:.18},{x:18,y:176,s:1,v:.28},{x:126,y:204,s:2,v:.16}];
+var stars=[[12,26],[67,18],[130,62],[18,126],[118,154],[77,224],[31,210],[101,92],[53,178]];
+// A small school of monochrome pixel fish, with varied silhouettes and sizes.
+var fish=[];
+for(var fi=0;fi<18;fi++){
+ fish.push({x:Math.random()*W,y:18+Math.random()*(H-42),s:fi%5===0?1.35:(fi%3===0?1:0.78),
+  dir:Math.random()<.5?-1:1,v:.22+Math.random()*.42,phase:Math.random()*Math.PI*2,
+  white:fi%2===0,kind:fi%3});
+}
+function drawFish(f,t){
+ var x=((f.x+f.dir*f.v*t*12)%(W+28)+W+28)%(W+28)-14;
+ var y=f.y+Math.sin(t*1.1+f.phase)*2.2;
+ var s=f.s, body=f.white?'#f2f7fa':'#17232c', edge=f.white?'#b7cbd5':'#53616b';
+ ctx.save();ctx.translate(Math.round(x),Math.round(y));ctx.scale(f.dir*s,s);
+ // body, tail and fins are deliberately chunky pixels
+ px(-3,-1,5,3,edge);px(-2,0,4,2,body);
+ px(2,-1,2,3,body);px(4,0,2,1,body);
+ px(-4,0,2,1,body);px(-5,-1,2,3,edge);
+ if(f.kind===1){px(-1,-3,2,2,edge);px(0,2,2,2,edge);}
+ else if(f.kind===2){px(-1,-2,3,1,edge);px(0,2,3,1,edge);}
+ px(2,0,1,1,f.white?'#263744':'#f5fbff');
+ ctx.restore();
+}
+
+function resize(){C.style.width='100vw';C.style.height='100vh';C.width=W*PIXEL_DENSITY;C.height=H*PIXEL_DENSITY;ctx.imageSmoothingEnabled=false;}
+function px(x,y,w,h,color){ctx.fillStyle=color;ctx.fillRect(Math.round(x),Math.round(y),w||1,h||1)}
+function drawDolphin(x,y,t){
+ // Sprite artwork is authored head-left/tail-right. Mirror it so the
+ // dolphin faces the direction of travel (right), not swims backwards.
+ ctx.save();
+ ctx.translate(x+24,0);
+ ctx.scale(-1,1);
+ x=0;
+ var bob=Math.round(Math.sin(t*1.8)*2),tailAngle=Math.sin(t*4.1)*.42;
+ // New tail motion: a smooth up/down fluke stroke around one flexible pivot.
+ // The two lobes stay connected to a slim peduncle and sweep together,
+ // rather than sliding independently like legs.
+ px(x+17,y+4+bob,5,2,'#438eaf');
+ ctx.save();
+ ctx.translate(x+20,y+5+bob);
+ ctx.rotate(tailAngle);
+ px(0,-1,4,2,'#69c8ed');
+ px(3,-3,3,2,'#b9efff');
+ px(4,-2,4,2,'#8bdfff');
+ px(3,1,3,2,'#69c8ed');
+ px(4,1,4,2,'#8bdfff');
+ ctx.restore();
+ for(var r=0;r<dolphin.length;r++)for(var c=0;c<dolphin[r].length;c++)if(dolphin[r][c]==='b'){
+  var col=(r<3?'#b8edff':r>7?'#438eaf':'#72c9ed');px(x+c,y+r+bob,1,1,col);
+ }
+ // pale belly and snout highlight
+ px(x+2,y+6+bob,5,2,'#d5f6ff');px(x+7,y+8+bob,7,1,'#a8e5f8');
+ // eye
+ px(x+3,y+3+bob,1,1,'#102b3b');px(x+4,y+3+bob,1,1,'#eaffff');
+ ctx.restore();
+}
+var phrases=["Ух ты, Синей лагуной! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Синей лагуной? Мне нравится!", "Кажется, на Синей лагуной я приплыл раньше собственного хвоста.", "Остановка Синей лагуной! Пассажиры с пузырьками выходят первыми.", "Проверил Синей лагуной: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Синей лагуной? Я опять выбрал красивый путь.", "Срочные новости с Синей лагуной: дельфин доволен, крабы подозревают неладное.", "Кажется, Синей лагуной создано специально для эффектного проплыва.", "Не шумите на Синей лагуной: тут у пузырьков важное собрание.", "Поставил метку на карте: Синей лагуной — место для красивого разворота.", "Ух ты, Коралловым садом! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Коралловым садом? Мне нравится!", "Кажется, на Коралловым садом я приплыл раньше собственного хвоста.", "Остановка Коралловым садом! Пассажиры с пузырьками выходят первыми.", "Проверил Коралловым садом: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Коралловым садом? Я опять выбрал красивый путь.", "Срочные новости с Коралловым садом: дельфин доволен, крабы подозревают неладное.", "Кажется, Коралловым садом создано специально для эффектного проплыва.", "Не шумите на Коралловым садом: тут у пузырьков важное собрание.", "Поставил метку на карте: Коралловым садом — место для красивого разворота.", "Ух ты, Затонувшим маяком! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Затонувшим маяком? Мне нравится!", "Кажется, на Затонувшим маяком я приплыл раньше собственного хвоста.", "Остановка Затонувшим маяком! Пассажиры с пузырьками выходят первыми.", "Проверил Затонувшим маяком: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Затонувшим маяком? Я опять выбрал красивый путь.", "Срочные новости с Затонувшим маяком: дельфин доволен, крабы подозревают неладное.", "Кажется, Затонувшим маяком создано специально для эффектного проплыва.", "Не шумите на Затонувшим маяком: тут у пузырьков важное собрание.", "Поставил метку на карте: Затонувшим маяком — место для красивого разворота.", "Ух ты, Рифом Семи звёзд! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Рифом Семи звёзд? Мне нравится!", "Кажется, на Рифом Семи звёзд я приплыл раньше собственного хвоста.", "Остановка Рифом Семи звёзд! Пассажиры с пузырьками выходят первыми.", "Проверил Рифом Семи звёзд: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Рифом Семи звёзд? Я опять выбрал красивый путь.", "Срочные новости с Рифом Семи звёзд: дельфин доволен, крабы подозревают неладное.", "Кажется, Рифом Семи звёзд создано специально для эффектного проплыва.", "Не шумите на Рифом Семи звёзд: тут у пузырьков важное собрание.", "Поставил метку на карте: Рифом Семи звёзд — место для красивого разворота.", "Ух ты, Бухтой пузырьков! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Бухтой пузырьков? Мне нравится!", "Кажется, на Бухтой пузырьков я приплыл раньше собственного хвоста.", "Остановка Бухтой пузырьков! Пассажиры с пузырьками выходят первыми.", "Проверил Бухтой пузырьков: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Бухтой пузырьков? Я опять выбрал красивый путь.", "Срочные новости с Бухтой пузырьков: дельфин доволен, крабы подозревают неладное.", "Кажется, Бухтой пузырьков создано специально для эффектного проплыва.", "Не шумите на Бухтой пузырьков: тут у пузырьков важное собрание.", "Поставил метку на карте: Бухтой пузырьков — место для красивого разворота.", "Ух ты, Медузьей аллеей! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Медузьей аллеей? Мне нравится!", "Кажется, на Медузьей аллеей я приплыл раньше собственного хвоста.", "Остановка Медузьей аллеей! Пассажиры с пузырьками выходят первыми.", "Проверил Медузьей аллеей: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Медузьей аллеей? Я опять выбрал красивый путь.", "Срочные новости с Медузьей аллеей: дельфин доволен, крабы подозревают неладное.", "Кажется, Медузьей аллеей создано специально для эффектного проплыва.", "Не шумите на Медузьей аллеей: тут у пузырьков важное собрание.", "Поставил метку на карте: Медузьей аллеей — место для красивого разворота.", "Ух ты, Подводным вокзалом! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Подводным вокзалом? Мне нравится!", "Кажется, на Подводным вокзалом я приплыл раньше собственного хвоста.", "Остановка Подводным вокзалом! Пассажиры с пузырьками выходят первыми.", "Проверил Подводным вокзалом: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Подводным вокзалом? Я опять выбрал красивый путь.", "Срочные новости с Подводным вокзалом: дельфин доволен, крабы подозревают неладное.", "Кажется, Подводным вокзалом создано специально для эффектного проплыва.", "Не шумите на Подводным вокзалом: тут у пузырьков важное собрание.", "Поставил метку на карте: Подводным вокзалом — место для красивого разворота.", "Ух ты, Песчаной долиной! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Песчаной долиной? Мне нравится!", "Кажется, на Песчаной долиной я приплыл раньше собственного хвоста.", "Остановка Песчаной долиной! Пассажиры с пузырьками выходят первыми.", "Проверил Песчаной долиной: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Песчаной долиной? Я опять выбрал красивый путь.", "Срочные новости с Песчаной долиной: дельфин доволен, крабы подозревают неладное.", "Кажется, Песчаной долиной создано специально для эффектного проплыва.", "Не шумите на Песчаной долиной: тут у пузырьков важное собрание.", "Поставил метку на карте: Песчаной долиной — место для красивого разворота.", "Ух ты, Тихой впадиной! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Тихой впадиной? Мне нравится!", "Кажется, на Тихой впадиной я приплыл раньше собственного хвоста.", "Остановка Тихой впадиной! Пассажиры с пузырьками выходят первыми.", "Проверил Тихой впадиной: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Тихой впадиной? Я опять выбрал красивый путь.", "Срочные новости с Тихой впадиной: дельфин доволен, крабы подозревают неладное.", "Кажется, Тихой впадиной создано специально для эффектного проплыва.", "Не шумите на Тихой впадиной: тут у пузырьков важное собрание.", "Поставил метку на карте: Тихой впадиной — место для красивого разворота.", "Ух ты, Островом ракушек! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Островом ракушек? Мне нравится!", "Кажется, на Островом ракушек я приплыл раньше собственного хвоста.", "Остановка Островом ракушек! Пассажиры с пузырьками выходят первыми.", "Проверил Островом ракушек: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Островом ракушек? Я опять выбрал красивый путь.", "Срочные новости с Островом ракушек: дельфин доволен, крабы подозревают неладное.", "Кажется, Островом ракушек создано специально для эффектного проплыва.", "Не шумите на Островом ракушек: тут у пузырьков важное собрание.", "Поставил метку на карте: Островом ракушек — место для красивого разворота.", "Ух ты, Заливом светлячков! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Заливом светлячков? Мне нравится!", "Кажется, на Заливом светлячков я приплыл раньше собственного хвоста.", "Остановка Заливом светлячков! Пассажиры с пузырьками выходят первыми.", "Проверил Заливом светлячков: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Заливом светлячков? Я опять выбрал красивый путь.", "Срочные новости с Заливом светлячков: дельфин доволен, крабы подозревают неладное.", "Кажется, Заливом светлячков создано специально для эффектного проплыва.", "Не шумите на Заливом светлячков: тут у пузырьков важное собрание.", "Поставил метку на карте: Заливом светлячков — место для красивого разворота.", "Ух ты, Мраморной пещерой! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Мраморной пещерой? Мне нравится!", "Кажется, на Мраморной пещерой я приплыл раньше собственного хвоста.", "Остановка Мраморной пещерой! Пассажиры с пузырьками выходят первыми.", "Проверил Мраморной пещерой: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Мраморной пещерой? Я опять выбрал красивый путь.", "Срочные новости с Мраморной пещерой: дельфин доволен, крабы подозревают неладное.", "Кажется, Мраморной пещерой создано специально для эффектного проплыва.", "Не шумите на Мраморной пещерой: тут у пузырьков важное собрание.", "Поставил метку на карте: Мраморной пещерой — место для красивого разворота.", "Ух ты, Лунным рифом! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Лунным рифом? Мне нравится!", "Кажется, на Лунным рифом я приплыл раньше собственного хвоста.", "Остановка Лунным рифом! Пассажиры с пузырьками выходят первыми.", "Проверил Лунным рифом: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Лунным рифом? Я опять выбрал красивый путь.", "Срочные новости с Лунным рифом: дельфин доволен, крабы подозревают неладное.", "Кажется, Лунным рифом создано специально для эффектного проплыва.", "Не шумите на Лунным рифом: тут у пузырьков важное собрание.", "Поставил метку на карте: Лунным рифом — место для красивого разворота.", "Ух ты, Сапфировым проливом! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Сапфировым проливом? Мне нравится!", "Кажется, на Сапфировым проливом я приплыл раньше собственного хвоста.", "Остановка Сапфировым проливом! Пассажиры с пузырьками выходят первыми.", "Проверил Сапфировым проливом: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Сапфировым проливом? Я опять выбрал красивый путь.", "Срочные новости с Сапфировым проливом: дельфин доволен, крабы подозревают неладное.", "Кажется, Сапфировым проливом создано специально для эффектного проплыва.", "Не шумите на Сапфировым проливом: тут у пузырьков важное собрание.", "Поставил метку на карте: Сапфировым проливом — место для красивого разворота.", "Ух ты, Черепашьей площадью! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Черепашьей площадью? Мне нравится!", "Кажется, на Черепашьей площадью я приплыл раньше собственного хвоста.", "Остановка Черепашьей площадью! Пассажиры с пузырьками выходят первыми.", "Проверил Черепашьей площадью: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Черепашьей площадью? Я опять выбрал красивый путь.", "Срочные новости с Черепашьей площадью: дельфин доволен, крабы подозревают неладное.", "Кажется, Черепашьей площадью создано специально для эффектного проплыва.", "Не шумите на Черепашьей площадью: тут у пузырьков важное собрание.", "Поставил метку на карте: Черепашьей площадью — место для красивого разворота.", "Ух ты, Садом анемон! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Садом анемон? Мне нравится!", "Кажется, на Садом анемон я приплыл раньше собственного хвоста.", "Остановка Садом анемон! Пассажиры с пузырьками выходят первыми.", "Проверил Садом анемон: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Садом анемон? Я опять выбрал красивый путь.", "Срочные новости с Садом анемон: дельфин доволен, крабы подозревают неладное.", "Кажется, Садом анемон создано специально для эффектного проплыва.", "Не шумите на Садом анемон: тут у пузырьков важное собрание.", "Поставил метку на карте: Садом анемон — место для красивого разворота.", "Ух ты, Подводной библиотекой! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Подводной библиотекой? Мне нравится!", "Кажется, на Подводной библиотекой я приплыл раньше собственного хвоста.", "Остановка Подводной библиотекой! Пассажиры с пузырьками выходят первыми.", "Проверил Подводной библиотекой: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Подводной библиотекой? Я опять выбрал красивый путь.", "Срочные новости с Подводной библиотекой: дельфин доволен, крабы подозревают неладное.", "Кажется, Подводной библиотекой создано специально для эффектного проплыва.", "Не шумите на Подводной библиотекой: тут у пузырьков важное собрание.", "Поставил метку на карте: Подводной библиотекой — место для красивого разворота.", "Ух ты, Затонувшим кораблём! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Затонувшим кораблём? Мне нравится!", "Кажется, на Затонувшим кораблём я приплыл раньше собственного хвоста.", "Остановка Затонувшим кораблём! Пассажиры с пузырьками выходят первыми.", "Проверил Затонувшим кораблём: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Затонувшим кораблём? Я опять выбрал красивый путь.", "Срочные новости с Затонувшим кораблём: дельфин доволен, крабы подозревают неладное.", "Кажется, Затонувшим кораблём создано специально для эффектного проплыва.", "Не шумите на Затонувшим кораблём: тут у пузырьков важное собрание.", "Поставил метку на карте: Затонувшим кораблём — место для красивого разворота.", "Ух ты, Голубой аркой! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Голубой аркой? Мне нравится!", "Кажется, на Голубой аркой я приплыл раньше собственного хвоста.", "Остановка Голубой аркой! Пассажиры с пузырьками выходят первыми.", "Проверил Голубой аркой: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Голубой аркой? Я опять выбрал красивый путь.", "Срочные новости с Голубой аркой: дельфин доволен, крабы подозревают неладное.", "Кажется, Голубой аркой создано специально для эффектного проплыва.", "Не шумите на Голубой аркой: тут у пузырьков важное собрание.", "Поставил метку на карте: Голубой аркой — место для красивого разворота.", "Ух ты, Бухтой скатов! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Бухтой скатов? Мне нравится!", "Кажется, на Бухтой скатов я приплыл раньше собственного хвоста.", "Остановка Бухтой скатов! Пассажиры с пузырьками выходят первыми.", "Проверил Бухтой скатов: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Бухтой скатов? Я опять выбрал красивый путь.", "Срочные новости с Бухтой скатов: дельфин доволен, крабы подозревают неладное.", "Кажется, Бухтой скатов создано специально для эффектного проплыва.", "Не шумите на Бухтой скатов: тут у пузырьков важное собрание.", "Поставил метку на карте: Бухтой скатов — место для красивого разворота.", "Ух ты, Крабьим перекрёстком! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Крабьим перекрёстком? Мне нравится!", "Кажется, на Крабьим перекрёстком я приплыл раньше собственного хвоста.", "Остановка Крабьим перекрёстком! Пассажиры с пузырьками выходят первыми.", "Проверил Крабьим перекрёстком: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Крабьим перекрёстком? Я опять выбрал красивый путь.", "Срочные новости с Крабьим перекрёстком: дельфин доволен, крабы подозревают неладное.", "Кажется, Крабьим перекрёстком создано специально для эффектного проплыва.", "Не шумите на Крабьим перекрёстком: тут у пузырьков важное собрание.", "Поставил метку на карте: Крабьим перекрёстком — место для красивого разворота.", "Ух ты, Пещерой эха! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Пещерой эха? Мне нравится!", "Кажется, на Пещерой эха я приплыл раньше собственного хвоста.", "Остановка Пещерой эха! Пассажиры с пузырьками выходят первыми.", "Проверил Пещерой эха: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Пещерой эха? Я опять выбрал красивый путь.", "Срочные новости с Пещерой эха: дельфин доволен, крабы подозревают неладное.", "Кажется, Пещерой эха создано специально для эффектного проплыва.", "Не шумите на Пещерой эха: тут у пузырьков важное собрание.", "Поставил метку на карте: Пещерой эха — место для красивого разворота.", "Ух ты, Розовым атоллом! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Розовым атоллом? Мне нравится!", "Кажется, на Розовым атоллом я приплыл раньше собственного хвоста.", "Остановка Розовым атоллом! Пассажиры с пузырьками выходят первыми.", "Проверил Розовым атоллом: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Розовым атоллом? Я опять выбрал красивый путь.", "Срочные новости с Розовым атоллом: дельфин доволен, крабы подозревают неладное.", "Кажется, Розовым атоллом создано специально для эффектного проплыва.", "Не шумите на Розовым атоллом: тут у пузырьков важное собрание.", "Поставил метку на карте: Розовым атоллом — место для красивого разворота.", "Ух ты, Станцией «Морская»! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Станцией «Морская»? Мне нравится!", "Кажется, на Станцией «Морская» я приплыл раньше собственного хвоста.", "Остановка Станцией «Морская»! Пассажиры с пузырьками выходят первыми.", "Проверил Станцией «Морская»: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Станцией «Морская»? Я опять выбрал красивый путь.", "Срочные новости с Станцией «Морская»: дельфин доволен, крабы подозревают неладное.", "Кажется, Станцией «Морская» создано специально для эффектного проплыва.", "Не шумите на Станцией «Морская»: тут у пузырьков важное собрание.", "Поставил метку на карте: Станцией «Морская» — место для красивого разворота.", "Ух ты, Осьминожьим рынком! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Осьминожьим рынком? Мне нравится!", "Кажется, на Осьминожьим рынком я приплыл раньше собственного хвоста.", "Остановка Осьминожьим рынком! Пассажиры с пузырьками выходят первыми.", "Проверил Осьминожьим рынком: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Осьминожьим рынком? Я опять выбрал красивый путь.", "Срочные новости с Осьминожьим рынком: дельфин доволен, крабы подозревают неладное.", "Кажется, Осьминожьим рынком создано специально для эффектного проплыва.", "Не шумите на Осьминожьим рынком: тут у пузырьков важное собрание.", "Поставил метку на карте: Осьминожьим рынком — место для красивого разворота.", "Ух ты, Пузырьковой долиной! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Пузырьковой долиной? Мне нравится!", "Кажется, на Пузырьковой долиной я приплыл раньше собственного хвоста.", "Остановка Пузырьковой долиной! Пассажиры с пузырьками выходят первыми.", "Проверил Пузырьковой долиной: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Пузырьковой долиной? Я опять выбрал красивый путь.", "Срочные новости с Пузырьковой долиной: дельфин доволен, крабы подозревают неладное.", "Кажется, Пузырьковой долиной создано специально для эффектного проплыва.", "Не шумите на Пузырьковой долиной: тут у пузырьков важное собрание.", "Поставил метку на карте: Пузырьковой долиной — место для красивого разворота.", "Ух ты, Коралловым мостом! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Коралловым мостом? Мне нравится!", "Кажется, на Коралловым мостом я приплыл раньше собственного хвоста.", "Остановка Коралловым мостом! Пассажиры с пузырьками выходят первыми.", "Проверил Коралловым мостом: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Коралловым мостом? Я опять выбрал красивый путь.", "Срочные новости с Коралловым мостом: дельфин доволен, крабы подозревают неладное.", "Кажется, Коралловым мостом создано специально для эффектного проплыва.", "Не шумите на Коралловым мостом: тут у пузырьков важное собрание.", "Поставил метку на карте: Коралловым мостом — место для красивого разворота.", "Ух ты, Жемчужным пляжем! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Жемчужным пляжем? Мне нравится!", "Кажется, на Жемчужным пляжем я приплыл раньше собственного хвоста.", "Остановка Жемчужным пляжем! Пассажиры с пузырьками выходят первыми.", "Проверил Жемчужным пляжем: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Жемчужным пляжем? Я опять выбрал красивый путь.", "Срочные новости с Жемчужным пляжем: дельфин доволен, крабы подозревают неладное.", "Кажется, Жемчужным пляжем создано специально для эффектного проплыва.", "Не шумите на Жемчужным пляжем: тут у пузырьков важное собрание.", "Поставил метку на карте: Жемчужным пляжем — место для красивого разворота.", "Ух ты, Северным течением! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Северным течением? Мне нравится!", "Кажется, на Северным течением я приплыл раньше собственного хвоста.", "Остановка Северным течением! Пассажиры с пузырьками выходят первыми.", "Проверил Северным течением: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Северным течением? Я опять выбрал красивый путь.", "Срочные новости с Северным течением: дельфин доволен, крабы подозревают неладное.", "Кажется, Северным течением создано специально для эффектного проплыва.", "Не шумите на Северным течением: тут у пузырьков важное собрание.", "Поставил метку на карте: Северным течением — место для красивого разворота.", "Ух ты, Тёплым течением! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Тёплым течением? Мне нравится!", "Кажется, на Тёплым течением я приплыл раньше собственного хвоста.", "Остановка Тёплым течением! Пассажиры с пузырьками выходят первыми.", "Проверил Тёплым течением: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Тёплым течением? Я опять выбрал красивый путь.", "Срочные новости с Тёплым течением: дельфин доволен, крабы подозревают неладное.", "Кажется, Тёплым течением создано специально для эффектного проплыва.", "Не шумите на Тёплым течением: тут у пузырьков важное собрание.", "Поставил метку на карте: Тёплым течением — место для красивого разворота.", "Ух ты, Лесом водорослей! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Лесом водорослей? Мне нравится!", "Кажется, на Лесом водорослей я приплыл раньше собственного хвоста.", "Остановка Лесом водорослей! Пассажиры с пузырьками выходят первыми.", "Проверил Лесом водорослей: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Лесом водорослей? Я опять выбрал красивый путь.", "Срочные новости с Лесом водорослей: дельфин доволен, крабы подозревают неладное.", "Кажется, Лесом водорослей создано специально для эффектного проплыва.", "Не шумите на Лесом водорослей: тут у пузырьков важное собрание.", "Поставил метку на карте: Лесом водорослей — место для красивого разворота.", "Ух ты, Гротом русалок! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Гротом русалок? Мне нравится!", "Кажется, на Гротом русалок я приплыл раньше собственного хвоста.", "Остановка Гротом русалок! Пассажиры с пузырьками выходят первыми.", "Проверил Гротом русалок: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Гротом русалок? Я опять выбрал красивый путь.", "Срочные новости с Гротом русалок: дельфин доволен, крабы подозревают неладное.", "Кажется, Гротом русалок создано специально для эффектного проплыва.", "Не шумите на Гротом русалок: тут у пузырьков важное собрание.", "Поставил метку на карте: Гротом русалок — место для красивого разворота.", "Ух ты, Рифом-подковкой! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Рифом-подковкой? Мне нравится!", "Кажется, на Рифом-подковкой я приплыл раньше собственного хвоста.", "Остановка Рифом-подковкой! Пассажиры с пузырьками выходят первыми.", "Проверил Рифом-подковкой: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Рифом-подковкой? Я опять выбрал красивый путь.", "Срочные новости с Рифом-подковкой: дельфин доволен, крабы подозревают неладное.", "Кажется, Рифом-подковкой создано специально для эффектного проплыва.", "Не шумите на Рифом-подковкой: тут у пузырьков важное собрание.", "Поставил метку на карте: Рифом-подковкой — место для красивого разворота.", "Ух ты, Зеркальной лагуной! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Зеркальной лагуной? Мне нравится!", "Кажется, на Зеркальной лагуной я приплыл раньше собственного хвоста.", "Остановка Зеркальной лагуной! Пассажиры с пузырьками выходят первыми.", "Проверил Зеркальной лагуной: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Зеркальной лагуной? Я опять выбрал красивый путь.", "Срочные новости с Зеркальной лагуной: дельфин доволен, крабы подозревают неладное.", "Кажется, Зеркальной лагуной создано специально для эффектного проплыва.", "Не шумите на Зеркальной лагуной: тут у пузырьков важное собрание.", "Поставил метку на карте: Зеркальной лагуной — место для красивого разворота.", "Ух ты, Скалой трёх волн! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Скалой трёх волн? Мне нравится!", "Кажется, на Скалой трёх волн я приплыл раньше собственного хвоста.", "Остановка Скалой трёх волн! Пассажиры с пузырьками выходят первыми.", "Проверил Скалой трёх волн: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Скалой трёх волн? Я опять выбрал красивый путь.", "Срочные новости с Скалой трёх волн: дельфин доволен, крабы подозревают неладное.", "Кажется, Скалой трёх волн создано специально для эффектного проплыва.", "Не шумите на Скалой трёх волн: тут у пузырьков важное собрание.", "Поставил метку на карте: Скалой трёх волн — место для красивого разворота.", "Ух ты, Морской оранжереей! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Морской оранжереей? Мне нравится!", "Кажется, на Морской оранжереей я приплыл раньше собственного хвоста.", "Остановка Морской оранжереей! Пассажиры с пузырьками выходят первыми.", "Проверил Морской оранжереей: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Морской оранжереей? Я опять выбрал красивый путь.", "Срочные новости с Морской оранжереей: дельфин доволен, крабы подозревают неладное.", "Кажется, Морской оранжереей создано специально для эффектного проплыва.", "Не шумите на Морской оранжереей: тут у пузырьков важное собрание.", "Поставил метку на карте: Морской оранжереей — место для красивого разворота.", "Ух ты, Площадью морских звёзд! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Площадью морских звёзд? Мне нравится!", "Кажется, на Площадью морских звёзд я приплыл раньше собственного хвоста.", "Остановка Площадью морских звёзд! Пассажиры с пузырьками выходят первыми.", "Проверил Площадью морских звёзд: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Площадью морских звёзд? Я опять выбрал красивый путь.", "Срочные новости с Площадью морских звёзд: дельфин доволен, крабы подозревают неладное.", "Кажется, Площадью морских звёзд создано специально для эффектного проплыва.", "Не шумите на Площадью морских звёзд: тут у пузырьков важное собрание.", "Поставил метку на карте: Площадью морских звёзд — место для красивого разворота.", "Ух ты, Тоннелем течений! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Тоннелем течений? Мне нравится!", "Кажется, на Тоннелем течений я приплыл раньше собственного хвоста.", "Остановка Тоннелем течений! Пассажиры с пузырьками выходят первыми.", "Проверил Тоннелем течений: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Тоннелем течений? Я опять выбрал красивый путь.", "Срочные новости с Тоннелем течений: дельфин доволен, крабы подозревают неладное.", "Кажется, Тоннелем течений создано специально для эффектного проплыва.", "Не шумите на Тоннелем течений: тут у пузырьков важное собрание.", "Поставил метку на карте: Тоннелем течений — место для красивого разворота.", "Ух ты, Подводным амфитеатром! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Подводным амфитеатром? Мне нравится!", "Кажется, на Подводным амфитеатром я приплыл раньше собственного хвоста.", "Остановка Подводным амфитеатром! Пассажиры с пузырьками выходят первыми.", "Проверил Подводным амфитеатром: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Подводным амфитеатром? Я опять выбрал красивый путь.", "Срочные новости с Подводным амфитеатром: дельфин доволен, крабы подозревают неладное.", "Кажется, Подводным амфитеатром создано специально для эффектного проплыва.", "Не шумите на Подводным амфитеатром: тут у пузырьков важное собрание.", "Поставил метку на карте: Подводным амфитеатром — место для красивого разворота.", "Ух ты, Синим каньоном! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Синим каньоном? Мне нравится!", "Кажется, на Синим каньоном я приплыл раньше собственного хвоста.", "Остановка Синим каньоном! Пассажиры с пузырьками выходят первыми.", "Проверил Синим каньоном: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Синим каньоном? Я опять выбрал красивый путь.", "Срочные новости с Синим каньоном: дельфин доволен, крабы подозревают неладное.", "Кажется, Синим каньоном создано специально для эффектного проплыва.", "Не шумите на Синим каньоном: тут у пузырьков важное собрание.", "Поставил метку на карте: Синим каньоном — место для красивого разворота.", "Ух ты, Бухтой чернильных облаков! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Бухтой чернильных облаков? Мне нравится!", "Кажется, на Бухтой чернильных облаков я приплыл раньше собственного хвоста.", "Остановка Бухтой чернильных облаков! Пассажиры с пузырьками выходят первыми.", "Проверил Бухтой чернильных облаков: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Бухтой чернильных облаков? Я опять выбрал красивый путь.", "Срочные новости с Бухтой чернильных облаков: дельфин доволен, крабы подозревают неладное.", "Кажется, Бухтой чернильных облаков создано специально для эффектного проплыва.", "Не шумите на Бухтой чернильных облаков: тут у пузырьков важное собрание.", "Поставил метку на карте: Бухтой чернильных облаков — место для красивого разворота.", "Ух ты, Секретным гротом! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Секретным гротом? Мне нравится!", "Кажется, на Секретным гротом я приплыл раньше собственного хвоста.", "Остановка Секретным гротом! Пассажиры с пузырьками выходят первыми.", "Проверил Секретным гротом: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Секретным гротом? Я опять выбрал красивый путь.", "Срочные новости с Секретным гротом: дельфин доволен, крабы подозревают неладное.", "Кажется, Секретным гротом создано специально для эффектного проплыва.", "Не шумите на Секретным гротом: тут у пузырьков важное собрание.", "Поставил метку на карте: Секретным гротом — место для красивого разворота.", "Ух ты, Коралловой башней! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Коралловой башней? Мне нравится!", "Кажется, на Коралловой башней я приплыл раньше собственного хвоста.", "Остановка Коралловой башней! Пассажиры с пузырьками выходят первыми.", "Проверил Коралловой башней: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Коралловой башней? Я опять выбрал красивый путь.", "Срочные новости с Коралловой башней: дельфин доволен, крабы подозревают неладное.", "Кажется, Коралловой башней создано специально для эффектного проплыва.", "Не шумите на Коралловой башней: тут у пузырьков важное собрание.", "Поставил метку на карте: Коралловой башней — место для красивого разворота.", "Ух ты, Островом прилива! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Островом прилива? Мне нравится!", "Кажется, на Островом прилива я приплыл раньше собственного хвоста.", "Остановка Островом прилива! Пассажиры с пузырьками выходят первыми.", "Проверил Островом прилива: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Островом прилива? Я опять выбрал красивый путь.", "Срочные новости с Островом прилива: дельфин доволен, крабы подозревают неладное.", "Кажется, Островом прилива создано специально для эффектного проплыва.", "Не шумите на Островом прилива: тут у пузырьков важное собрание.", "Поставил метку на карте: Островом прилива — место для красивого разворота.", "Ух ты, Долиной белых камней! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Долиной белых камней? Мне нравится!", "Кажется, на Долиной белых камней я приплыл раньше собственного хвоста.", "Остановка Долиной белых камней! Пассажиры с пузырьками выходят первыми.", "Проверил Долиной белых камней: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Долиной белых камней? Я опять выбрал красивый путь.", "Срочные новости с Долиной белых камней: дельфин доволен, крабы подозревают неладное.", "Кажется, Долиной белых камней создано специально для эффектного проплыва.", "Не шумите на Долиной белых камней: тут у пузырьков важное собрание.", "Поставил метку на карте: Долиной белых камней — место для красивого разворота.", "Ух ты, Рифом шёпота! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Рифом шёпота? Мне нравится!", "Кажется, на Рифом шёпота я приплыл раньше собственного хвоста.", "Остановка Рифом шёпота! Пассажиры с пузырьками выходят первыми.", "Проверил Рифом шёпота: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Рифом шёпота? Я опять выбрал красивый путь.", "Срочные новости с Рифом шёпота: дельфин доволен, крабы подозревают неладное.", "Кажется, Рифом шёпота создано специально для эффектного проплыва.", "Не шумите на Рифом шёпота: тут у пузырьков важное собрание.", "Поставил метку на карте: Рифом шёпота — место для красивого разворота.", "Ух ты, Морским перекрёстком! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Морским перекрёстком? Мне нравится!", "Кажется, на Морским перекрёстком я приплыл раньше собственного хвоста.", "Остановка Морским перекрёстком! Пассажиры с пузырьками выходят первыми.", "Проверил Морским перекрёстком: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Морским перекрёстком? Я опять выбрал красивый путь.", "Срочные новости с Морским перекрёстком: дельфин доволен, крабы подозревают неладное.", "Кажется, Морским перекрёстком создано специально для эффектного проплыва.", "Не шумите на Морским перекрёстком: тут у пузырьков важное собрание.", "Поставил метку на карте: Морским перекрёстком — место для красивого разворота.", "Ух ты, Лабиринтом ракушек! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Лабиринтом ракушек? Мне нравится!", "Кажется, на Лабиринтом ракушек я приплыл раньше собственного хвоста.", "Остановка Лабиринтом ракушек! Пассажиры с пузырьками выходят первыми.", "Проверил Лабиринтом ракушек: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Лабиринтом ракушек? Я опять выбрал красивый путь.", "Срочные новости с Лабиринтом ракушек: дельфин доволен, крабы подозревают неладное.", "Кажется, Лабиринтом ракушек создано специально для эффектного проплыва.", "Не шумите на Лабиринтом ракушек: тут у пузырьков важное собрание.", "Поставил метку на карте: Лабиринтом ракушек — место для красивого разворота.", "Ух ты, Туманной бухтой! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Туманной бухтой? Мне нравится!", "Кажется, на Туманной бухтой я приплыл раньше собственного хвоста.", "Остановка Туманной бухтой! Пассажиры с пузырьками выходят первыми.", "Проверил Туманной бухтой: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Туманной бухтой? Я опять выбрал красивый путь.", "Срочные новости с Туманной бухтой: дельфин доволен, крабы подозревают неладное.", "Кажется, Туманной бухтой создано специально для эффектного проплыва.", "Не шумите на Туманной бухтой: тут у пузырьков важное собрание.", "Поставил метку на карте: Туманной бухтой — место для красивого разворота.", "Ух ты, Светящейся отмелью! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Светящейся отмелью? Мне нравится!", "Кажется, на Светящейся отмелью я приплыл раньше собственного хвоста.", "Остановка Светящейся отмелью! Пассажиры с пузырьками выходят первыми.", "Проверил Светящейся отмелью: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Светящейся отмелью? Я опять выбрал красивый путь.", "Срочные новости с Светящейся отмелью: дельфин доволен, крабы подозревают неладное.", "Кажется, Светящейся отмелью создано специально для эффектного проплыва.", "Не шумите на Светящейся отмелью: тут у пузырьков важное собрание.", "Поставил метку на карте: Светящейся отмелью — место для красивого разворота.", "Ух ты, Крабьей набережной! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Крабьей набережной? Мне нравится!", "Кажется, на Крабьей набережной я приплыл раньше собственного хвоста.", "Остановка Крабьей набережной! Пассажиры с пузырьками выходят первыми.", "Проверил Крабьей набережной: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Крабьей набережной? Я опять выбрал красивый путь.", "Срочные новости с Крабьей набережной: дельфин доволен, крабы подозревают неладное.", "Кажется, Крабьей набережной создано специально для эффектного проплыва.", "Не шумите на Крабьей набережной: тут у пузырьков важное собрание.", "Поставил метку на карте: Крабьей набережной — место для красивого разворота.", "Ух ты, Медузьим бульваром! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Медузьим бульваром? Мне нравится!", "Кажется, на Медузьим бульваром я приплыл раньше собственного хвоста.", "Остановка Медузьим бульваром! Пассажиры с пузырьками выходят первыми.", "Проверил Медузьим бульваром: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Медузьим бульваром? Я опять выбрал красивый путь.", "Срочные новости с Медузьим бульваром: дельфин доволен, крабы подозревают неладное.", "Кажется, Медузьим бульваром создано специально для эффектного проплыва.", "Не шумите на Медузьим бульваром: тут у пузырьков важное собрание.", "Поставил метку на карте: Медузьим бульваром — место для красивого разворота.", "Ух ты, Пещерой старого кита! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Пещерой старого кита? Мне нравится!", "Кажется, на Пещерой старого кита я приплыл раньше собственного хвоста.", "Остановка Пещерой старого кита! Пассажиры с пузырьками выходят первыми.", "Проверил Пещерой старого кита: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Пещерой старого кита? Я опять выбрал красивый путь.", "Срочные новости с Пещерой старого кита: дельфин доволен, крабы подозревают неладное.", "Кажется, Пещерой старого кита создано специально для эффектного проплыва.", "Не шумите на Пещерой старого кита: тут у пузырьков важное собрание.", "Поставил метку на карте: Пещерой старого кита — место для красивого разворота.", "Ух ты, Рифом тихих волн! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Рифом тихих волн? Мне нравится!", "Кажется, на Рифом тихих волн я приплыл раньше собственного хвоста.", "Остановка Рифом тихих волн! Пассажиры с пузырьками выходят первыми.", "Проверил Рифом тихих волн: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Рифом тихих волн? Я опять выбрал красивый путь.", "Срочные новости с Рифом тихих волн: дельфин доволен, крабы подозревают неладное.", "Кажется, Рифом тихих волн создано специально для эффектного проплыва.", "Не шумите на Рифом тихих волн: тут у пузырьков важное собрание.", "Поставил метку на карте: Рифом тихих волн — место для красивого разворота.", "Ух ты, Затонувшим садом! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Затонувшим садом? Мне нравится!", "Кажется, на Затонувшим садом я приплыл раньше собственного хвоста.", "Остановка Затонувшим садом! Пассажиры с пузырьками выходят первыми.", "Проверил Затонувшим садом: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Затонувшим садом? Я опять выбрал красивый путь.", "Срочные новости с Затонувшим садом: дельфин доволен, крабы подозревают неладное.", "Кажется, Затонувшим садом создано специально для эффектного проплыва.", "Не шумите на Затонувшим садом: тут у пузырьков важное собрание.", "Поставил метку на карте: Затонувшим садом — место для красивого разворота.", "Ух ты, Подводным цирком! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Подводным цирком? Мне нравится!", "Кажется, на Подводным цирком я приплыл раньше собственного хвоста.", "Остановка Подводным цирком! Пассажиры с пузырьками выходят первыми.", "Проверил Подводным цирком: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Подводным цирком? Я опять выбрал красивый путь.", "Срочные новости с Подводным цирком: дельфин доволен, крабы подозревают неладное.", "Кажется, Подводным цирком создано специально для эффектного проплыва.", "Не шумите на Подводным цирком: тут у пузырьков важное собрание.", "Поставил метку на карте: Подводным цирком — место для красивого разворота.", "Ух ты, Ракушечной станцией! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Ракушечной станцией? Мне нравится!", "Кажется, на Ракушечной станцией я приплыл раньше собственного хвоста.", "Остановка Ракушечной станцией! Пассажиры с пузырьками выходят первыми.", "Проверил Ракушечной станцией: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Ракушечной станцией? Я опять выбрал красивый путь.", "Срочные новости с Ракушечной станцией: дельфин доволен, крабы подозревают неладное.", "Кажется, Ракушечной станцией создано специально для эффектного проплыва.", "Не шумите на Ракушечной станцией: тут у пузырьков важное собрание.", "Поставил метку на карте: Ракушечной станцией — место для красивого разворота.", "Ух ты, Бухтой четырёх ветров! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Бухтой четырёх ветров? Мне нравится!", "Кажется, на Бухтой четырёх ветров я приплыл раньше собственного хвоста.", "Остановка Бухтой четырёх ветров! Пассажиры с пузырьками выходят первыми.", "Проверил Бухтой четырёх ветров: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Бухтой четырёх ветров? Я опять выбрал красивый путь.", "Срочные новости с Бухтой четырёх ветров: дельфин доволен, крабы подозревают неладное.", "Кажется, Бухтой четырёх ветров создано специально для эффектного проплыва.", "Не шумите на Бухтой четырёх ветров: тут у пузырьков важное собрание.", "Поставил метку на карте: Бухтой четырёх ветров — место для красивого разворота.", "Ух ты, Океанским двориком! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Океанским двориком? Мне нравится!", "Кажется, на Океанским двориком я приплыл раньше собственного хвоста.", "Остановка Океанским двориком! Пассажиры с пузырьками выходят первыми.", "Проверил Океанским двориком: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Океанским двориком? Я опять выбрал красивый путь.", "Срочные новости с Океанским двориком: дельфин доволен, крабы подозревают неладное.", "Кажется, Океанским двориком создано специально для эффектного проплыва.", "Не шумите на Океанским двориком: тут у пузырьков важное собрание.", "Поставил метку на карте: Океанским двориком — место для красивого разворота.", "Ух ты, Скалой дельфинов! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Скалой дельфинов? Мне нравится!", "Кажется, на Скалой дельфинов я приплыл раньше собственного хвоста.", "Остановка Скалой дельфинов! Пассажиры с пузырьками выходят первыми.", "Проверил Скалой дельфинов: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Скалой дельфинов? Я опять выбрал красивый путь.", "Срочные новости с Скалой дельфинов: дельфин доволен, крабы подозревают неладное.", "Кажется, Скалой дельфинов создано специально для эффектного проплыва.", "Не шумите на Скалой дельфинов: тут у пузырьков важное собрание.", "Поставил метку на карте: Скалой дельфинов — место для красивого разворота.", "Ух ты, Голубым тоннелем! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Голубым тоннелем? Мне нравится!", "Кажется, на Голубым тоннелем я приплыл раньше собственного хвоста.", "Остановка Голубым тоннелем! Пассажиры с пузырьками выходят первыми.", "Проверил Голубым тоннелем: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Голубым тоннелем? Я опять выбрал красивый путь.", "Срочные новости с Голубым тоннелем: дельфин доволен, крабы подозревают неладное.", "Кажется, Голубым тоннелем создано специально для эффектного проплыва.", "Не шумите на Голубым тоннелем: тут у пузырьков важное собрание.", "Поставил метку на карте: Голубым тоннелем — место для красивого разворота.", "Ух ты, Песчаным амфитеатром! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Песчаным амфитеатром? Мне нравится!", "Кажется, на Песчаным амфитеатром я приплыл раньше собственного хвоста.", "Остановка Песчаным амфитеатром! Пассажиры с пузырьками выходят первыми.", "Проверил Песчаным амфитеатром: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Песчаным амфитеатром? Я опять выбрал красивый путь.", "Срочные новости с Песчаным амфитеатром: дельфин доволен, крабы подозревают неладное.", "Кажется, Песчаным амфитеатром создано специально для эффектного проплыва.", "Не шумите на Песчаным амфитеатром: тут у пузырьков важное собрание.", "Поставил метку на карте: Песчаным амфитеатром — место для красивого разворота.", "Ух ты, Коралловым кварталом! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Коралловым кварталом? Мне нравится!", "Кажется, на Коралловым кварталом я приплыл раньше собственного хвоста.", "Остановка Коралловым кварталом! Пассажиры с пузырьками выходят первыми.", "Проверил Коралловым кварталом: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Коралловым кварталом? Я опять выбрал красивый путь.", "Срочные новости с Коралловым кварталом: дельфин доволен, крабы подозревают неладное.", "Кажется, Коралловым кварталом создано специально для эффектного проплыва.", "Не шумите на Коралловым кварталом: тут у пузырьков важное собрание.", "Поставил метку на карте: Коралловым кварталом — место для красивого разворота.", "Ух ты, Жемчужной площадью! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Жемчужной площадью? Мне нравится!", "Кажется, на Жемчужной площадью я приплыл раньше собственного хвоста.", "Остановка Жемчужной площадью! Пассажиры с пузырьками выходят первыми.", "Проверил Жемчужной площадью: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Жемчужной площадью? Я опять выбрал красивый путь.", "Срочные новости с Жемчужной площадью: дельфин доволен, крабы подозревают неладное.", "Кажется, Жемчужной площадью создано специально для эффектного проплыва.", "Не шумите на Жемчужной площадью: тут у пузырьков важное собрание.", "Поставил метку на карте: Жемчужной площадью — место для красивого разворота.", "Ух ты, Рифом летающих пузырей! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Рифом летающих пузырей? Мне нравится!", "Кажется, на Рифом летающих пузырей я приплыл раньше собственного хвоста.", "Остановка Рифом летающих пузырей! Пассажиры с пузырьками выходят первыми.", "Проверил Рифом летающих пузырей: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Рифом летающих пузырей? Я опять выбрал красивый путь.", "Срочные новости с Рифом летающих пузырей: дельфин доволен, крабы подозревают неладное.", "Кажется, Рифом летающих пузырей создано специально для эффектного проплыва.", "Не шумите на Рифом летающих пузырей: тут у пузырьков важное собрание.", "Поставил метку на карте: Рифом летающих пузырей — место для красивого разворота.", "Ух ты, Садом морских лилий! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Садом морских лилий? Мне нравится!", "Кажется, на Садом морских лилий я приплыл раньше собственного хвоста.", "Остановка Садом морских лилий! Пассажиры с пузырьками выходят первыми.", "Проверил Садом морских лилий: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Садом морских лилий? Я опять выбрал красивый путь.", "Срочные новости с Садом морских лилий: дельфин доволен, крабы подозревают неладное.", "Кажется, Садом морских лилий создано специально для эффектного проплыва.", "Не шумите на Садом морских лилий: тут у пузырьков важное собрание.", "Поставил метку на карте: Садом морских лилий — место для красивого разворота.", "Ух ты, Островом компасов! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Островом компасов? Мне нравится!", "Кажется, на Островом компасов я приплыл раньше собственного хвоста.", "Остановка Островом компасов! Пассажиры с пузырьками выходят первыми.", "Проверил Островом компасов: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Островом компасов? Я опять выбрал красивый путь.", "Срочные новости с Островом компасов: дельфин доволен, крабы подозревают неладное.", "Кажется, Островом компасов создано специально для эффектного проплыва.", "Не шумите на Островом компасов: тут у пузырьков важное собрание.", "Поставил метку на карте: Островом компасов — место для красивого разворота.", "Ух ты, Бухтой маяков! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Бухтой маяков? Мне нравится!", "Кажется, на Бухтой маяков я приплыл раньше собственного хвоста.", "Остановка Бухтой маяков! Пассажиры с пузырьками выходят первыми.", "Проверил Бухтой маяков: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Бухтой маяков? Я опять выбрал красивый путь.", "Срочные новости с Бухтой маяков: дельфин доволен, крабы подозревают неладное.", "Кажется, Бухтой маяков создано специально для эффектного проплыва.", "Не шумите на Бухтой маяков: тут у пузырьков важное собрание.", "Поставил метку на карте: Бухтой маяков — место для красивого разворота.", "Ух ты, Подводной мастерской! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Подводной мастерской? Мне нравится!", "Кажется, на Подводной мастерской я приплыл раньше собственного хвоста.", "Остановка Подводной мастерской! Пассажиры с пузырьками выходят первыми.", "Проверил Подводной мастерской: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Подводной мастерской? Я опять выбрал красивый путь.", "Срочные новости с Подводной мастерской: дельфин доволен, крабы подозревают неладное.", "Кажется, Подводной мастерской создано специально для эффектного проплыва.", "Не шумите на Подводной мастерской: тут у пузырьков важное собрание.", "Поставил метку на карте: Подводной мастерской — место для красивого разворота.", "Ух ты, Тихой гаванью! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Тихой гаванью? Мне нравится!", "Кажется, на Тихой гаванью я приплыл раньше собственного хвоста.", "Остановка Тихой гаванью! Пассажиры с пузырьками выходят первыми.", "Проверил Тихой гаванью: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Тихой гаванью? Я опять выбрал красивый путь.", "Срочные новости с Тихой гаванью: дельфин доволен, крабы подозревают неладное.", "Кажется, Тихой гаванью создано специально для эффектного проплыва.", "Не шумите на Тихой гаванью: тут у пузырьков важное собрание.", "Поставил метку на карте: Тихой гаванью — место для красивого разворота.", "Ух ты, Морской смотровой площадкой! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Морской смотровой площадкой? Мне нравится!", "Кажется, на Морской смотровой площадкой я приплыл раньше собственного хвоста.", "Остановка Морской смотровой площадкой! Пассажиры с пузырьками выходят первыми.", "Проверил Морской смотровой площадкой: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Морской смотровой площадкой? Я опять выбрал красивый путь.", "Срочные новости с Морской смотровой площадкой: дельфин доволен, крабы подозревают неладное.", "Кажется, Морской смотровой площадкой создано специально для эффектного проплыва.", "Не шумите на Морской смотровой площадкой: тут у пузырьков важное собрание.", "Поставил метку на карте: Морской смотровой площадкой — место для красивого разворота.", "Ух ты, Синим переулком! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Синим переулком? Мне нравится!", "Кажется, на Синим переулком я приплыл раньше собственного хвоста.", "Остановка Синим переулком! Пассажиры с пузырьками выходят первыми.", "Проверил Синим переулком: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Синим переулком? Я опять выбрал красивый путь.", "Срочные новости с Синим переулком: дельфин доволен, крабы подозревают неладное.", "Кажется, Синим переулком создано специально для эффектного проплыва.", "Не шумите на Синим переулком: тут у пузырьков важное собрание.", "Поставил метку на карте: Синим переулком — место для красивого разворота.", "Ух ты, Рифом старых якорей! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Рифом старых якорей? Мне нравится!", "Кажется, на Рифом старых якорей я приплыл раньше собственного хвоста.", "Остановка Рифом старых якорей! Пассажиры с пузырьками выходят первыми.", "Проверил Рифом старых якорей: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Рифом старых якорей? Я опять выбрал красивый путь.", "Срочные новости с Рифом старых якорей: дельфин доволен, крабы подозревают неладное.", "Кажется, Рифом старых якорей создано специально для эффектного проплыва.", "Не шумите на Рифом старых якорей: тут у пузырьков важное собрание.", "Поставил метку на карте: Рифом старых якорей — место для красивого разворота.", "Ух ты, Лагуной зеркал! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Лагуной зеркал? Мне нравится!", "Кажется, на Лагуной зеркал я приплыл раньше собственного хвоста.", "Остановка Лагуной зеркал! Пассажиры с пузырьками выходят первыми.", "Проверил Лагуной зеркал: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Лагуной зеркал? Я опять выбрал красивый путь.", "Срочные новости с Лагуной зеркал: дельфин доволен, крабы подозревают неладное.", "Кажется, Лагуной зеркал создано специально для эффектного проплыва.", "Не шумите на Лагуной зеркал: тут у пузырьков важное собрание.", "Поставил метку на карте: Лагуной зеркал — место для красивого разворота.", "Ух ты, Пещерой светлых стен! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Пещерой светлых стен? Мне нравится!", "Кажется, на Пещерой светлых стен я приплыл раньше собственного хвоста.", "Остановка Пещерой светлых стен! Пассажиры с пузырьками выходят первыми.", "Проверил Пещерой светлых стен: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Пещерой светлых стен? Я опять выбрал красивый путь.", "Срочные новости с Пещерой светлых стен: дельфин доволен, крабы подозревают неладное.", "Кажется, Пещерой светлых стен создано специально для эффектного проплыва.", "Не шумите на Пещерой светлых стен: тут у пузырьков важное собрание.", "Поставил метку на карте: Пещерой светлых стен — место для красивого разворота.", "Ух ты, Долиной течений! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Долиной течений? Мне нравится!", "Кажется, на Долиной течений я приплыл раньше собственного хвоста.", "Остановка Долиной течений! Пассажиры с пузырьками выходят первыми.", "Проверил Долиной течений: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Долиной течений? Я опять выбрал красивый путь.", "Срочные новости с Долиной течений: дельфин доволен, крабы подозревают неладное.", "Кажется, Долиной течений создано специально для эффектного проплыва.", "Не шумите на Долиной течений: тут у пузырьков важное собрание.", "Поставил метку на карте: Долиной течений — место для красивого разворота.", "Ух ты, Коралловой библиотекой! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Коралловой библиотекой? Мне нравится!", "Кажется, на Коралловой библиотекой я приплыл раньше собственного хвоста.", "Остановка Коралловой библиотекой! Пассажиры с пузырьками выходят первыми.", "Проверил Коралловой библиотекой: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Коралловой библиотекой? Я опять выбрал красивый путь.", "Срочные новости с Коралловой библиотекой: дельфин доволен, крабы подозревают неладное.", "Кажется, Коралловой библиотекой создано специально для эффектного проплыва.", "Не шумите на Коралловой библиотекой: тут у пузырьков важное собрание.", "Поставил метку на карте: Коралловой библиотекой — место для красивого разворота.", "Ух ты, Островом сонных черепах! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Островом сонных черепах? Мне нравится!", "Кажется, на Островом сонных черепах я приплыл раньше собственного хвоста.", "Остановка Островом сонных черепах! Пассажиры с пузырьками выходят первыми.", "Проверил Островом сонных черепах: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Островом сонных черепах? Я опять выбрал красивый путь.", "Срочные новости с Островом сонных черепах: дельфин доволен, крабы подозревают неладное.", "Кажется, Островом сонных черепах создано специально для эффектного проплыва.", "Не шумите на Островом сонных черепах: тут у пузырьков важное собрание.", "Поставил метку на карте: Островом сонных черепах — место для красивого разворота.", "Ух ты, Бухтой быстрых рыб! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Бухтой быстрых рыб? Мне нравится!", "Кажется, на Бухтой быстрых рыб я приплыл раньше собственного хвоста.", "Остановка Бухтой быстрых рыб! Пассажиры с пузырьками выходят первыми.", "Проверил Бухтой быстрых рыб: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Бухтой быстрых рыб? Я опять выбрал красивый путь.", "Срочные новости с Бухтой быстрых рыб: дельфин доволен, крабы подозревают неладное.", "Кажется, Бухтой быстрых рыб создано специально для эффектного проплыва.", "Не шумите на Бухтой быстрых рыб: тут у пузырьков важное собрание.", "Поставил метку на карте: Бухтой быстрых рыб — место для красивого разворота.", "Ух ты, Станцией пузырьков! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Станцией пузырьков? Мне нравится!", "Кажется, на Станцией пузырьков я приплыл раньше собственного хвоста.", "Остановка Станцией пузырьков! Пассажиры с пузырьками выходят первыми.", "Проверил Станцией пузырьков: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Станцией пузырьков? Я опять выбрал красивый путь.", "Срочные новости с Станцией пузырьков: дельфин доволен, крабы подозревают неладное.", "Кажется, Станцией пузырьков создано специально для эффектного проплыва.", "Не шумите на Станцией пузырьков: тут у пузырьков важное собрание.", "Поставил метку на карте: Станцией пузырьков — место для красивого разворота.", "Ух ты, Морским садом! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Морским садом? Мне нравится!", "Кажется, на Морским садом я приплыл раньше собственного хвоста.", "Остановка Морским садом! Пассажиры с пузырьками выходят первыми.", "Проверил Морским садом: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Морским садом? Я опять выбрал красивый путь.", "Срочные новости с Морским садом: дельфин доволен, крабы подозревают неладное.", "Кажется, Морским садом создано специально для эффектного проплыва.", "Не шумите на Морским садом: тут у пузырьков важное собрание.", "Поставил метку на карте: Морским садом — место для красивого разворота.", "Ух ты, Рифом разноцветных камней! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Рифом разноцветных камней? Мне нравится!", "Кажется, на Рифом разноцветных камней я приплыл раньше собственного хвоста.", "Остановка Рифом разноцветных камней! Пассажиры с пузырьками выходят первыми.", "Проверил Рифом разноцветных камней: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Рифом разноцветных камней? Я опять выбрал красивый путь.", "Срочные новости с Рифом разноцветных камней: дельфин доволен, крабы подозревают неладное.", "Кажется, Рифом разноцветных камней создано специально для эффектного проплыва.", "Не шумите на Рифом разноцветных камней: тут у пузырьков важное собрание.", "Поставил метку на карте: Рифом разноцветных камней — место для красивого разворота.", "Ух ты, Пещерой ракушечных эхо! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Пещерой ракушечных эхо? Мне нравится!", "Кажется, на Пещерой ракушечных эхо я приплыл раньше собственного хвоста.", "Остановка Пещерой ракушечных эхо! Пассажиры с пузырьками выходят первыми.", "Проверил Пещерой ракушечных эхо: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Пещерой ракушечных эхо? Я опять выбрал красивый путь.", "Срочные новости с Пещерой ракушечных эхо: дельфин доволен, крабы подозревают неладное.", "Кажется, Пещерой ракушечных эхо создано специально для эффектного проплыва.", "Не шумите на Пещерой ракушечных эхо: тут у пузырьков важное собрание.", "Поставил метку на карте: Пещерой ракушечных эхо — место для красивого разворота.", "Ух ты, Голубой площадкой! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Голубой площадкой? Мне нравится!", "Кажется, на Голубой площадкой я приплыл раньше собственного хвоста.", "Остановка Голубой площадкой! Пассажиры с пузырьками выходят первыми.", "Проверил Голубой площадкой: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Голубой площадкой? Я опять выбрал красивый путь.", "Срочные новости с Голубой площадкой: дельфин доволен, крабы подозревают неладное.", "Кажется, Голубой площадкой создано специально для эффектного проплыва.", "Не шумите на Голубой площадкой: тут у пузырьков важное собрание.", "Поставил метку на карте: Голубой площадкой — место для красивого разворота.", "Ух ты, Затонувшей площадью! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Затонувшей площадью? Мне нравится!", "Кажется, на Затонувшей площадью я приплыл раньше собственного хвоста.", "Остановка Затонувшей площадью! Пассажиры с пузырьками выходят первыми.", "Проверил Затонувшей площадью: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Затонувшей площадью? Я опять выбрал красивый путь.", "Срочные новости с Затонувшей площадью: дельфин доволен, крабы подозревают неладное.", "Кажется, Затонувшей площадью создано специально для эффектного проплыва.", "Не шумите на Затонувшей площадью: тут у пузырьков важное собрание.", "Поставил метку на карте: Затонувшей площадью — место для красивого разворота.", "Ух ты, Сквером морских звёзд! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Сквером морских звёзд? Мне нравится!", "Кажется, на Сквером морских звёзд я приплыл раньше собственного хвоста.", "Остановка Сквером морских звёзд! Пассажиры с пузырьками выходят первыми.", "Проверил Сквером морских звёзд: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Сквером морских звёзд? Я опять выбрал красивый путь.", "Срочные новости с Сквером морских звёзд: дельфин доволен, крабы подозревают неладное.", "Кажется, Сквером морских звёзд создано специально для эффектного проплыва.", "Не шумите на Сквером морских звёзд: тут у пузырьков важное собрание.", "Поставил метку на карте: Сквером морских звёзд — место для красивого разворота.", "Ух ты, Проливом маленьких волн! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Проливом маленьких волн? Мне нравится!", "Кажется, на Проливом маленьких волн я приплыл раньше собственного хвоста.", "Остановка Проливом маленьких волн! Пассажиры с пузырьками выходят первыми.", "Проверил Проливом маленьких волн: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Проливом маленьких волн? Я опять выбрал красивый путь.", "Срочные новости с Проливом маленьких волн: дельфин доволен, крабы подозревают неладное.", "Кажется, Проливом маленьких волн создано специально для эффектного проплыва.", "Не шумите на Проливом маленьких волн: тут у пузырьков важное собрание.", "Поставил метку на карте: Проливом маленьких волн — место для красивого разворота.", "Ух ты, Бухтой смешных крабов! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Бухтой смешных крабов? Мне нравится!", "Кажется, на Бухтой смешных крабов я приплыл раньше собственного хвоста.", "Остановка Бухтой смешных крабов! Пассажиры с пузырьками выходят первыми.", "Проверил Бухтой смешных крабов: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Бухтой смешных крабов? Я опять выбрал красивый путь.", "Срочные новости с Бухтой смешных крабов: дельфин доволен, крабы подозревают неладное.", "Кажется, Бухтой смешных крабов создано специально для эффектного проплыва.", "Не шумите на Бухтой смешных крабов: тут у пузырьков важное собрание.", "Поставил метку на карте: Бухтой смешных крабов — место для красивого разворота.", "Ух ты, Подводным кинотеатром! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Подводным кинотеатром? Мне нравится!", "Кажется, на Подводным кинотеатром я приплыл раньше собственного хвоста.", "Остановка Подводным кинотеатром! Пассажиры с пузырьками выходят первыми.", "Проверил Подводным кинотеатром: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Подводным кинотеатром? Я опять выбрал красивый путь.", "Срочные новости с Подводным кинотеатром: дельфин доволен, крабы подозревают неладное.", "Кажется, Подводным кинотеатром создано специально для эффектного проплыва.", "Не шумите на Подводным кинотеатром: тут у пузырьков важное собрание.", "Поставил метку на карте: Подводным кинотеатром — место для красивого разворота.", "Ух ты, Коралловым вокзалом! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Коралловым вокзалом? Мне нравится!", "Кажется, на Коралловым вокзалом я приплыл раньше собственного хвоста.", "Остановка Коралловым вокзалом! Пассажиры с пузырьками выходят первыми.", "Проверил Коралловым вокзалом: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Коралловым вокзалом? Я опять выбрал красивый путь.", "Срочные новости с Коралловым вокзалом: дельфин доволен, крабы подозревают неладное.", "Кажется, Коралловым вокзалом создано специально для эффектного проплыва.", "Не шумите на Коралловым вокзалом: тут у пузырьков важное собрание.", "Поставил метку на карте: Коралловым вокзалом — место для красивого разворота.", "Ух ты, Островом тихого прибоя! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Островом тихого прибоя? Мне нравится!", "Кажется, на Островом тихого прибоя я приплыл раньше собственного хвоста.", "Остановка Островом тихого прибоя! Пассажиры с пузырьками выходят первыми.", "Проверил Островом тихого прибоя: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Островом тихого прибоя? Я опять выбрал красивый путь.", "Срочные новости с Островом тихого прибоя: дельфин доволен, крабы подозревают неладное.", "Кажется, Островом тихого прибоя создано специально для эффектного проплыва.", "Не шумите на Островом тихого прибоя: тут у пузырьков важное собрание.", "Поставил метку на карте: Островом тихого прибоя — место для красивого разворота.", "Ух ты, Лесом мягких кораллов! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Лесом мягких кораллов? Мне нравится!", "Кажется, на Лесом мягких кораллов я приплыл раньше собственного хвоста.", "Остановка Лесом мягких кораллов! Пассажиры с пузырьками выходят первыми.", "Проверил Лесом мягких кораллов: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Лесом мягких кораллов? Я опять выбрал красивый путь.", "Срочные новости с Лесом мягких кораллов: дельфин доволен, крабы подозревают неладное.", "Кажется, Лесом мягких кораллов создано специально для эффектного проплыва.", "Не шумите на Лесом мягких кораллов: тут у пузырьков важное собрание.", "Поставил метку на карте: Лесом мягких кораллов — место для красивого разворота.", "Ух ты, Рифом ночных огней! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Рифом ночных огней? Мне нравится!", "Кажется, на Рифом ночных огней я приплыл раньше собственного хвоста.", "Остановка Рифом ночных огней! Пассажиры с пузырьками выходят первыми.", "Проверил Рифом ночных огней: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Рифом ночных огней? Я опять выбрал красивый путь.", "Срочные новости с Рифом ночных огней: дельфин доволен, крабы подозревают неладное.", "Кажется, Рифом ночных огней создано специально для эффектного проплыва.", "Не шумите на Рифом ночных огней: тут у пузырьков важное собрание.", "Поставил метку на карте: Рифом ночных огней — место для красивого разворота.", "Ух ты, Жемчужным тоннелем! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Жемчужным тоннелем? Мне нравится!", "Кажется, на Жемчужным тоннелем я приплыл раньше собственного хвоста.", "Остановка Жемчужным тоннелем! Пассажиры с пузырьками выходят первыми.", "Проверил Жемчужным тоннелем: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Жемчужным тоннелем? Я опять выбрал красивый путь.", "Срочные новости с Жемчужным тоннелем: дельфин доволен, крабы подозревают неладное.", "Кажется, Жемчужным тоннелем создано специально для эффектного проплыва.", "Не шумите на Жемчужным тоннелем: тут у пузырьков важное собрание.", "Поставил метку на карте: Жемчужным тоннелем — место для красивого разворота.", "Ух ты, Песчаным перекрёстком! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Песчаным перекрёстком? Мне нравится!", "Кажется, на Песчаным перекрёстком я приплыл раньше собственного хвоста.", "Остановка Песчаным перекрёстком! Пассажиры с пузырьками выходят первыми.", "Проверил Песчаным перекрёстком: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Песчаным перекрёстком? Я опять выбрал красивый путь.", "Срочные новости с Песчаным перекрёстком: дельфин доволен, крабы подозревают неладное.", "Кажется, Песчаным перекрёстком создано специально для эффектного проплыва.", "Не шумите на Песчаным перекрёстком: тут у пузырьков важное собрание.", "Поставил метку на карте: Песчаным перекрёстком — место для красивого разворота.", "Ух ты, Морской террасой! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Морской террасой? Мне нравится!", "Кажется, на Морской террасой я приплыл раньше собственного хвоста.", "Остановка Морской террасой! Пассажиры с пузырьками выходят первыми.", "Проверил Морской террасой: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Морской террасой? Я опять выбрал красивый путь.", "Срочные новости с Морской террасой: дельфин доволен, крабы подозревают неладное.", "Кажется, Морской террасой создано специально для эффектного проплыва.", "Не шумите на Морской террасой: тут у пузырьков важное собрание.", "Поставил метку на карте: Морской террасой — место для красивого разворота.", "Ух ты, Бухтой серебряных рыб! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Бухтой серебряных рыб? Мне нравится!", "Кажется, на Бухтой серебряных рыб я приплыл раньше собственного хвоста.", "Остановка Бухтой серебряных рыб! Пассажиры с пузырьками выходят первыми.", "Проверил Бухтой серебряных рыб: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Бухтой серебряных рыб? Я опять выбрал красивый путь.", "Срочные новости с Бухтой серебряных рыб: дельфин доволен, крабы подозревают неладное.", "Кажется, Бухтой серебряных рыб создано специально для эффектного проплыва.", "Не шумите на Бухтой серебряных рыб: тут у пузырьков важное собрание.", "Поставил метку на карте: Бухтой серебряных рыб — место для красивого разворота.", "Ух ты, Гротом пузырькового ветра! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Гротом пузырькового ветра? Мне нравится!", "Кажется, на Гротом пузырькового ветра я приплыл раньше собственного хвоста.", "Остановка Гротом пузырькового ветра! Пассажиры с пузырьками выходят первыми.", "Проверил Гротом пузырькового ветра: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Гротом пузырькового ветра? Я опять выбрал красивый путь.", "Срочные новости с Гротом пузырькового ветра: дельфин доволен, крабы подозревают неладное.", "Кажется, Гротом пузырькового ветра создано специально для эффектного проплыва.", "Не шумите на Гротом пузырькового ветра: тут у пузырьков важное собрание.", "Поставил метку на карте: Гротом пузырькового ветра — место для красивого разворота.", "Ух ты, Синим причалом! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Синим причалом? Мне нравится!", "Кажется, на Синим причалом я приплыл раньше собственного хвоста.", "Остановка Синим причалом! Пассажиры с пузырьками выходят первыми.", "Проверил Синим причалом: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Синим причалом? Я опять выбрал красивый путь.", "Срочные новости с Синим причалом: дельфин доволен, крабы подозревают неладное.", "Кажется, Синим причалом создано специально для эффектного проплыва.", "Не шумите на Синим причалом: тут у пузырьков важное собрание.", "Поставил метку на карте: Синим причалом — место для красивого разворота.", "Ух ты, Островом потерянных ласт! Тут даже пузырьки ходят строем.", "Кто оставил весёлое течение на Островом потерянных ласт? Мне нравится!", "Кажется, на Островом потерянных ласт я приплыл раньше собственного хвоста.", "Остановка Островом потерянных ласт! Пассажиры с пузырьками выходят первыми.", "Проверил Островом потерянных ласт: кораллы на месте, настроение тоже!", "Кто-нибудь видел карту Островом потерянных ласт? Я опять выбрал красивый путь.", "Срочные новости с Островом потерянных ласт: дельфин доволен, крабы подозревают неладное.", "Кажется, Островом потерянных ласт создано специально для эффектного проплыва.", "Не шумите на Островом потерянных ласт: тут у пузырьков важное собрание.", "Поставил метку на карте: Островом потерянных ласт — место для красивого разворота."];
+function drawPixelWaves(x,y,t){
+ // Pixel wake trails behind the dolphin (it swims to the right).
+ var phase=Math.floor(t*5)%4;
+ for(var row=0;row<3;row++){
+  var yy=y+5+row*4+Math.round(Math.sin(t*3+row)*1);
+  var start=x-7-row*3-phase;
+  px(start,yy,4,1,'rgba(112,205,239,.68)');
+  px(start-3,yy+1,2,1,'rgba(112,205,239,.48)');
+  px(start-7,yy,3,1,'rgba(184,237,255,.58)');
+ }
+ // Small pixel splash at the tail.
+ px(x-3,y+2+phase%2,2,2,'rgba(205,246,255,.75)');
+ px(x-6,y+8-phase%2,1,2,'rgba(125,215,246,.65)');
+ px(x-10,y+4,2,1,'rgba(125,215,246,.55)');
+}
+function drawSpeech(x,y,t){
+ // Change the short playful caption every ~14 seconds; show it for 5.5s.
+ var slot=Math.floor(t/14)%phrases.length,phase=(t%14);
+ if(phase>5.5)return;
+ var msg=phrases[slot],w=Math.min(104,Math.max(48,Math.ceil(msg.length*4.5+12)));
+ var bx=Math.max(2,Math.min(W-w-2,x-39)),by=Math.max(5,y-18);
+ var alpha=phase<.25?phase/.25:phase>5.1?(5.5-phase)/.4:1;
+ ctx.save();ctx.globalAlpha=Math.max(0,Math.min(1,alpha))*.92;
+ // Pixel speech card with stepped corners and a tiny pointer.
+ px(bx+2,by,w-4,15,'rgba(5,22,34,.90)');
+ px(bx,by+2,w,11,'rgba(5,22,34,.90)');
+ px(bx+2,by, w-4,1,'rgba(169,231,255,.95)');
+ px(bx+2,by+14,w-4,1,'rgba(103,193,229,.9)');
+ px(bx,by+4,1,7,'rgba(169,231,255,.9)');
+ px(bx+w-1,by+4,1,7,'rgba(169,231,255,.9)');
+ px(bx+Math.min(w-9,Math.max(5,x-bx+8)),by+15,3,2,'rgba(5,22,34,.90)');
+ ctx.fillStyle='#eafaff';ctx.font='bold 7px monospace';ctx.textBaseline='middle';ctx.imageSmoothingEnabled=false;
+ ctx.fillText(msg,bx+6,by+7.5,w-12);
+ ctx.restore();
+}
+// Rare playful event: a tiny diving helmet, followed by a quick gentle dive.
+// Rare full-screen trip: pause, put on a larger helmet with the flippers,
+// then make one fast crossing and re-enter from the opposite edge without it.
+var eventNext=78+Math.random()*42,eventStart=-1,reentryStart=-1;
+var swimX=72,swimY=126,swimAngle=(Math.random()*1.0-.5),swimSpeed=10.5,swimLastTs=0;
+function respawnAtRandomEdge(){
+ var edge=Math.floor(Math.random()*4),a;
+ if(edge===0){swimX=-30;swimY=18+Math.random()*(H-36);a=(Math.random()-.5)*1.15;}
+ else if(edge===1){swimX=W+30;swimY=18+Math.random()*(H-36);a=Math.PI+(Math.random()-.5)*1.15;}
+ else if(edge===2){swimX=18+Math.random()*(W-36);swimY=-24;a=Math.PI/2+(Math.random()-.5)*1.15;}
+ else {swimX=18+Math.random()*(W-36);swimY=H+24;a=-Math.PI/2+(Math.random()-.5)*1.15;}
+ swimAngle=a;
+}
+
+function drawHelmet(x,y,t,amount){
+ // Larger, clearly readable pixel diving helmet; amount animates it into place.
+ var bob=Math.round(Math.sin(t*1.8)*2),hx=x-1,hy=y-5+bob+Math.round((1-amount)*-9);
+ ctx.save();ctx.globalAlpha=Math.max(0,Math.min(1,amount));
+ px(hx+2,hy,8,1,'#e4faff');
+ px(hx+1,hy+1,10,1,'#bdeeff');
+ px(hx,hy+2,12,4,'rgba(118,207,239,.96)');
+ px(hx+2,hy+2,7,2,'#8bd8f4');
+ px(hx+3,hy+2,3,1,'#f5ffff');
+ px(hx-1,hy+3,1,3,'#e8fbff');px(hx+12,hy+3,1,3,'#e8fbff');
+ px(hx+1,hy+6,10,2,'#e0a94f');
+ px(hx+3,hy+8,6,1,'#bd8136');
+ ctx.restore();
+}
+function drawFlipperAdjust(x,y,t,progress){
+ // Two small flippers reach toward the helmet during the fitting pause.
+ var lift=Math.round(Math.sin(progress*Math.PI*5)*2);
+ px(x+5,y+8-lift,3,1,'#b9efff');px(x+7,y+7-lift,2,1,'#8bdfff');
+ px(x+13,y+8-lift,3,1,'#b9efff');px(x+13,y+7-lift,2,1,'#8bdfff');
+}
+function render(ts){if(document.hidden){raf=requestAnimationFrame(render);return;}if(ts-last<82){raf=requestAnimationFrame(render);return;}last=ts;frame++;
+ // Clear the full framebuffer with an identity transform before every frame.
+ ctx.setTransform(1,0,0,1,0,0);ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';ctx.clearRect(0,0,C.width,C.height);
+ ctx.setTransform(PIXEL_DENSITY,0,0,PIXEL_DENSITY,0,0);
+ for(var i=0;i<stars.length;i++){var st=stars[i],a=.25+.25*Math.sin(frame*.035+i);px(st[0],st[1],1,1,'rgba(170,230,255,'+a+')');if(i%3===0)px(st[0]+1,st[1],1,1,'rgba(170,230,255,'+(a*.45)+')');}
+ var t=frame/12;
+ if(eventStart<0&&t>=eventNext){eventStart=t;eventNext=t+78+Math.random()*42;}
+ var phase=eventStart<0?-1:t-eventStart;
+ var fitting=phase>=2&&phase<4;
+ var wearing=phase>=4&&phase<9.5;
+ var crossing=wearing;
+ var x,y;
+ if(phase>=0&&phase<2){x=58;y=78+Math.sin(t*1.8)*2;}
+ else if(fitting){x=58;y=78+Math.sin(t*1.8)*2;}
+ else if(crossing){var p=Math.min(1,(phase-4)/7.86);x=-30+p*(W+60);y=78+Math.sin(t*2.0)*7;}
+ else {
+  // Swim in one steady direction. Only when fully off-screen, re-enter
+  // from a randomly chosen edge with a new inward-facing direction.
+  var dt=swimLastTs?Math.min(.06,(ts-swimLastTs)/1000):.016;
+  swimLastTs=ts;
+  swimX+=Math.cos(swimAngle)*swimSpeed*dt;
+  swimY+=Math.sin(swimAngle)*swimSpeed*dt;
+  if(swimX<-34||swimX>W+34||swimY<-28||swimY>H+28)respawnAtRandomEdge();
+  x=swimX;y=swimY;
+ }
+ x=Math.round(x);y=Math.round(y);
+ // Fish move independently in both directions behind the dolphin.
+ for(var fidx=0;fidx<fish.length;fidx++)drawFish(fish[fidx],t);
+ var showDolphin=!(phase>=9.5&&phase<10.0);
+ if(showDolphin){
+  drawPixelWaves(x,y,t);
+  if(phase<2||fitting)drawSpeech(x,y,t);
+  ctx.save();
+  // Keep the dolphin aligned with its current straight swimming direction.
+  var heading=(phase>=0&&phase<9.5)?0:swimAngle;
+  ctx.translate(x+12,y+5);ctx.rotate(heading);ctx.translate(-(x+12),-(y+5));
+  ctx.globalAlpha=.82;drawDolphin(x,y,t);
+  if(fitting)drawFlipperAdjust(x,y,t,Math.min(1,(phase-2)/2));
+  if(wearing)drawHelmet(x,y,t,Math.min(1,(phase-4)/.8));
+  ctx.restore();
+ }
+ if(phase>=9.5){eventStart=-1;reentryStart=t;}
+ // Ambient bubbles
+ for(var b=0;b<bubbles.length;b++){var q=bubbles[b],yy=(q.y-frame*q.v+H)%(H);px(q.x,yy,q.s,q.s,'rgba(160,225,255,.58)');px(q.x+q.s,yy-1,1,1,'rgba(225,250,255,.72)');}
+ ctx.globalAlpha=.22;ctx.fillStyle='#b8eaff';ctx.font='5px monospace';ctx.fillText('D O L P H Y',5,248);ctx.globalAlpha=1;
+ raf=requestAnimationFrame(render);
+}
+window.addEventListener('resize',resize,{passive:true});document.addEventListener('visibilitychange',function(){if(!document.hidden&&!raf)raf=requestAnimationFrame(render);});
+resize();raf=requestAnimationFrame(render);
+})();
+</script>
+<script>
+(function(){
+// Performance: render the decorative background at 18% linear resolution (about 3.2% pixels).
+var B=document.getElementById('bg'),dpr=window.devicePixelRatio||1;
+if(window.__plain){B.style.display='none';return;}
+var gl=B.getContext('webgl',{alpha:false,antialias:false});
+if(!gl)return;
+var VS='attribute vec2 a;void main(){gl_Position=vec4(a,0.0,1.0);}';
+var FS='precision mediump float;uniform vec2 res;uniform float T;'+
+'float bgL(vec2 p){vec2 uv=p/res;float w1=sin(uv.x*6.0+T*0.9+sin(uv.y*4.0-T*0.6)*2.0);'+
+'float w2=sin(uv.y*5.0-T*0.7+cos(uv.x*3.0+T*0.4)*1.5);'+
+'float l=smoothstep(0.82,1.0,abs(sin((w1+w2)*1.6)));return 0.05+0.05*uv.y+0.30*l;}'+
+'void main(){vec2 p=vec2(gl_FragCoord.x,res.y-gl_FragCoord.y);gl_FragColor=vec4(vec3(bgL(p)),1.0);}';
+function sh(t,src){var o=gl.createShader(t);gl.shaderSource(o,src);gl.compileShader(o);return o;}
+var pr=gl.createProgram();gl.attachShader(pr,sh(gl.VERTEX_SHADER,VS));gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,FS));
+gl.linkProgram(pr);if(!gl.getProgramParameter(pr,gl.LINK_STATUS))return;
+gl.useProgram(pr);
+var buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+var loc=gl.getAttribLocation(pr,'a');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+var uRes=gl.getUniformLocation(pr,'res'),uT=gl.getUniformLocation(pr,'T');
+function size(){B.width=Math.round(innerWidth*dpr*0.18);B.height=Math.round(innerHeight*dpr*0.18);gl.viewport(0,0,B.width,B.height);}
+size();window.addEventListener('resize',size);
+var t0=performance.now();
+function frame(){
+ if(window.__plain)return;
+ if(document.hidden){setTimeout(function(){requestAnimationFrame(frame);},400);return;}
+ gl.uniform2f(uRes,B.width,B.height);gl.uniform1f(uT,(performance.now()-t0)/1000);
+ gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+ setTimeout(function(){requestAnimationFrame(frame);},window.__lite?100:33);
+}
+requestAnimationFrame(frame);
+})();
+(function(){
+// Performance: the small refraction lens uses a 0.72x internal resolution.
+var C=document.getElementById('lens'),dpr=(window.devicePixelRatio||1)*0.72;
+if(window.__lite){C.style.display='none';return;}
+var gl=C.getContext('webgl',{premultipliedAlpha:true,alpha:true,antialias:false});
+if(!gl)return;
+var VS='attribute vec2 a;void main(){gl_Position=vec4(a,0.0,1.0);}';
+var FS='precision mediump float;uniform vec2 res;uniform vec2 mo;uniform float T;uniform float rad;uniform float al;'+
+'float bgL(vec2 p){vec2 uv=p/res;float w1=sin(uv.x*6.0+T*0.9+sin(uv.y*4.0-T*0.6)*2.0);'+
+'float w2=sin(uv.y*5.0-T*0.7+cos(uv.x*3.0+T*0.4)*1.5);'+
+'float l=smoothstep(0.82,1.0,abs(sin((w1+w2)*1.6)));return 0.03+0.04*uv.y+0.18*l;}'+
+'void main(){vec2 p=vec2(gl_FragCoord.x,res.y-gl_FragCoord.y);vec2 v=(p-mo)/rad;float d=length(v);'+
+'if(d>=1.0){gl_FragColor=vec4(0.0);return;}'+
+'float z=sqrt(1.0-d*d);float k=(1.0-z)*1.3;vec2 s=p-v*rad*k;'+
+'float r=bgL(s-v*rad*k*0.04);float g=bgL(s);float b=bgL(s+v*rad*k*0.04);'+
+'vec3 c=vec3(r,g,b);float rim=pow(1.0-z,2.2);c+=vec3(1.0)*rim*0.12;'+
+'float a=smoothstep(1.0,0.9,d)*al*0.45;gl_FragColor=vec4(c*a,a);}';
+function sh(t,src){var o=gl.createShader(t);gl.shaderSource(o,src);gl.compileShader(o);return o;}
+var pr=gl.createProgram();gl.attachShader(pr,sh(gl.VERTEX_SHADER,VS));gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,FS));
+gl.linkProgram(pr);if(!gl.getProgramParameter(pr,gl.LINK_STATUS))return;
+gl.useProgram(pr);
+var buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+var loc=gl.getAttribLocation(pr,'a');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+var uRes=gl.getUniformLocation(pr,'res'),uMo=gl.getUniformLocation(pr,'mo'),uT=gl.getUniformLocation(pr,'T'),uRad=gl.getUniformLocation(pr,'rad'),uAl=gl.getUniformLocation(pr,'al');
+gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE_MINUS_SRC_ALPHA);
+function size(){C.width=Math.round(innerWidth*dpr);C.height=Math.round(innerHeight*dpr);gl.viewport(0,0,C.width,C.height);}
+size();window.addEventListener('resize',size);
+var L={x:0,y:0,on:false,a:0},run=false;
+function frame(){
+ if(window.__lite){gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);run=false;return;}
+ L.a+=((L.on?1:0)-L.a)*0.3;
+ gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);
+ if(L.a>0.003){
+  gl.uniform2f(uRes,C.width,C.height);gl.uniform2f(uMo,L.x,L.y);
+  gl.uniform1f(uT,performance.now()/1000);gl.uniform1f(uRad,22*dpr);gl.uniform1f(uAl,L.a);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+ }
+ if(L.on||L.a>0.003)requestAnimationFrame(frame);else run=false;
+}
+function kick(){if(!run){run=true;requestAnimationFrame(frame);}}
+function pos(e){L.x=e.clientX*dpr;L.y=e.clientY*dpr;}
+window.addEventListener('pointerdown',function(e){L.on=true;pos(e);kick();},true);
+window.addEventListener('pointermove',function(e){if(L.on){pos(e);kick();}},true);
+window.addEventListener('pointerup',function(){L.on=false;kick();},true);
+window.addEventListener('pointercancel',function(){L.on=false;kick();},true);
+})();
+</script>
+</body></html>
+"""
+
+AGSL_GLASS = """
+uniform shader content;
+uniform float2 res;
+uniform float dpx;
+uniform float n;
+uniform float T;
+uniform float4 R[40];
+uniform float Rr[40];
+uniform float Rd[40];
+uniform float RD[40];
+
+float3 bgAt(float2 q) {
+    // Real scene captured from the host Activity through PixelCopy.
+    float2 p = clamp(q, float2(0.5), res - 0.5);
+    return float3(content.eval(p).rgb);
+}
+
+float3 glassBlur(float2 q, float radius) {
+    // Five-tap low-cost blur. PixelCopy is half-resolution, keeping the
+    // sampling budget practical on Adreno while preserving background detail.
+    float2 p = clamp(q, float2(0.5), res - 0.5);
+    float r = clamp(radius, 0.6, 5.0);
+    float3 c = bgAt(p) * 0.36;
+    c += bgAt(p + float2(r, 0.0)) * 0.16;
+    c += bgAt(p - float2(r, 0.0)) * 0.16;
+    c += bgAt(p + float2(0.0, r)) * 0.16;
+    c += bgAt(p - float2(0.0, r)) * 0.16;
+    return c;
+}
+
+float2 refrDisp(float3 N, float ior, float thickness) {
+    float eta = 1.0 / ior;
+    float ci = N.z;
+    float k = max(1.0 - eta * eta * (1.0 - ci * ci), 0.0);
+    float c = eta * ci - sqrt(k);
+    float denom = max(eta - c * N.z, 0.25);
+    return (c * N.xy / denom) * thickness;
+}
+
+
+half4 main(float2 p) {
+    int hit = -1;
+    float hdy = 0.0;
+    float hv = 1.0;
+    float4 hr = float4(0.0);
+    float hrr = 0.0;
+    for (int i = 0; i < 40; i++) {
+        if (float(i) >= n) break;
+        float tt = T - Rd[i];
+        float dy = 0.0;
+        if (tt < 0.34) {
+            float u = max(tt, 0.0) / 0.34;
+            dy = -RD[i] * (1.0 - u * u);
+        } else if (tt < 0.6) {
+            dy = -14.0 * dpx * sin(3.14159 * (tt - 0.34) / 0.26);
+        }
+        float ee = tt >= 0.0 ? 1.0 : 0.0;
+        float4 r = R[i];
+        float2 hs = r.zw * 0.5;
+        float rad = min(Rr[i], min(hs.x, hs.y));
+        float2 q = abs(p - float2(r.x + hs.x, r.y + hs.y + dy)) - hs + rad;
+        float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - rad;
+        if (d < 0.5 && ee > 0.0) { hit = i; hdy = dy; hv = ee; hr = r; hrr = Rr[i]; }
+    }
+    float3 outc = bgAt(p);
+    if (hit < 0) return half4(half3(outc), 1.0);
+
+    float4 r = hr;
+    float2 hs = r.zw * 0.5;
+    float2 c = float2(r.x + hs.x, r.y + hs.y + hdy);
+    float rad = min(hrr, min(hs.x, hs.y));
+    float2 q = abs(p - c) - hs + rad;
+    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - rad;
+    float2 sg = float2(p.x < c.x ? -1.0 : 1.0, p.y < c.y ? -1.0 : 1.0);
+    float2 g = (q.x > 0.0 && q.y > 0.0) ? normalize(q) * sg : (q.x > q.y ? float2(sg.x, 0.0) : float2(0.0, sg.y));
+    float dep = max(-d, 0.0);
+    float bw = max(dpx * 10.0, min(dpx * 34.0, rad * 1.25));
+    float t = clamp(dep / bw, 0.0, 1.0);
+    float m = bw * 1.65 * pow(1.0 - t, 1.65);
+    float bevel = (bw / max(rad, dpx)) * 0.72 * pow(1.0 - t, 0.72);
+    float3 N = normalize(float3(-g * bevel, 1.0));
+    float thick = bw * 0.92 * pow(1.0 - t, 1.45);
+    float2 offR = refrDisp(N, 1.405, thick);
+    float2 offG = refrDisp(N, 1.420, thick);
+    float2 offB = refrDisp(N, 1.438, thick);
+    float cover = smoothstep(0.0, 1.0, t);
+    float blurRadius = dpx * (1.05 + 1.9 * cover);
+    float3 col = float3(glassBlur(p + offR, blurRadius).r,
+                        glassBlur(p + offG, blurRadius).g,
+                        glassBlur(p + offB, blurRadius).b);
+    // В центре сохраняем детали реального фона; рассеивание растёт к матовой кромке.
+    float luma = dot(col, float3(0.299, 0.587, 0.114));
+    col = mix(float3(luma), col, 1.05);
+    col = col * 0.97 + float3(0.018, 0.020, 0.030) * (0.25 + 0.35 * cover);
+    // матовое покрытие и лёгкая фиолетовая тонировка, чтобы стекло читалось на любом фоне
+    col = mix(col, float3(0.10, 0.11, 0.13), 0.08 + 0.06 * cover);
+    col += float3(0.035, 0.040, 0.052) * (0.25 + 0.45 * cover);
+
+    float2 L = normalize(float2(-0.55, -0.85));
+    float sp = pow(max(dot(g, L), 0.0), 2.0) + 0.55 * pow(max(dot(g, -L), 0.0), 2.0) + 0.12;
+    float fresnel = pow(1.0 - clamp(N.z, 0.0, 1.0), 5.0);
+    col = mix(col, float3(0.88, 0.92, 1.0), clamp(fresnel * 1.8, 0.0, 0.28));
+    col += exp(-dep / (dpx * 1.55)) * sp * 0.72;                                  // кромка как в Glass Bar
+    col += float3(0.95, 0.90, 1.0) * exp(-dep / (dpx * 13.0)) * 0.075;
+    float gl = clamp(1.0 - (p.y - (c.y - hs.y)) / max(hs.y * 1.1, 1.0), 0.0, 1.0);
+    col += gl * gl * 0.045;                                                       // статичный глянец сверху
+    float a = clamp(0.5 - d, 0.0, 1.0) * hv;
+    return half4(half3(mix(outc, clamp(col, 0.0, 1.0), a)), 1.0);
+}
+"""
+
+PRESETS = [  # (название, [(частота Гц, дБ), ...]) — интерполяция по логарифму частоты
+    ("Плоская", [(60, 0), (14000, 0)]),
+    ("Бас+", [(60, 6), (150, 4), (400, 1), (1000, 0), (14000, 0)]),
+    ("Голос", [(60, -3), (250, -1), (1000, 2), (3000, 4), (8000, 1), (14000, -1)]),
+    ("Высокие+", [(60, -1), (1000, 0), (4000, 3), (10000, 6)]),
+    ("Рок", [(60, 4), (250, 2), (1000, -2), (3000, 2), (8000, 4)]),
+    ("Поп", [(60, -1), (250, 2), (1000, 3), (4000, 1), (10000, -1)]),
+    ("Электроника", [(60, 5), (250, 1), (1000, -1), (4000, 2), (10000, 4)]),
+    ("Классика", [(60, 3), (250, 2), (1000, -1), (4000, 1), (10000, 3)]),
+]
+
+
+def curve_db(points, hz):
+    # значение кривой в дБ на частоте hz
+    x = math.log10(max(hz, 1))
+    pts = [(math.log10(f), d) for f, d in points]
+    if x <= pts[0][0]:
+        return pts[0][1]
+    if x >= pts[-1][0]:
+        return pts[-1][1]
+    for (xa, da), (xb, db) in zip(pts, pts[1:]):
+        if xa <= x <= xb:
+            t = (x - xa) / (xb - xa)
+            return da + (db - da) * t
+    return 0.0
+
+
+class DolphyEq(BasePlugin):
+
+    def on_plugin_load(self):
+        self.chains = {}   # сессия -> {"dp"|"eq": ..., "bass": ..., "virt": ..., "loud": ...}
+        self.info = {}     # сессия -> (движок, число полос)
+        self.meta = None   # системный эквалайзер: {"n", "hz", "lo", "hi"} (lo/hi в мБ)
+        self.errs = {}
+        self.dp_ok = True
+        self.alive = True
+        self.lock = threading.RLock()
+        self.handler = None
+        self.Run = None
+        self.audio_thread = None
+        self.audio_handler = None
+        self.AudioRun = None
+        self.apply_queue_lock = threading.Lock()
+        self.apply_queued = False
+        self.apply_dirty = False
+        self.last_apply_signature = None
+        self.last_apply_sessions = None
+        self.ui = None
+        self.capture_active = False
+        self.capture_busy = False
+        self.shd_on = False
+        self.shx = False
+        self.busy = False
+        self.rects = []
+        self.bgbmp = None
+        self.bg_buffers = []
+        self.capture_index = 0
+        self.capture_busy = False
+        self.capture_active = False
+        self.capture_last_log = 0.0
+        self.capture_frames = 0
+        self.capture_fps = 0.0
+        self.render_last_log = 0.0
+        self.render_frames = 0
+        self.render_fps = 0.0
+        self.rect_log_sig = None
+        self.poll = None
+        self.srv = None
+        self.port = 0
+        self.token = "%032x" % random.getrandbits(128)
+        self.api.registerSettings("Эквалайзер", json.dumps([
+            {"type": "header", "title": "Эквалайзер"},
+            {"type": "nav", "title": "Эквалайзер", "subtitle": "Вертикальные полосы, пресеты, бас, громкость",
+             "icon": "graphic_eq", "screen": "dolphy_eq"},
+        ]), 40)
+        self._log("INFO", "Эквалайзер " + str(globals().get("__version__", "?")) + " загружен")
+        self._log("INFO", "Liquid Glass diagnostics enabled")
+        self._start_audio_worker()
+        self._start_server()
+        self._start_poll()
+        self._apply()
+
+    def on_plugin_disable(self):
+        self._shutdown()
+
+    def on_plugin_unload(self):
+        self._shutdown()
+
+    def on_setting_changed(self, payload=None):
+        self._log("INFO", "изменены настройки эквалайзера")
+        self._apply()
+
+    def _log(self, level, message):
+        """Queue EQ diagnostics for the GLASS BAR log window via app-private SharedPreferences."""
+        try:
+            ctx = self.api.getContext()
+            prefs = ctx.getSharedPreferences("dolphy_cross_plugin_state", 0)
+            raw = str(prefs.getString("dolphy_eq_log_queue", "[]"))
+            try:
+                queue = json.loads(raw)
+                if not isinstance(queue, list):
+                    queue = []
+            except Exception:
+                queue = []
+            item = {"ts": time.time(), "level": str(level).upper()[:8], "msg": str(message)[:700]}
+            queue.append(item)
+            queue = queue[-80:]
+            prefs.edit().putString("dolphy_eq_log_queue", json.dumps(queue, ensure_ascii=False)).apply()
+        except Exception:
+            # Logging must never interrupt audio processing or UI lifecycle.
+            pass
+
+    # ------------------------------------------------------------------ служебное
+    def _glassbar_state(self):
+        """Returns (present, optimized). No bridge means a deliberately non-glass UI."""
+        try:
+            ctx = self.api.getContext()
+            prefs = ctx.getSharedPreferences(GLASSBAR_PREFS, 0)
+            valid = int(prefs.getInt("glass_bar_bridge_version", 0)) >= 1
+            present = bool(valid and prefs.getBoolean("glass_bar_active", False))
+            optimized = bool(present and prefs.getBoolean("glass_bar_opt", False))
+            return present, optimized
+        except Exception:
+            return False, False
+
+    def _glassbar_opt_enabled(self):
+        return self._glassbar_state()[1]
+
+    def _start_audio_worker(self):
+        try:
+            from java import jclass, dynamic_proxy
+            HT = jclass("android.os.HandlerThread")
+            self.audio_thread = HT("DolphyEq-Audio")
+            self.audio_thread.start()
+            self.audio_handler = jclass("android.os.Handler")(self.audio_thread.getLooper())
+            class AudioRun(dynamic_proxy(jclass("java.lang.Runnable"))):
+                def __init__(self, fn):
+                    super().__init__()
+                    self.fn = fn
+                def run(self):
+                    self.fn()
+            self.AudioRun = AudioRun
+        except Exception as e:
+            self.errs["audio_worker"] = type(e).__name__ + ": " + str(e)[:80]
+            self._log("ERROR", "audio worker: " + self.errs["audio_worker"])
+
+    def _schedule_apply(self):
+        if not self.alive:
+            return
+        with self.apply_queue_lock:
+            self.apply_dirty = True
+            if self.apply_queued:
+                return
+            self.apply_queued = True
+        def drain():
+            while self.alive:
+                with self.apply_queue_lock:
+                    if not self.apply_dirty:
+                        self.apply_queued = False
+                        return
+                    self.apply_dirty = False
+                try:
+                    self._apply_now()
+                except Exception as e:
+                    self.errs["apply_worker"] = type(e).__name__ + ": " + str(e)[:80]
+            with self.apply_queue_lock:
+                self.apply_queued = False
+        try:
+            if self.audio_handler is not None and self.AudioRun is not None:
+                self.audio_handler.post(self.AudioRun(drain))
+            else:
+                threading.Thread(target=drain, name="DolphyEq-AudioFallback", daemon=True).start()
+        except Exception:
+            threading.Thread(target=drain, name="DolphyEq-AudioFallback", daemon=True).start()
+
+    def _f(self, key, default=0.0):
+        try:
+            return float(self.get_setting(key, default))
+        except Exception:
+            return float(default)
+
+    def _on(self):
+        return bool(self.get_setting("eq_on", False))
+
+    def _nb(self):
+        return int(self._f("eq_bands", 10))
+
+    def _sdk(self):
+        try:
+            from java import jclass
+            return int(jclass("android.os.Build$VERSION").SDK_INT)
+        except Exception:
+            return 99
+
+    def _want_dp(self):
+        return self._nb() > 0 and self.dp_ok and self._sdk() >= 28
+
+    def _start_poll(self):
+        try:
+            from java import jclass, dynamic_proxy
+            Looper = jclass("android.os.Looper")
+            self.handler = jclass("android.os.Handler")(Looper.getMainLooper())
+
+            class Run(dynamic_proxy(jclass("java.lang.Runnable"))):
+                def __init__(self, fn):
+                    super().__init__()
+                    self.fn = fn
+
+                def run(self):
+                    self.fn()
+
+            self.Run = Run
+            self.poll = Run(self._tick)
+            self.handler.postDelayed(self.poll, POLL_MS)
+        except Exception as e:
+            self.errs["poll"] = type(e).__name__ + ": " + str(e)[:80]
+
+    def _tick(self):
+        if not self.alive:
+            return
+        try:
+            if self._on():
+                self._apply()
+        except Exception:
+            pass
+        try:
+            self.handler.postDelayed(self.poll, POLL_MS)
+        except Exception:
+            pass
+
+    def _shutdown(self):
+        self._log("INFO", "выгрузка эквалайзера")
+        self.alive = False
+        try:
+            self._close_ui()
+        except Exception:
+            pass
+        try:
+            if self.handler is not None and self.poll is not None:
+                self.handler.removeCallbacks(self.poll)
+        except Exception:
+            pass
+        try:
+            if self.srv is not None:
+                self.srv.shutdown()
+                self.srv.server_close()
+        except Exception:
+            pass
+        self.srv = None
+        with self.lock:
+            self._release_all()
+        try:
+            if self.audio_thread is not None:
+                self.audio_thread.quitSafely()
+        except Exception:
+            pass
+
+    def _release_chain(self, c):
+        for e in c.values():
+            try:
+                e.setEnabled(False)
+            except Exception:
+                pass
+            try:
+                e.release()
+            except Exception:
+                pass
+
+    def _release_all(self):
+        for c in list(self.chains.values()):
+            self._release_chain(c)
+        self.chains = {}
+        self.info = {}
+
+    # ------------------------------------------------------------------ раскладка полос и уровни
+    @staticmethod
+    def _hz_layout(n):
+        if n == 31:
+            return list(ISO31)
+        return [int(round(31.5 * (16000.0 / 31.5) ** (i / float(n - 1)))) for i in range(n)]
+
+    def _layout(self):
+        # UI/profile layout is independent from the active hardware engine.
+        # If DynamicsProcessing is unavailable, keep the requested 5/10/15/31
+        # profile visible and map it onto the device Equalizer in _push().
+        n = self._nb()
+        if n > 0:
+            return self._hz_layout(n), -15.0, 15.0
+        if self.meta:
+            return list(self.meta["hz"]), self.meta["lo"] / 100.0, self.meta["hi"] / 100.0
+        return [60, 230, 910, 3600, 14000], -15.0, 15.0
+
+    def _levels(self):
+        hz, lo, hi = self._layout()
+        try:
+            st = json.loads(str(self.get_setting("eq_levels", "[]")))
+            shz = json.loads(str(self.get_setting("eq_lhz", "[]")))
+        except Exception:
+            st, shz = [], []
+        if len(st) == len(hz) and shz == hz:
+            return [max(lo, min(hi, float(v))) for v in st]
+        if len(st) > 1 and len(shz) == len(st):
+            pts = list(zip(shz, [float(v) for v in st]))
+            lv = [max(lo, min(hi, curve_db(pts, f))) for f in hz]
+        else:
+            lv = [0.0] * len(hz)
+        self._save_levels(hz, lv)
+        return lv
+
+    def _save_levels(self, hz, lv):
+        self.set_setting("eq_levels", json.dumps([round(float(v), 2) for v in lv]))
+        self.set_setting("eq_lhz", json.dumps(hz))
+
+    def _set_level(self, i, db):
+        hz, lo, hi = self._layout()
+        lv = self._levels()
+        if 0 <= i < len(lv):
+            lv[i] = max(lo, min(hi, round(db * 2) / 2.0))
+            self._save_levels(hz, lv)
+            self._apply()
+
+    def _set_levels_batch(self, d):
+        # "i:db,i:db" — несколько полос за один запрос (несколько пальцев сразу)
+        hz, lo, hi = self._layout()
+        lv = self._levels()
+        for part in d.split(","):
+            try:
+                a, b = part.split(":")
+                i = int(a)
+                if 0 <= i < len(lv):
+                    lv[i] = max(lo, min(hi, round(float(b) * 2) / 2.0))
+            except Exception:
+                pass
+        self._save_levels(hz, lv)
+        self._apply()
+
+    def _set_fx(self, key, val):
+        lim = {"eq_bass": 1000.0, "eq_virt": 1000.0, "eq_loud": 1500.0}
+        if key in lim:
+            self.set_setting(key, max(0.0, min(lim[key], val)))
+            self._apply()
+
+    def _set_plain(self, key, val):
+        if key in ("eq_on", "eq_global", "eq_auto"):
+            self.set_setting(key, bool(val))
+            self._apply()
+
+    def _post_main(self, fn):
+        try:
+            self.handler.post(self.Run(fn))
+        except Exception as e:
+            self.errs["post"] = type(e).__name__ + ": " + str(e)[:70]
+
+    # ------------------------------------------------------------------ полноэкранное стеклянное окно
+    def _show_ui(self):
+        from java import jclass
+        self._close_ui()
+        act = self.api.getActivity()
+        if act is None or not self.port:
+            return
+        Dialog = jclass("android.app.Dialog")
+        WebView = jclass("android.webkit.WebView")
+        ColorDrawable = jclass("android.graphics.drawable.ColorDrawable")
+        FLP = jclass("android.widget.FrameLayout$LayoutParams")
+        theme = jclass("android.R$style").Theme_Translucent_NoTitleBar
+        d = Dialog(act, theme)
+        d.requestWindowFeature(1)
+        wv = WebView(act)
+        wv.getSettings().setJavaScriptEnabled(True)
+        wv.setBackgroundColor(0)
+        wv.setVerticalScrollBarEnabled(False)
+        wv.setOverScrollMode(2)
+        gb_present, gb_opt = self._glassbar_state()
+        # This plugin owns its Liquid Glass renderer; it must not disappear
+        # merely because the optional GLASS BAR bridge is absent.
+        wv.loadUrl("http://127.0.0.1:%d/?k=%s&gb=1&opt=%d" %
+                   (self.port, self.token, 1 if gb_opt else 0))
+        FL = jclass("android.widget.FrameLayout")
+        IV = jclass("android.widget.ImageView")
+        root = FL(act)
+        iv = IV(act)
+        iv.setScaleType(IV.ScaleType.FIT_XY)
+        iv.setBackgroundColor(-16777216)  # непрозрачный слой, чтобы RenderEffect шейдера выполнялся
+        dm = jclass("android.util.DisplayMetrics")()
+        act.getWindowManager().getDefaultDisplay().getRealMetrics(dm)
+        iv.setPivotX(0.0)
+        iv.setPivotY(0.0)
+        iv.setScaleX(2.0)
+        iv.setScaleY(2.0)
+        root.addView(iv, FLP(max(8, int(dm.widthPixels) // 2), max(8, int(dm.heightPixels) // 2)))
+        root.addView(wv, FLP(-1, -1))
+        d.setContentView(root, FLP(-1, -1))
+        win = d.getWindow()
+        # RuntimeShader requires Android 13 (API 33). Older devices keep the
+        # CSS backdrop-filter fallback instead of attempting unsupported APIs.
+        shader_ok = self._sdk() >= 33
+        win.setBackgroundDrawable(ColorDrawable(-15594472))
+        win.setLayout(-1, -1)
+        win.addFlags(256 | 512)
+        d.show()
+        self.ui = {"d": d, "wv": wv, "iv": iv, "sh": None, "act": act, "dens": float(act.getResources().getDisplayMetrics().density)}
+        self.shx = False
+        self._RE = jclass("android.graphics.RenderEffect")
+        if shader_ok:
+            try:
+                sh = jclass("android.graphics.RuntimeShader")(AGSL_GLASS)
+                self.ui["sh"] = sh
+                self.shx = True
+                self._log("INFO", "shader_active=1 AGSL compiled SDK=" + str(self._sdk()))
+                # Capture the real host Activity behind the transparent dialog.
+                # PixelCopy runs at reduced resolution and updates a double buffer.
+                self._capture_bg(act, iv, sh)
+                if self.rects:
+                    self._apply_rects()
+            except Exception as e:
+                self.shx = False
+                self.ui["sh"] = None
+                self.errs["shader"] = type(e).__name__ + ": " + str(e)[:120]
+                self._log("ERROR", "shader_active=0 compile: " + self.errs["shader"])
+        else:
+            self._log("INFO", "shader_active=0: Android API below 33; CSS glass fallback enabled")
+
+    def _set_rects(self, txt, dpr):
+        out = []
+        for part in txt.split(";"):
+            v = part.split(",")
+            if len(v) in (5, 6, 7):
+                try:
+                    out.append([float(x) for x in v])
+                except Exception:
+                    pass
+        self.rects = [r + [0.0] * (7 - len(r)) for r in out[:40]]
+        sig = str(len(self.rects)) + "|" + str(round(float(dpr), 2))
+        if sig != self.rect_log_sig:
+            self.rect_log_sig = sig
+            self._log("INFO", "rect_count=" + str(len(self.rects)) + " dpr=" + str(dpr))
+        self._post_main(self._apply_rects)
+
+    def _apply_rects(self):
+        u = self.ui
+        if not u or u.get("sh") is None or not self.rects:
+            return
+        from java import jclass, jarray, jfloat
+        iv = u["iv"]
+        w, h = int(iv.getWidth()), int(iv.getHeight())
+        if w < 8 or h < 8:
+            return
+        sh = u["sh"]
+        flat = []
+        rr = []
+        rd = []
+        rD = []
+        for r in self.rects:
+            flat += [v * 0.5 for v in r[:4]]
+            rr.append(r[4] * 0.5)
+            rd.append(r[5])
+            rD.append(r[6] * 0.5)
+        while len(rr) < 40:
+            flat += [0.0, 0.0, 0.0, 0.0]
+            rr.append(0.0)
+            rd.append(0.0)
+            rD.append(0.0)
+        sh.setFloatUniform("res", float(w), float(h))
+        sh.setFloatUniform("dpx", float(u["dens"]) * 0.5)
+        sh.setFloatUniform("n", float(len(self.rects)))
+        sh.setFloatUniform("R", jarray(jfloat)(flat))
+        sh.setFloatUniform("Rr", jarray(jfloat)(rr))
+        sh.setFloatUniform("Rd", jarray(jfloat)(rd))
+        sh.setFloatUniform("RD", jarray(jfloat)(rD))
+        self._tick(True)
+        self.shd_on = True
+        try:
+            u["wv"].evaluateJavascript("document.documentElement.classList.add('shd')", None)
+        except Exception:
+            pass
+        if not u.get("shader_logged"):
+            u["shader_logged"] = True
+            self._log("INFO", "shader_active=1 render effect attached; rect_count=" + str(len(self.rects)))
+        if not u.get("t0"):
+            u["t0"] = time.time()
+            try:
+                u["wv"].evaluateJavascript("go()", None)
+            except Exception:
+                pass
+            self._start_anim()
+
+    def _tick(self, force=False):
+        u = self.ui
+        if not u or u.get("sh") is None:
+            return
+        t0 = u.get("t0")
+        t = (time.time() - t0) if t0 else -1.0
+        u["fr"] = u.get("fr", 0) + 1
+        if not force and t > 1.4 and u["fr"] % 2:
+            return
+        self.render_frames += 1
+        now = time.time()
+        if now - self.render_last_log >= 5.0:
+            self.render_fps = self.render_frames / max(0.001, now - (self.render_last_log or now - 5.0))
+            self._log("INFO", "render_fps=" + str(round(self.render_fps, 1)) + " shader_active=1")
+            self.render_frames = 0
+            self.render_last_log = now
+        u["sh"].setFloatUniform("T", float(t))
+        u["iv"].setRenderEffect(self._RE.createRuntimeShaderEffect(u["sh"], "content"))
+
+    def _start_anim(self):
+        from java import jclass, dynamic_proxy
+        u = self.ui
+        VA = jclass("android.animation.ValueAnimator")
+        UL = jclass("android.animation.ValueAnimator$AnimatorUpdateListener")
+        plug = self
+
+        class Upd(dynamic_proxy(UL)):
+            def onAnimationUpdate(self, anim):
+                try:
+                    plug._tick()
+                except Exception as e:
+                    plug.errs["tick"] = type(e).__name__ + ": " + str(e)[:60]
+
+        va = VA.ofFloat(0.0, 1.0)
+        va.setDuration(3600000)
+        va.setRepeatCount(-1)
+        va.setInterpolator(jclass("android.view.animation.LinearInterpolator")())
+        self._upd = Upd()
+        va.addUpdateListener(self._upd)
+        va.start()
+        u["va"] = va
+
+    def _capture_bg(self, act, iv, sh):
+        """Start a double-buffered, continuous PixelCopy feed (no stale one-shot snapshot)."""
+        try:
+            from java import jclass
+            Bitmap = jclass("android.graphics.Bitmap")
+            Cfg = jclass("android.graphics.Bitmap$Config")
+            decor = act.getWindow().getDecorView()
+            W, H = int(decor.getWidth()), int(decor.getHeight())
+            if W < 16 or H < 16:
+                raise RuntimeError("Activity decor has invalid size %sx%s" % (W, H))
+            bw, bh = max(16, W // 2), max(16, H // 2)
+            buffers = [Bitmap.createBitmap(bw, bh, Cfg.ARGB_8888),
+                       Bitmap.createBitmap(bw, bh, Cfg.ARGB_8888)]
+            self.bg_buffers = buffers
+            self.capture_index = 0
+            self.capture_busy = False
+            self.capture_active = True
+            u = self.ui
+            if u is None:
+                return
+            u["sh"] = sh
+            u["capture_size"] = (W, H, bw, bh)
+            self._log("INFO", "pixelcopy_status=starting source=%dx%d buffer=%dx%d rate=24fps" % (W,H,bw,bh))
+            self._capture_once()
+        except Exception as e:
+            self.capture_active = False
+            self.errs["copy"] = type(e).__name__ + ": " + str(e)[:120]
+            self._log("ERROR", "pixelcopy_status=failed " + self.errs["copy"])
+
+    def _capture_once(self):
+        if not self.capture_active or self.capture_busy or not self.ui:
+            return
+        try:
+            from java import jclass, dynamic_proxy
+            u = self.ui
+            act, iv = u.get("act"), u.get("iv")
+            if act is None or iv is None or bool(act.isFinishing()):
+                self.capture_active = False
+                return
+            decor = act.getWindow().getDecorView()
+            W, H = int(decor.getWidth()), int(decor.getHeight())
+            if W < 16 or H < 16:
+                self._schedule_capture(250)
+                return
+            idx = 1 - int(self.capture_index)
+            bmp = self.bg_buffers[idx]
+            PCL = jclass("android.view.PixelCopy$OnPixelCopyFinishedListener")
+            plug = self
+            class Pcl(dynamic_proxy(PCL)):
+                def __init__(self):
+                    super().__init__()
+                def onPixelCopyFinished(self, result):
+                    plug._on_capture_done(int(result), idx, bmp, iv)
+            self._capture_listener = Pcl()
+            self.capture_busy = True
+            jclass("android.view.PixelCopy").request(act.getWindow(),
+                jclass("android.graphics.Rect")(0, 0, W, H), bmp, self._capture_listener, self.handler)
+        except Exception as e:
+            self.capture_busy = False
+            self.errs["copy"] = type(e).__name__ + ": " + str(e)[:120]
+            self._log("ERROR", "pixelcopy_status=request_error " + self.errs["copy"])
+            self._schedule_capture(500)
+
+    def _on_capture_done(self, result, idx, bmp, iv):
+        self.capture_busy = False
+        u = self.ui
+        if not self.capture_active or not u or u.get("iv") is not iv:
+            return
+        if result == 0:
+            try:
+                iv.setImageBitmap(bmp)
+                iv.invalidate()
+                self.capture_index = idx
+                self.bgbmp = bmp
+                self.capture_frames += 1
+                now = time.time()
+                if now - self.capture_last_log >= 5.0:
+                    self.capture_fps = self.capture_frames / max(0.001, now - (self.capture_last_log or now - 5.0))
+                    self._log("INFO", "pixelcopy_status=ok capture_fps=" + str(round(self.capture_fps, 1)))
+                    self.capture_frames = 0
+                    self.capture_last_log = now
+            except Exception as e:
+                self.errs["copy"] = type(e).__name__ + ": " + str(e)[:100]
+                self._log("ERROR", "pixelcopy_status=bitmap_swap_error " + self.errs["copy"])
+        else:
+            self.errs["copy"] = "PixelCopy result=" + str(result)
+            self._log("WARN", "pixelcopy_status=error result=" + str(result))
+        self._schedule_capture(42 if result == 0 else 180)
+
+    def _schedule_capture(self, delay_ms):
+        try:
+            if self.capture_active and self.handler is not None and self.Run is not None:
+                self.handler.postDelayed(self.Run(self._capture_once), int(delay_ms))
+        except Exception as e:
+            self._log("WARN", "pixelcopy_status=schedule_error " + str(e)[:100])
+
+    def _close_ui(self):
+        # Dialog / WebView lifecycle must be handled on Android's main thread.
+        # During Activity teardown the DecorView may already be detached; calling
+        # Dialog.dismiss() then can enqueue a removeViewImmediate() that crashes later.
+        try:
+            from java import jclass
+            Looper = jclass("android.os.Looper")
+            if Looper.myLooper() != Looper.getMainLooper():
+                self._post_main(self._close_ui)
+                return
+        except Exception:
+            pass
+
+        u = self.ui
+        self.ui = None
+        self.capture_active = False
+        self.capture_busy = False
+        self.shd_on = False
+        self.shx = False
+        if not u:
+            return
+        try:
+            va = u.get("va")
+            if va is not None:
+                va.cancel()
+        except Exception:
+            pass
+        try:
+            d = u.get("d")
+            act = u.get("act")
+            if d is not None and d.isShowing():
+                decor = d.getWindow().getDecorView() if d.getWindow() is not None else None
+                attached = bool(decor is not None and decor.isAttachedToWindow())
+                finishing = bool(act is not None and act.isFinishing())
+                destroyed = False
+                try:
+                    destroyed = bool(act is not None and act.isDestroyed())
+                except Exception:
+                    pass
+                # Only dismiss a live, attached dialog. A detached dialog is already
+                # being removed by the Activity's own window teardown.
+                if attached and not finishing and not destroyed:
+                    d.dismiss()
+        except Exception as e:
+            self.errs["dismiss"] = type(e).__name__ + ": " + str(e)[:70]
+            self._log("ERROR", "закрытие окна: " + self.errs["dismiss"])
+        try:
+            self.bg_buffers = []
+            self.bgbmp = None
+        except Exception:
+            pass
+        try:
+            wv = u.get("wv")
+            if wv is not None:
+                wv.stopLoading()
+                wv.setWebViewClient(None)
+                wv.destroy()
+        except Exception:
+            pass
+
+    def _open_ui_cb(self):
+        self._post_main(self._show_ui)
+
+    def _preset(self, idx):
+        if not (0 <= idx < len(PRESETS)):
+            return
+        hz, lo, hi = self._layout()
+        pts = PRESETS[idx][1]
+        self._save_levels(hz, [max(lo, min(hi, curve_db(pts, f))) for f in hz])
+        self._apply()
+
+    def _set_bands(self, n):
+        self.set_setting("eq_bands", float(n))
+        self.dp_ok = True
+        self._apply()
+
+    def _state(self):
+        hz, lo, hi = self._layout()
+        return {"hz": hz, "lv": self._levels(), "lo": lo, "hi": hi, "nb": self._nb(),
+                "presets": [p[0] for p in PRESETS], "on": self._on(), "st": self._status(),
+                "bass": int(self._f("eq_bass", 0)), "virt": int(self._f("eq_virt", 0)), "loud": int(self._f("eq_loud", 0)),
+                "shd": bool(self.shd_on), "shx": bool(self.shx),
+                "gb": bool(self._glassbar_state()[0]), "opt": bool(self._glassbar_opt_enabled()),
+                "glob": bool(self.get_setting("eq_global", True)), "auto": bool(self.get_setting("eq_auto", True))}
+
+    # ------------------------------------------------------------------ локальный сервер для страницы
+    def _start_server(self):
+        try:
+            from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+            from urllib.parse import urlparse, parse_qs
+            plug = self
+
+            class H(BaseHTTPRequestHandler):
+                def log_message(self, *a):
+                    pass
+
+                def _send(self, body, ctype="application/json", code=200):
+                    b = body.encode("utf-8")
+                    self.send_response(code)
+                    self.send_header("Content-Type", ctype + "; charset=utf-8")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Length", str(len(b)))
+                    self.end_headers()
+                    self.wfile.write(b)
+
+                def do_GET(self):
+                    try:
+                        u = urlparse(self.path)
+                        q = parse_qs(u.query)
+                        if q.get("k", [""])[0] != plug.token:
+                            return self._send("forbidden", "text/plain", 403)
+                        if u.path == "/":
+                            return self._send(PAGE, "text/html")
+                        if u.path == "/state":
+                            return self._send(json.dumps(plug._state()))
+                        if u.path == "/set":
+                            plug._set_level(int(q["i"][0]), float(q["v"][0]))
+                        elif u.path == "/preset":
+                            plug._preset(int(q["i"][0]))
+                        elif u.path == "/n":
+                            plug._set_bands(int(q["v"][0]))
+                        elif u.path == "/sets":
+                            plug._set_levels_batch(q["d"][0])
+                        elif u.path == "/fx":
+                            plug._set_fx(q["key"][0], float(q["v"][0]))
+                        elif u.path == "/on":
+                            plug._set_plain("eq_on", q["v"][0] == "1")
+                        elif u.path == "/flag":
+                            plug._set_plain(q["key"][0], q["v"][0] == "1")
+                        elif u.path == "/reset":
+                            plug._reset_cb()
+                        elif u.path == "/rects":
+                            plug._set_rects(q["d"][0], float(q.get("dpr", ["1"])[0]))
+                        elif u.path == "/busy":
+                            plug.busy = q["v"][0] == "1"
+                        elif u.path == "/close":
+                            plug._post_main(plug._close_ui)
+                        self._send("ok", "text/plain")
+                    except Exception:
+                        try:
+                            self._send("err", "text/plain", 500)
+                        except Exception:
+                            pass
+
+            self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+            self.port = int(self.srv.server_address[1])
+            threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        except Exception as e:
+            self.errs["server"] = type(e).__name__ + ": " + str(e)[:80]
+
+    # ------------------------------------------------------------------ сессии и эффекты
+    def _sessions(self):
+        s = []
+        if bool(self.get_setting("eq_global", True)):
+            s.append(0)
+        if bool(self.get_setting("eq_auto", True)):
+            try:
+                am = self.api.getContext().getSystemService("audio")
+                for cfg in am.getActivePlaybackConfigurations():
+                    sid = None
+                    for name in ("getAudioSessionId", "getSessionId"):
+                        fn = getattr(cfg, name, None)
+                        if fn is not None:
+                            try:
+                                sid = int(fn())
+                                break
+                            except Exception:
+                                pass
+                    if sid and sid > 0 and sid not in s:
+                        s.append(sid)
+            except Exception:
+                pass
+        return s
+
+    def _chain(self, sess):
+        want_dp = self._want_dp()
+        n = self._nb() if want_dp else 0
+        c = self.chains.get(sess)
+        if c is not None and self.info.get(sess) == ("dp" if want_dp else "eq", n):
+            return c
+        if c is not None:
+            self._release_chain(self.chains.pop(sess))
+            self.info.pop(sess, None)
+        from java import jclass
+        c = {}
+        engine = "eq"
+        if want_dp:
+            try:
+                Builder = jclass(FX + "DynamicsProcessing$Config$Builder")
+                cfg = Builder(1, 2, True, n, False, 0, False, 0, False).build()
+                c["dp"] = jclass(FX + "DynamicsProcessing")(0, sess, cfg)
+                engine = "dp"
+                self.errs.pop((sess, "dp"), None)
+            except Exception as e:
+                self.dp_ok = False  # откат на системный эквалайзер
+                self.errs[(sess, "dp")] = type(e).__name__ + ": " + str(e)[:70]
+        for key, cls in (("eq", "Equalizer"), ("bass", "BassBoost"),
+                         ("virt", "Virtualizer"), ("loud", "LoudnessEnhancer")):
+            if key == "eq" and engine == "dp":
+                continue
+            try:
+                C = jclass(FX + cls)
+                c[key] = C(sess) if key == "loud" else C(0, sess)
+                self.errs.pop((sess, key), None)
+            except Exception as e:
+                self.errs[(sess, key)] = type(e).__name__ + ": " + str(e)[:70]
+        if c:
+            self.chains[sess] = c
+            self.info[sess] = (engine, n if engine == "dp" else 0)
+        return c
+
+    def _read_meta(self, eq):
+        try:
+            n = int(eq.getNumberOfBands())
+            rng = eq.getBandLevelRange()
+            self.meta = {"n": n, "lo": int(rng[0]), "hi": int(rng[1]),
+                         "hz": [int(eq.getCenterFreq(i)) // 1000 for i in range(n)]}
+        except Exception as e:
+            self.errs["meta"] = type(e).__name__ + ": " + str(e)[:70]
+
+    def _push(self, c, sess=None):
+        self._pushing_session = sess
+        from java import jclass
+        dp = c.get("dp")
+        if dp is not None:
+            try:
+                hz, lo, hi = self._layout()
+                lv = self._levels()
+                n = len(hz)
+                # DynamicsProcessing accepts EQ cutoffs only within its valid
+                # audio-frequency range. 21000 Hz caused AudioEffect's
+                # "invalid parameter operation" on some Android DSP HALs.
+                cut = [math.sqrt(hz[i] * hz[i + 1]) for i in range(n - 1)] + [min(20000.0, max(20.0, hz[-1] * 1.25))]
+                Eq = jclass(FX + "DynamicsProcessing$Eq")
+                Band = jclass(FX + "DynamicsProcessing$EqBand")
+                eqo = Eq(True, True, n)
+                for i in range(n):
+                    eqo.setBand(i, Band(True, float(cut[i]), float(lv[i])))
+                dp.setPreEqAllChannelsTo(eqo)
+                dp.setEnabled(True)
+            except Exception as e:
+                self.errs["dp"] = type(e).__name__ + ": " + str(e)[:100]
+                self.dp_ok = False
+                self._log("ERROR", "DynamicsProcessing apply failed; using hardware Equalizer: " + self.errs["dp"])
+                # Drop the failed DP instance and create a real system EQ for
+                # this session. Do not change the user's selected band profile.
+                try:
+                    try:
+                        dp.release()
+                    except Exception:
+                        pass
+                    c.pop("dp", None)
+                    sess = getattr(self, "_pushing_session", None)
+                    if sess is not None:
+                        C = jclass(FX + "Equalizer")
+                        c["eq"] = C(0, int(sess))
+                        self.info[int(sess)] = ("eq", 0)
+                except Exception as fallback_error:
+                    self.errs["eq"] = type(fallback_error).__name__ + ": " + str(fallback_error)[:80]
+        eq = c.get("eq")
+        if eq is not None:
+            try:
+                if self.meta is None:
+                    self._read_meta(eq)
+                eq.setEnabled(True)
+                if self.meta:
+                    profile_hz, _, _ = self._layout()
+                    profile_lv = self._levels()
+                    points = list(zip(profile_hz, profile_lv))
+                    # Hardware Equalizer may expose only 5/10 bands. Sample
+                    # the selected 31-band curve at each physical band center.
+                    for i, center_hz in enumerate(self.meta["hz"][:self.meta["n"]]):
+                        db = curve_db(points, center_hz)
+                        mb = int(max(self.meta["lo"], min(self.meta["hi"], db * 100.0)))
+                        eq.setBandLevel(i, mb)
+            except Exception as e:
+                self.errs["eq"] = type(e).__name__ + ": " + str(e)[:70]
+        for key, setting in (("bass", "eq_bass"), ("virt", "eq_virt")):
+            fx = c.get(key)
+            if fx is None:
+                continue
+            try:
+                v = int(max(0, min(1000, self._f(setting, 0))))
+                if bool(fx.getStrengthSupported()):
+                    fx.setStrength(v)
+                    fx.setEnabled(v > 0)
+            except Exception as e:
+                self.errs[key] = type(e).__name__ + ": " + str(e)[:70]
+        ld = c.get("loud")
+        if ld is not None:
+            try:
+                g = int(max(0, min(1500, self._f("eq_loud", 0))))
+                ld.setTargetGain(g)
+                ld.setEnabled(g > 0)
+            except Exception as e:
+                self.errs["loud"] = type(e).__name__ + ": " + str(e)[:70]
+
+    def _apply(self):
+        # Public entry point: never construct or update Android audio effects on the UI thread.
+        self._schedule_apply()
+
+    def _apply_now(self):
+        with self.lock:
+            try:
+                if not self._on():
+                    if self.chains:
+                        self._release_all()
+                    self.last_apply_signature = None
+                    self.last_apply_sessions = []
+                    return
+                want = self._sessions()
+                signature = tuple(str(self.get_setting(k, d)) for k, d in (
+                    ("eq_on", False), ("eq_global", True), ("eq_auto", True),
+                    ("eq_bands", 10), ("eq_levels", "[]"), ("eq_lhz", "[]"),
+                    ("eq_bass", 0), ("eq_virt", 0), ("eq_loud", 0)))
+                if signature == self.last_apply_signature and want == self.last_apply_sessions:
+                    return
+                for sess in list(self.chains.keys()):
+                    if sess not in want:
+                        self._release_chain(self.chains.pop(sess))
+                        self.info.pop(sess, None)
+                for sess in want:
+                    c = self._chain(sess)
+                    if c:
+                        self._push(c, sess)
+                self.last_apply_signature = signature
+                self.last_apply_sessions = list(want)
+            except Exception as e:
+                self.errs["apply"] = type(e).__name__ + ": " + str(e)[:80]
+                self._log("ERROR", "применение аудиоэффектов: " + self.errs["apply"])
+
+    # ------------------------------------------------------------------ интерфейс
+    def _set(self, key, val):
+        self.set_setting(key, val)
+        self._apply()
+        self.refresh()
+
+    def _switch_cb(self, key):
+        def cb(v):
+            self._set(key, bool(v))
+        return cb
+
+    def _reset_cb(self):
+        hz, lo, hi = self._layout()
+        self._save_levels(hz, [0.0] * len(hz))
+        for k in ("eq_bass", "eq_virt", "eq_loud"):
+            self.set_setting(k, 0.0)
+        self._apply()
+        self.refresh()
+
+    def _status(self):
+        if not self._on():
+            return "Выключен"
+        if not self.chains:
+            err = ""
+            for k, v in self.errs.items():
+                if k == "server" or (isinstance(k, tuple) and k[1] in ("eq", "dp")):
+                    err = v
+                    break
+            return "Эффекты недоступны" + ((": " + err) if err else "")
+        parts = []
+        for sess, c in self.chains.items():
+            eng, n = self.info.get(sess, ("eq", 0))
+            if eng == "dp":
+                desc = "%d полос · DynamicsProcessing" % n
+            else:
+                physical = int(self.meta.get("n", 0)) if self.meta else 0
+                requested = self._nb()
+                desc = ("системный EQ · профиль %d → %d аппаратных полос" % (requested, physical)) if requested > 0 and physical > 0 else "системный EQ"
+            parts.append(("глобальная" if sess == 0 else "сессия " + str(sess)) + ": " + desc)
+        return "Работает · " + " · ".join(parts)
+
+    def screen_dolphy_eq(self, ui, api, state):
+        W = "#FFFFFF"
+        W2 = "#CCFFFFFF"
+
+        def sl(label, val, lo, hi, cb):
+            return ui.column([
+                ui.text(label, "titleSmall", W),
+                ui.slider(val, cb, lo, hi, "", max(0, int(hi - lo) - 1)),
+            ], 0, 2)
+
+        bass = int(self._f("eq_bass", 0))
+        virt = int(self._f("eq_virt", 0))
+        loud = int(self._f("eq_loud", 0))
+        items = [
+            ui.text("Эквалайзер", "titleLarge", W),
+            ui.text(self._status(), "bodySmall", W2),
+            ui.button("Открыть стеклянный эквалайзер на весь экран", self._open_ui_cb),
+            ui.text("На весь экран страница не прокручивается и можно вести несколько полос сразу разными пальцами. "
+                    "Двойное касание полосы — сброс в 0.", "bodySmall", W2),
+            ui.column([
+                ui.text("Включить эквалайзер", "titleSmall", W),
+                ui.switch(self._on(), self._switch_cb("eq_on"), "", ""),
+            ], 0, 2),
+        ]
+        items += [
+            ui.text("Эффекты", "titleMedium", W),
+            sl("Бас: %d %%" % (bass // 10), bass // 10, 0, 100, lambda v: self._set("eq_bass", float(v) * 10.0)),
+            sl("Виртуализатор: %d %%" % (virt // 10), virt // 10, 0, 100, lambda v: self._set("eq_virt", float(v) * 10.0)),
+            sl("Усиление громкости: +%.1f дБ" % (loud / 100.0), loud // 10, 0, 150, lambda v: self._set("eq_loud", float(v) * 10.0)),
+            ui.text("Сессии", "titleMedium", W),
+            ui.column([
+                ui.text("Глобальная сессия (все приложения)", "titleSmall", W),
+                ui.switch(bool(self.get_setting("eq_global", True)), self._switch_cb("eq_global"), "", ""),
+            ], 0, 2),
+            ui.column([
+                ui.text("Подхватывать сессии играющих плееров", "titleSmall", W),
+                ui.switch(bool(self.get_setting("eq_auto", True)), self._switch_cb("eq_auto"), "", ""),
+            ], 0, 2),
+            ui.button("Сбросить всё", self._reset_cb),
+            ui.spacer(40),
+        ]
+        return ui.scaffold(title="Эквалайзер", content=ui.lazy_column(items, 16, 12))
