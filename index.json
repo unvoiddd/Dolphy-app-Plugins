@@ -27,8 +27,8 @@
       },
       "file": "plugins/ascii_text_generator/ascii_text_generator.dolphyplugin",
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/ascii_text_generator/ascii_text_generator.dolphyplugin",
-      "post_url": "https://t.me/c/3966541757/46500",
-      "updated_at": "2026-11-16 19:39:05"
+      "post_url": "https://t.me/c/3966541757/47841",
+      "updated_at": "2026-11-22 12:05:11"
     },
     {
       "id": 8,
@@ -201,7 +201,7 @@
     {
       "id": 36,
       "name": "Glass Bar",
-      "version": "3.69.0",
+      "version": "3.70.3",
       "author": "@Da_koroche",
       "description": {
         "ru": "Glass Bar — нижняя панель навигации в стиле Liquid Glass с реалистичным преломлением, размытием, свечением и радужной дисперсией. Плавная анимация и гибкая настройка эффектов. Не работает? Перезапустите или переключите плагин.",
@@ -209,8 +209,8 @@
       },
       "file": "plugins/glass_bar/glass_bar.dolphyplugin",
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/glass_bar/glass_bar.dolphyplugin",
-      "post_url": "https://t.me/c/3966541757/47834",
-      "updated_at": "2026-11-22 11:19:44"
+      "post_url": "https://t.me/c/3966541757/47981",
+      "updated_at": "2026-11-23 05:36:10"
     },
     {
       "id": 32,
