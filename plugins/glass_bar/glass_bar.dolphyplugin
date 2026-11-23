@@ -1,8 +1,8 @@
 __id__ = "glass_bar"
 __name__ = "Glass Bar"
-__version__ = "3.69.0"
+__version__ = "3.70.3"
 __author__ = "@Da_koroche"
-__description__ = "Glass Bar: реалистичное стекло (Beta) с физическим преломлением"
+__description__ = "Glass Bar: реалистичное стекло и общий журнал логов плагинов"
 __icon__ = "rounded:blur_on"
 __permissions__ = []
 
@@ -1160,6 +1160,8 @@ class GlassBar(BasePlugin):
         self.log_flush_t = 0.0
         self.log_place_t = 0.0
         self.log_err_once = False
+        self.eq_log_poll_t = 0.0
+        self.eq_log_imported = 0
         self.pc_err = {}
         self.route = ""
         self.native_ok = False
@@ -1312,16 +1314,36 @@ class GlassBar(BasePlugin):
             {"type": "nav", "title": "Система", "subtitle": "Профиль производительности и окно логов",
              "icon": "speed", "screen": "glass_system"},
         ]), 30)
+        self._publish_eq_bridge(True)
         self._log("Glass Bar " + str(globals().get("__version__", "?")) + " загружен")
         self._anim_load()
         self._log_device()
         self._start()
 
     def on_plugin_unload(self):
+        self._publish_eq_bridge(False)
         self._stop()
 
     def on_plugin_disable(self):
+        self._publish_eq_bridge(False)
         self._stop()
+
+    def _publish_eq_bridge(self, active=True):
+        """Share only the public optimized-mode state with Dolphy EQ via app-private prefs."""
+        try:
+            ctx = self.api.getContext()
+            prefs = ctx.getSharedPreferences("dolphy_cross_plugin_state", 0)
+            edit = prefs.edit()
+            edit.putBoolean("glass_bar_active", bool(active))
+            edit.putBoolean("glass_bar_opt", bool(self.get_setting("glass_opt", True)))
+            edit.putInt("glass_bar_bridge_version", 1)
+            edit.putLong("glass_bar_state_updated", int(time.time() * 1000))
+            edit.apply()
+        except Exception as e:
+            try:
+                self._log("EQ bridge unavailable: " + type(e).__name__ + ": " + str(e)[:90])
+            except Exception:
+                pass
 
     def on_activity_create(self, activity):
         self._log("activity create (маршрут=" + (self.route or "-") + ")")
@@ -1353,6 +1375,7 @@ class GlassBar(BasePlugin):
         self.refresh()
 
     def on_setting_changed(self, payload):
+        self._publish_eq_bridge(True)
         self._log("setting " + str(payload))
         if self.get_setting("glass_enabled", True):
             if self.handler is not None:
@@ -2646,6 +2669,40 @@ class GlassBar(BasePlugin):
         except Exception:
             pass
 
+    def _drain_eq_logs(self):
+        """Import queued Dolphy EQ messages into this plugin's normal log buffer."""
+        try:
+            now = time.time()
+            if now - self.eq_log_poll_t < 0.5:
+                return
+            self.eq_log_poll_t = now
+            prefs = self.api.getContext().getSharedPreferences("dolphy_cross_plugin_state", 0)
+            raw = str(prefs.getString("dolphy_eq_log_queue", "[]"))
+            queue = json.loads(raw)
+            if not isinstance(queue, list) or not queue:
+                return
+            # Clear only after successfully decoding; EQ writes into the same small queue.
+            prefs.edit().putString("dolphy_eq_log_queue", "[]").apply()
+            accepted = 0
+            for item in queue[-80:]:
+                if not isinstance(item, dict):
+                    continue
+                level = str(item.get("level", "INFO")).upper()[:8]
+                msg = str(item.get("msg", ""))[:700]
+                stamp = float(item.get("ts", now))
+                dt = time.localtime(stamp)
+                ms = int((stamp % 1.0) * 1000)
+                source_time = time.strftime("%H:%M:%S", dt) + ".%03d" % ms
+                self._log("%s [EQ/%s] %s" % (source_time, level, msg))
+                self.eq_log_imported += 1
+                accepted += 1
+            if accepted:
+                self._log("EQ log bridge: импортировано " + str(accepted) + " сообщений; всего=" + str(self.eq_log_imported))
+        except Exception as ex:
+            if not self.log_err_once:
+                self.log_err_once = True
+                self._log("WARN импорт логов EQ: " + type(ex).__name__ + ": " + str(ex)[:100])
+
     def _log_device(self):
         try:
             from java import jclass
@@ -3050,6 +3107,7 @@ class GlassBar(BasePlugin):
         except Exception:
             pass
         try:
+            self._drain_eq_logs()
             if self.logw is not None:
                 now_ = time.time()
                 if now_ - self.log_place_t > 0.25:
@@ -3971,10 +4029,20 @@ class GlassBar(BasePlugin):
             out.append((a, last))
         return out
 
+    pm_det = {}   # ключ -> найденные центры иконок шапки «Плагины»
+
+    def _bt_kind(self):
+        r = str(self.route).lower()
+        if r in ("", "bluetooth"):
+            return "bt"
+        if r == "plugin_manager":
+            return "pm"
+        return None
+
     def _bt_det_entry(self):
-        # заход на экран Bluetooth или смена масштаба: нужен один новый замер
+        # заход на экран Bluetooth / «Плагины» или смена масштаба: нужен один новый замер
         try:
-            if str(self.route).lower() not in ("", "bluetooth"):
+            if self._bt_kind() is None:
                 return
             self.bt_want = True
             self.bt_sched_t = 0.0
@@ -3989,11 +4057,14 @@ class GlassBar(BasePlugin):
         try:
             if self.act is None or self.handler is None or getattr(self, "scr_H_full", 0.0) < 100.0:
                 return
-            if str(self.route).lower() not in ("", "bluetooth"):
+            kind = self._bt_kind()
+            if kind is None:
                 return
             key = self._bt_det_key()
-            tries = self.bt_try.get(key, 0)
-            need = self.bt_want or (key not in self.bt_det and tries < 3)
+            tk = (kind,) + key
+            tries = self.bt_try.get(tk, 0)
+            cache = self.pm_det if kind == "pm" else self.bt_det
+            need = self.bt_want or (key not in cache and tries < 3)
             if not need or tries >= 3:
                 return
             now = time.time()
@@ -4009,7 +4080,8 @@ class GlassBar(BasePlugin):
 
     def _bt_det_run(self):
         try:
-            if self.act is None or self.busy.get("btdet") or str(self.route).lower() not in ("", "bluetooth"):
+            kind = self._bt_kind()
+            if self.act is None or self.busy.get("btdet") or kind is None:
                 self.bt_sched_t = 0.0
                 return
             from java import jclass, jarray, jint
@@ -4022,7 +4094,7 @@ class GlassBar(BasePlugin):
             dloc = jarray(jint)([0, 0])
             decor.getLocationOnScreen(dloc)
             key = self._bt_det_key(H)
-            self.bt_run = (key, W, H, int(dloc[0]), int(dloc[1]), time.time())
+            self.bt_run = (key, W, H, int(dloc[0]), int(dloc[1]), time.time(), kind)
             Bitmap = jclass("android.graphics.Bitmap")
             Cfg = jclass("android.graphics.Bitmap$Config")
             sc = self.BT_DET_SC
@@ -4041,7 +4113,10 @@ class GlassBar(BasePlugin):
         t0 = time.time()
         try:
             if result == 0 and bmp is not None and run is not None:
-                det = self._bt_find(bmp, run[1], run[2], run[3], run[4])
+                if run[6] == "pm":
+                    det = self._pm_find(bmp, run[1], run[2], run[3], run[4])
+                else:
+                    det = self._bt_find(bmp, run[1], run[2], run[3], run[4])
         except Exception as e:
             det = None
             self._log("BT-замер: ERR поиск " + type(e).__name__ + ": " + str(e)[:100])
@@ -4050,20 +4125,102 @@ class GlassBar(BasePlugin):
         if run is None:
             return
         key = run[0]
-        self.bt_try[key] = self.bt_try.get(key, 0) + 1
+        kind = run[6]
+        tk = (kind,) + key
+        self.bt_try[tk] = self.bt_try.get(tk, 0) + 1
         ms = int((time.time() - t0) * 1000)
         try:
             if det is not None:
-                self.bt_det[key] = det
+                (self.pm_det if kind == "pm" else self.bt_det)[key] = det
                 self.bt_want = False
                 self.scr_rl_t = 0.0  # ближайший такт сразу пересчитает положение окон
-                self._bt_log(det, key, ms)
-            elif self.bt_try.get(key, 0) >= 3:
+                if kind == "pm":
+                    self._pm_log(det, key, ms)
+                else:
+                    self._bt_log(det, key, ms)
+            elif self.bt_try.get(tk, 0) >= 3:
                 self.bt_want = False
-                g = self._bt_geom(key[1])
-                self._bt_log(g, key, ms, "кнопки не найдены")
+                if kind == "pm":
+                    self._log("PM-геометрия: метод=таблица [иконки не найдены] | экран " + str(key[0]) + "x" + str(key[1])
+                              + " density=" + str(key[3]) + " ui_k=" + str(key[2]) + " | " + str(ms) + " мс")
+                else:
+                    g = self._bt_geom(key[1])
+                    self._bt_log(g, key, ms, "кнопки не найдены")
         except Exception as e:
             self._log("BT-замер: ERR " + type(e).__name__ + ": " + str(e)[:100])
+
+    def _pm_log(self, d, key, ms):
+        self._log("PM-геометрия: метод=" + str(d["method"]) + " центры_x=" + ",".join(str(int(round(v))) for v in d["cx"])
+                  + " cy=" + str(int(round(d["cy"]))) + " D=" + str(int(round(d["D"])))
+                  + " | экран " + str(key[0]) + "x" + str(key[1]) + " density=" + str(key[3])
+                  + " ui_k=" + str(key[2]) + " | " + str(ms) + " мс")
+
+    def _pm_find(self, bmp, W, H, ox, oy):
+        # Три светлых значка шапки «Плагины» (+, магазин, шестерёнка) в правой части под строкой состояния.
+        # Столбцы с яркими пикселями группируются в три кластера; пока считаем только эти столбцы.
+        from java import jarray, jint
+        w = int(bmp.getWidth())
+        h = int(bmp.getHeight())
+        sc_x = w / float(W)
+        sc_y = h / float(H)
+        y0 = int(max(float(self.bt_ins[0]) + 4.0, 0.04 * H) * sc_y)
+        y1 = int(0.115 * H * sc_y)
+        x0 = int(0.69 * w)
+        gw, gh = w - x0, y1 - y0
+        if gh < 6 or gw < 12:
+            return None
+        arr = jarray(jint)(gw * gh)
+        bmp.getPixels(arr, 0, gw, x0, y0, gw, gh)
+        vals = list(arr)
+
+        def bright(p):
+            r = (p >> 16) & 255
+            g = (p >> 8) & 255
+            b = p & 255
+            return r >= 150 and g >= 150 and b >= 150 and max(r, g, b) - min(r, g, b) <= 70
+        colc = [0] * gw
+        rowc = [0] * gh
+        mask = [False] * (gw * gh)
+        for y in range(gh):
+            base = y * gw
+            for x in range(gw):
+                if bright(vals[base + x]):
+                    mask[base + x] = True
+                    colc[x] += 1
+                    rowc[y] += 1
+        gap = max(3, int(0.01 * w))
+        groups = []
+        a = None
+        last = -99
+        for x in range(gw):
+            if colc[x] > 0:
+                if a is None:
+                    a = x
+                last = x
+            elif a is not None and x - last > gap:
+                groups.append((a, last))
+                a = None
+        if a is not None:
+            groups.append((a, last))
+        groups = [g for g in groups if g[1] - g[0] + 1 >= max(3, int(0.02 * w))]
+        if len(groups) != 3:
+            return None
+        cxs = []
+        cys = []
+        for (ga, gb) in groups:
+            ys = [y for y in range(gh) for x in range(ga, gb + 1) if mask[y * gw + x]]
+            if not ys:
+                return None
+            cxs.append(((x0 + ga + x0 + gb + 1) / 2.0) / sc_x + ox)
+            cys.append(((y0 + min(ys) + y0 + max(ys) + 1) / 2.0) / sc_y + oy)
+        p1, p2 = cxs[1] - cxs[0], cxs[2] - cxs[1]
+        if p1 <= 0 or p2 <= 0 or abs(p1 - p2) > 0.25 * max(p1, p2):
+            return None
+        pitch = (cxs[2] - cxs[0]) / 2.0
+        D = pitch / 1.132  # эталон: кружки 68 px с шагом 77 px
+        if not (0.05 * W <= D <= 0.12 * W):
+            return None
+        return {"method": "цвет", "cx": cxs, "cy": sum(cys) / 3.0, "D": D}
 
     def _bt_log(self, g, key, ms, note=""):
         r = lambda t: "(" + ",".join(str(int(round(v))) for v in t) + ")"
@@ -4196,6 +4353,13 @@ class GlassBar(BasePlugin):
         W = float(getattr(self, "scr_W_full", spm * SCR_PM_REF_W))
         k = float(getattr(self, "ui_k", 1.0))
         idx = 0 if x0 < 700 else (1 if x0 < 770 else 2)
+        try:
+            d = self.pm_det.get(self._bt_det_key())
+            if d is not None:
+                D = d["D"]
+                return (d["cx"][idx] - D / 2.0 - pad, d["cy"] - D / 2.0 - pad, D + 2 * pad, D + 2 * pad, D / 2.0)
+        except Exception:
+            pass
         fx, fy = self._pm_frac(idx, k)
         cx = fx * W
         cy = fy * W
