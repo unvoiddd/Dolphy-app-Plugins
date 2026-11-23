@@ -1,6 +1,6 @@
 {
   "format": "dolphy-plugins-v1",
-  "count": 37,
+  "count": 38,
   "plugins": [
     {
       "id": 16,
@@ -519,6 +519,20 @@
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/stroitelnyy_uroven_bubble_level/stroitelnyy_uroven_bubble_level.dolphyplugin",
       "post_url": "https://t.me/c/3966541757/35336",
       "updated_at": "2026-10-20 17:21:58"
+    },
+    {
+      "id": 38,
+      "name": "Эквалайзер",
+      "version": "1.4.40",
+      "author": "@Da_koroche",
+      "description": {
+        "ru": "Что?.. ЧТО!?! Вы не просили, а я сделал!\n\nСистемный эквалайзер с Web-интерфейсом. Python + Java, совместимость с Glass Bar. В Minecraft будем играть)\n\n⚠️ Рекомендуется отключить оптимизированный режим.\n\nА Дельфин... сами узнаете!\n\nРаботает на уровне «Wavelet».",
+        "en": "What?.. WHAT!?! You didn't ask, but I made it anyway!\n\nA system-wide equalizer with a Web UI. Python + Java, Glass Bar compatibility. Guess we're playing Minecraft)\n\n⚠️ Optimized Mode is best disabled.\n\nAnd the Dolphin... You'll find out!\n\nPerforms on Wavelet's level."
+      },
+      "file": "plugins/ekvalayzer/ekvalayzer.dolphyplugin",
+      "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/ekvalayzer/ekvalayzer.dolphyplugin",
+      "post_url": "https://t.me/c/3966541757/47998",
+      "updated_at": "2026-11-23 09:22:04"
     }
   ]
 }
