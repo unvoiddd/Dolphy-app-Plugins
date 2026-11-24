@@ -1,0 +1,3079 @@
+__id__ = "dolphy_es"
+__name__ = "Dolphy en Español"
+__version__ = "1.1.0"
+__author__ = "Claude"
+__description__ = "Traduce al español la interfaz de Dolphy 2.7 y los textos de otros plugins"
+__icon__ = "rounded:translate"
+__permissions__ = []
+
+import collections
+import json
+import os
+import re
+import struct
+import sys
+import threading
+import time
+import traceback
+
+# Dolphy en Español
+# -----------------
+# Dolphy 2.7 solo trae inglés y ruso. Este plugin crea en tiempo de ejecución una
+# "tabla de recursos" (resources.arsc) con la traducción al español de las cadenas de la
+# app y la superpone con ResourcesLoader (Android 11+). No modifica el APK.
+#   * Las cadenas se buscan por NOMBRE (getIdentifier), así que sigue funcionando
+#     aunque cambien los ID entre versiones; las que no existan se omiten.
+#   * El texto escrito directamente en el código de la app (no en recursos) no se puede
+#     traducir de esta forma.
+#   * Los textos de OTROS plugins se traducen aparte (ver más abajo).
+#   * Para volver al original basta con apagar los interruptores en los ajustes del plugin.
+
+TEXTS = {
+    "action_info": "Info",
+    "action_pin": "Fijar",
+    "action_unpin": "Desfijar",
+    "advertise_empty_presets": "Aún no has añadido ningún dispositivo.",
+    "audio_bypass_1": "Bypass 1",
+    "audio_bypass_2": "Bypass 2",
+    "audio_bypass_3": "Bypass 3",
+    "audio_close": "Cerrar",
+    "audio_connect": "Conectar",
+    "audio_connected_success": "¡Conectado!",
+    "audio_connected_successfully": "Conexión exitosa",
+    "audio_connecting": "Conectando...",
+    "audio_error_hfp_generic": "Error al conectar el audio: %s",
+    "audio_error_hfp_manual": "Se requiere conexión manual en los ajustes de Bluetooth",
+    "audio_error_hfp_permission": "Error de permisos. Intenta conectar manualmente",
+    "audio_error_hfp_timeout": "Tiempo de espera agotado en la conexión del perfil de audio",
+    "audio_error_label": "Error",
+    "audio_failed": "Error",
+    "audio_file_label": "Archivo: %s",
+    "audio_hacking": "Hackeando...",
+    "audio_hijack_fail": "Falló el secuestro: %1$s",
+    "audio_hijack_ok": "Secuestro: %1$s",
+    "audio_hijack_starting": "Iniciando secuestro…",
+    "audio_listen": "Escuchar",
+    "audio_listening_title": "Escuchando",
+    "audio_no_recordings": "Aún no hay grabaciones",
+    "audio_quiet_connect_text": "Esta función permite conectarse a bocinas y audífonos sin confirmación",
+    "audio_quiet_connect_title": "Acerca de Quiet Connect",
+    "audio_record": "Grabar",
+    "audio_recording_title": "Grabando...",
+    "audio_run_again": "Ejecutar de nuevo",
+    "audio_scanner_desc": "Busca y prueba dispositivos de audio Bluetooth. Conéctate a bocinas y audífonos.",
+    "audio_scanner_tab_recordings": "Grabaciones",
+    "audio_scanner_tab_scanner": "Escáner",
+    "audio_scanner_title": "Secuestro de audio BT",
+    "audio_scanning_devices": "Buscando dispositivos de audio…",
+    "audio_searching": "Buscando...",
+    "audio_send_logs": "Enviar registros",
+    "audio_spoof_info_text": "Reproduce audio en un dispositivo que abre la página local de Dolphy. Ambos dispositivos deben estar en la misma red Wi-Fi o red local. No usa servicios de alojamiento ni túneles externos.",
+    "audio_spoof_info_title": "Acerca de Audio Spoof",
+    "audio_start_scan": "Iniciar escaneo",
+    "audio_starting_success": "Iniciando...",
+    "audio_stop": "Detener",
+    "audio_waiting": "Esperando...",
+    "back": "Atrás",
+    "bad_usb_card_desc": "Script Ducky · Gadget USB HID (root)",
+    "bad_usb_connected": "Conectado",
+    "bad_usb_disconnected": "Desconectado",
+    "bad_usb_done": "Script finalizado",
+    "bad_usb_empty": "Ingresa un script Ducky",
+    "bad_usb_fail": "El script falló",
+    "bad_usb_hint": "La emulación de teclado y mouse USB requiere root y compatibilidad del kernel con el gadget HID. Conecta tu teléfono a tu computadora, ingresa un script Ducky y toca Ejecutar.",
+    "bad_usb_root_denied": "Acceso root denegado",
+    "bad_usb_run": "Ejecutar",
+    "bad_usb_running": "Ejecutando…",
+    "bad_usb_script_hint": "Ingresa DuckyScript…",
+    "bad_usb_script_label": "Script Ducky",
+    "bad_usb_status": "Estado: %s",
+    "bad_usb_status_connected": "Conectado por USB",
+    "bad_usb_status_disconnected": "Desconectado",
+    "bad_usb_status_root": "Se requiere acceso root",
+    "bad_usb_status_setup": "Configurando el gadget HID…",
+    "bad_usb_title": "Bad USB",
+    "ble_add_device": "Añadir dispositivo",
+    "ble_allow": "Permitir",
+    "ble_audio_test": "Probar",
+    "ble_brightness": "Brillo",
+    "ble_company_code_line": "Código de empresa: 0x%1$04X • %2$s",
+    "ble_connecting": "Conectando…",
+    "ble_delete": "Eliminar",
+    "ble_device_actions": "Acciones del dispositivo",
+    "ble_edit": "Editar",
+    "ble_edit_device": "Editar dispositivo",
+    "ble_label_company_code": "Código de empresa",
+    "ble_label_hex_payload": "Carga útil hex",
+    "ble_label_name": "Nombre",
+    "ble_label_spam_interval": "Intervalo de spam (ms)",
+    "ble_list_airtag": "Nueva lista de AirTag",
+    "ble_list_apple": "Nueva lista de dispositivos Apple",
+    "ble_list_apple_action": "Lista de ventanas de acción de Apple",
+    "ble_list_buds": "Lista de Buds",
+    "ble_list_fast_pair": "Lista de Fast Pair",
+    "ble_list_headphones": "Lista de audífonos",
+    "ble_list_ios_crash": "Lista de fallos de iOS",
+    "ble_list_normal": "Lista normal",
+    "ble_list_not_your_device": "Lista «No es tu dispositivo»",
+    "ble_list_vivo_gamepad": "Lista de gamepads Vivo",
+    "ble_list_vivo_tws": "Lista de Vivo TWS",
+    "ble_list_watch": "Lista de relojes",
+    "ble_list_xiaomi": "Xiaomi Quick Connect",
+    "ble_off": "APAGADO",
+    "ble_on": "ENCENDIDO",
+    "ble_permission_advertising_required": "Se requieren permisos de Bluetooth para la publicidad",
+    "ble_placeholder_company_code": "p. ej. 0x004C para Apple",
+    "ble_placeholder_hex_payload": "Pega la cadena hex sin espacios, p. ej.: 071907022075aa3001000045121212000000000000000000000000",
+    "ble_placeholder_name": "p. ej. AirPods Falsos 2026",
+    "ble_plugin_modes": "Plugins",
+    "ble_randomize_mac": "MAC aleatoria",
+    "ble_rescan": "Volver a escanear",
+    "ble_scan": "Escanear",
+    "ble_smart_home": "Hogar inteligente BLE",
+    "ble_smart_light": "Luz inteligente",
+    "ble_smarthome_connect_failed": "No se pudo conectar",
+    "ble_smarthome_device_not_found": "Dispositivo no encontrado",
+    "ble_smarthome_need_perms": "Se requieren permisos de Bluetooth para escanear.",
+    "ble_spam_screen_title": "BLE Spam",
+    "bluetooth_disabled": "Bluetooth desactivado",
+    "bluetooth_disabled_message": "Activa Bluetooth para usar las funciones de spam",
+    "bluetooth_enable": "Activar",
+    "bluetooth_enable_first": "Activa Bluetooth e inténtalo de nuevo.",
+    "bluetooth_not_supported": "Bluetooth no compatible",
+    "bluetooth_permission_explanation": "Esta sección necesita descubrimiento de dispositivos y acceso a Bluetooth. Android requiere el permiso de ubicación para el descubrimiento BLE. Puedes usar otras secciones sin concederlo.",
+    "bluetooth_permission_grant": "Conceder acceso",
+    "bluetooth_permission_required": "Concede acceso a Bluetooth para esta sección.",
+    "bluetooth_permission_settings": "Abrir ajustes de la app",
+    "bluetooth_permission_title": "Acceso a Bluetooth",
+    "bluetooth_scan_failed": "Falló el descubrimiento. Revisa Bluetooth, los permisos y los servicios de ubicación.",
+    "bond_spam_devices": "Dispositivos descubiertos",
+    "bond_spam_no_devices": "Buscando dispositivos…",
+    "bond_spam_select_device": "Selecciona un dispositivo para el spam",
+    "bond_spam_target": "Objetivo:",
+    "bond_spam_title": "Spam de vinculación",
+    "brand_unknown": "Desconocido",
+    "bt_jammer_activity_log": "REGISTRO DE ACTIVIDAD",
+    "bt_jammer_found": "Encontrados: %1$d",
+    "bt_jammer_jamming": "Interfiriendo…",
+    "bt_jammer_no_devices": "No se encontraron dispositivos cercanos",
+    "bt_jammer_ready": "Listo para interferir…",
+    "bt_jammer_scanning": "Buscando dispositivos…",
+    "bt_jammer_select_device": "SELECCIONAR DISPOSITIVO",
+    "bt_jammer_starting": "Iniciando ataque de inundación en %s…",
+    "bt_jammer_stopped": "Detenido.",
+    "bt_jammer_tap_hint": "Toca un dispositivo para atacar",
+    "bt_jammer_target": "OBJETIVO",
+    "bt_jammer_title": "BT Jammer",
+    "btn_cancel": "Cancelar",
+    "cancel": "Cancelar",
+    "cast_browser_hint": "Otras TV: abre el sitio local en el navegador de la TV.",
+    "cast_discovery_failed": "Falló la detección de TV: %s",
+    "cast_failed": "No se pudo transmitir el video: %s",
+    "cast_file_too_large": "No hay suficiente espacio libre para este video",
+    "cast_google": "Google Cast",
+    "cast_google_hint": "Elige un dispositivo Google Cast con el botón de la derecha y luego toca Reproducir.",
+    "cast_import_failed": "No se pudo leer el video",
+    "cast_importing": "Preparando video…",
+    "cast_loaded": "El dispositivo aceptó el video",
+    "cast_loading": "Cargando en el dispositivo…",
+    "cast_network_missing": "Conéctate a una red Wi-Fi local.",
+    "cast_no_session": "Primero conéctate a un dispositivo Google Cast.",
+    "cast_ready": "Video listo. Elige un dispositivo.",
+    "catalog_ble_desc": "Prueba anuncios BLE para Apple, Android, Windows y Samsung",
+    "catalog_bond_desc": "Prueba de solicitud de emparejamiento Bluetooth Classic",
+    "cd_add": "Añadir",
+    "cd_back": "Atrás",
+    "cd_close": "Cerrar",
+    "cd_delete": "Eliminar",
+    "cd_menu": "Menú",
+    "cd_nfc_success": "Éxito",
+    "cd_power": "Encendido",
+    "cd_refresh": "Actualizar",
+    "cd_screenshot": "Captura de pantalla",
+    "cd_search": "Buscar",
+    "cd_volume_down": "Bajar volumen",
+    "cd_volume_up": "Subir volumen",
+    "chat_advertising_failed": "No se pudo hacer visible este chat.",
+    "chat_change_name": "Nombre del chat",
+    "chat_delivery_failed": "Falló la entrega a uno o más usuarios",
+    "chat_delivery_pending": "Enviando…",
+    "chat_delivery_sent": "Entregado a todos los usuarios descubiertos",
+    "chat_empty_hint": "Saluda a un usuario de Dolphy cercano; los mensajes nuevos aparecerán aquí.",
+    "chat_empty_title": "Aún no hay mensajes",
+    "chat_message_hint": "Escribe un mensaje",
+    "chat_message_too_long": "El mensaje es demasiado largo. Acórtalo e inténtalo de nuevo.",
+    "chat_no_recipients": "No hay usuarios de Dolphy cerca. Abre el chat en el otro dispositivo.",
+    "chat_peers": "Usuarios cercanos: %d",
+    "chat_privacy_notice": "Un chat grupal cercano. Los mensajes no están cifrados; el historial dura hasta que se cierra la app.",
+    "chat_retry": "Reintentar",
+    "chat_save_name": "Guardar",
+    "chat_send_message": "Enviar",
+    "chat_send_not_ready": "El chat aún no está listo: revisa Bluetooth y tu nombre e inténtalo de nuevo",
+    "chat_start_failed": "No se pudo iniciar el chat. Revisa Bluetooth y la compatibilidad con publicidad BLE.",
+    "chat_status_connected": "Conectado",
+    "chat_status_offline": "Sin conexión",
+    "chat_status_scanning": "Escaneando…",
+    "close": "Cerrar",
+    "color_picker_select": "Seleccionar",
+    "confirm": "Confirmar",
+    "customize_animations_dialog_no": "No",
+    "customize_animations_dialog_title": "¿Establecer la animación como permanente en la pantalla de inicio?",
+    "customize_animations_dialog_yes": "Sí",
+    "customize_animations_permanent_badge": "Permanente",
+    "customize_animations_reset": "Restablecer",
+    "customize_animations_reset_success": "Animación restablecida al modo estándar",
+    "customize_animations_set_success": "Animación establecida como permanente en la pantalla de inicio",
+    "customize_animations_title": "Personalizar animaciones",
+    "dont_show_again": "No volver a mostrar",
+    "error": "Error",
+    "error_advertiser_unavailable": "BluetoothLeAdvertiser no disponible",
+    "error_advertising_already_running": "La publicidad ya está en ejecución",
+    "error_advertising_start": "Error al iniciar la publicidad: %s",
+    "error_ble_advertising_unsupported": "Este dispositivo no es compatible con la publicidad BLE",
+    "error_enable_bluetooth_first": "Primero activa Bluetooth",
+    "error_invalid_hex_payload": "Carga útil hex no válida",
+    "error_no_ble_advertise_permission": "Sin permisos para la publicidad BLE",
+    "error_payload_too_long_legacy": "La carga útil es demasiado larga para la publicidad heredada",
+    "error_preset_not_found": "Preajuste no encontrado",
+    "got_it": "Entendido",
+    "hid_android_ios_mode": "Modo Android / iOS",
+    "hid_attack_in_progress": "ATAQUE EN CURSO",
+    "hid_back_spam": "Spam de Atrás/ESC",
+    "hid_bad_hid": "BH BAD HID",
+    "hid_bad_hid_mode": "Modo Bad HID",
+    "hid_blueducky_info_body": "Realiza una conexión silenciosa a dispositivos mediante la vulnerabilidad Blue Ducky (CVE-2023-45866): HID sin PIN ni diálogos de confirmación de emparejamiento.\n\nFunciona contra objetivos vulnerables:\n• Android 4.2.2 – Android 13 (antes de los parches de seguridad de Bluetooth de 2023/2024)\n• Pilas Linux BlueZ sin parchear\n• Algunas revisiones tempranas de iOS/macOS\n\nEn Android 14+ y en OEM recién parcheados, el host aún puede requerir confirmación o rechazar HID sin autenticar. «Conectar» es la vía normal con diálogos; «Conexión silenciosa» usa Just Works silencioso + emparejamiento con confirmación automática.",
+    "hid_blueducky_info_cd": "Acerca de BlueDucky",
+    "hid_center_cursor": "Centrar cursor",
+    "hid_change_name_description": "El nombre de Bluetooth que ven otros dispositivos.",
+    "hid_change_name_hint": "Nombre del dispositivo",
+    "hid_change_name_title": "Ingresa un nombre de dispositivo",
+    "hid_clear_selection": "Borrar selección",
+    "hid_connect": "Conectar",
+    "hid_connected": "Conectado a %s",
+    "hid_connecting": "Conectando...",
+    "hid_connection_lost_reconnecting": "Conexión perdida, reconectando",
+    "hid_delete_selected": "Eliminar seleccionados",
+    "hid_device_headphones": "Audífonos",
+    "hid_device_lower": "dispositivo",
+    "hid_device_name_label": "Nombre del dispositivo: %s",
+    "hid_device_other": "Dispositivo",
+    "hid_device_pc": "PC",
+    "hid_device_phone": "Teléfono",
+    "hid_device_tablet": "Tableta",
+    "hid_device_tv": "TV",
+    "hid_device_wearable": "Wearable",
+    "hid_devices": "Dispositivos",
+    "hid_ducky_empty": "Archivo DuckyScript vacío",
+    "hid_ducky_import_error": "Error al importar el archivo",
+    "hid_ducky_parse_fail": "No se pudo analizar el DuckyScript",
+    "hid_ducky_scripts": "Scripts Ducky",
+    "hid_home_spam": "Spam del hogar",
+    "hid_import_ducky_hint": "Importa un .txt con DuckyScript con el botón +",
+    "hid_import_duckyscript": "Importar DuckyScript",
+    "hid_keyboard": "Teclado",
+    "hid_long_connection_message": "La conexión tarda más de 10 segundos. Reinicia Bluetooth y vuelve a abrir la sección Teclado HID.",
+    "hid_long_connection_title": "Conexión lenta",
+    "hid_menu": "Menú",
+    "hid_mouse_button_back": "Atrás",
+    "hid_mouse_button_forward": "Adelante",
+    "hid_mouse_button_left": "Izquierda",
+    "hid_mouse_button_middle": "Central",
+    "hid_mouse_button_right": "Derecha",
+    "hid_mute": "Silenciar",
+    "hid_no_connection": "No hay conexión HID activa",
+    "hid_no_devices": "No se encontraron dispositivos. Toca actualizar.",
+    "hid_not_connected": "No conectado",
+    "hid_notepad_label": "Texto del bloc de notas",
+    "hid_notepad_output": "Escribir en el bloc de notas",
+    "hid_notepad_send_failed": "No se pudo enviar el texto al bloc de notas",
+    "hid_notepad_text_hint": "Ingresa texto (letras latinas, dígitos, símbolos)",
+    "hid_open": "Abrir",
+    "hid_open_link": "Abrir enlace",
+    "hid_pair_permission_required": "PERMISO REQUERIDO",
+    "hid_paired": "Emparejado",
+    "hid_payloads": "Cargas útiles",
+    "hid_pc_bad_hid": "BAD HID",
+    "hid_pc_controls": "Controles",
+    "hid_pc_keyboard": "Teclado",
+    "hid_pc_modes": "Modos HID",
+    "hid_pc_mouse": "Mouse",
+    "hid_phantom_clicks": "Clics fantasma",
+    "hid_power": "Encendido",
+    "hid_quick_actions": "Acciones rápidas",
+    "hid_quiet_connect": "Conexión silenciosa",
+    "hid_quiet_connect_toast": "Blue Ducky: conectando sin PIN / confirmación…",
+    "hid_reboot": "Reiniciar",
+    "hid_reconnect_message": "%s está emparejado, pero la conexión HID no está completa. Revisa el perfil HID en los ajustes de Bluetooth.",
+    "hid_reconnect_title": "Se requiere actualizar la conexión",
+    "hid_reconnecting": "Conectando…",
+    "hid_scan": "Escanear",
+    "hid_scanning": "Escaneando...",
+    "hid_scanning_message": "Buscando dispositivos...",
+    "hid_screenshot": "Captura de pantalla",
+    "hid_screenshot_spam": "Spam de capturas de pantalla",
+    "hid_script_flipper_mac_missing": "Script de Flipper Mac no encontrado",
+    "hid_script_flipper_win_missing": "Script de Flipper Win no encontrado",
+    "hid_select_device_upper": "SELECCIONAR DISPOSITIVO",
+    "hid_select_scripts": "Seleccionar scripts",
+    "hid_service_channel_name": "Servicio de teclado HID",
+    "hid_service_notification_text": "Perfil Bluetooth HID activo",
+    "hid_service_notification_title": "Teclado HID",
+    "hid_shutdown": "Apagar",
+    "hid_title": "Teclado HID",
+    "hid_touchpad": "Panel táctil",
+    "hid_url_to_open": "URL por abrir",
+    "hid_volume_down": "Volumen -",
+    "hid_volume_down_action": "Bajar volumen",
+    "hid_volume_spam": "Spam de volumen",
+    "hid_volume_up": "Volumen +",
+    "hid_volume_up_action": "Subir volumen",
+    "ir_add_to_favorites": "Añadir a favoritos",
+    "ir_brands_not_found_category": "No se encontraron marcas para la categoría %s",
+    "ir_button_unnamed": "Sin nombre",
+    "ir_cat_air_conditioners": "Aires acondicionados",
+    "ir_cat_air_purifiers": "Purificadores de aire",
+    "ir_cat_audio": "Sistemas de audio",
+    "ir_cat_av_receivers": "Receptores AV",
+    "ir_cat_banners": "Pancartas IR",
+    "ir_cat_bidets": "Bidés",
+    "ir_cat_bluray": "Reproductores Blu-ray",
+    "ir_cat_cable_stb": "Decodificadores de cable",
+    "ir_cat_cameras": "Cámaras",
+    "ir_cat_car_multimedia": "Multimedia para auto",
+    "ir_cat_cctv": "CCTV",
+    "ir_cat_cd_players": "Reproductores de CD",
+    "ir_cat_clocks": "Relojes",
+    "ir_cat_computers": "Computadoras",
+    "ir_cat_consoles": "Consolas de videojuegos",
+    "ir_cat_converters": "Convertidores",
+    "ir_cat_digital_signage": "Señalización digital",
+    "ir_cat_dvb_t": "Receptores DVB-T",
+    "ir_cat_dvd_players": "Reproductores de DVD",
+    "ir_cat_fans": "Ventiladores",
+    "ir_cat_fireplaces": "Chimeneas",
+    "ir_cat_head_units": "Autoestéreos",
+    "ir_cat_heaters": "Calentadores",
+    "ir_cat_humidifiers": "Humidificadores",
+    "ir_cat_jammer": "Inhibidor IR",
+    "ir_cat_kvm": "Conmutadores KVM",
+    "ir_cat_laserdisc": "LaserDisc",
+    "ir_cat_led_lighting": "Iluminación LED",
+    "ir_cat_minidisc": "Reproductores de MiniDisc",
+    "ir_cat_miscellaneous": "Varios",
+    "ir_cat_monitors": "Monitores",
+    "ir_cat_multimedia": "Multimedia",
+    "ir_cat_photo_frames": "Marcos digitales de fotos",
+    "ir_cat_projectors": "Proyectores",
+    "ir_cat_soundbars": "Barras de sonido",
+    "ir_cat_speakers": "Bocinas",
+    "ir_cat_standard": "Base de datos estándar de Flipper",
+    "ir_cat_streaming": "Dispositivos de streaming",
+    "ir_cat_touchscreens": "Pantallas táctiles",
+    "ir_cat_toys": "Juguetes",
+    "ir_cat_tv": "TV",
+    "ir_cat_tv_tuners": "Sintonizadores de TV",
+    "ir_cat_universal": "Controles remotos universales",
+    "ir_cat_vacuum_cleaners": "Aspiradoras",
+    "ir_cat_vcr": "Videocaseteras",
+    "ir_cat_video_conferencing": "Videoconferencia",
+    "ir_cat_whiteboards": "Pizarras electrónicas",
+    "ir_cat_window_cleaners": "Limpiaventanas",
+    "ir_current_signal": "Señal actual:",
+    "ir_delete": "Eliminar",
+    "ir_edit_mode": "Modo de edición",
+    "ir_favorites": "Favoritos",
+    "ir_file_not_found": "Archivo %s no encontrado o no contiene comandos",
+    "ir_flipper_db_not_found": "Base de datos de Flipper no encontrada o vacía",
+    "ir_flipper_remotes": "Controles IR (Flipper)",
+    "ir_import": "Importar archivo .ir",
+    "ir_import_failed": "No se pudieron importar los comandos del archivo",
+    "ir_import_select_ir": "Selecciona un archivo .ir",
+    "ir_jammer": "Inhibidor IR",
+    "ir_jammer_description": "Mientras apuntes tu teléfono a una TV u otro dispositivo, este no responderá a los comandos del control remoto y los ignorará",
+    "ir_jammer_send_done": "Envío finalizado",
+    "ir_jammer_sending_signals": "Enviando señales...",
+    "ir_jammer_storm_cd": "Detener tormenta IR",
+    "ir_jammer_storm_start": "Iniciar tormenta IR",
+    "ir_label_results": "Resultados",
+    "ir_loading": "Cargando...",
+    "ir_loading_remotes": "Cargando controles...",
+    "ir_meta_brand": "Marca: %s",
+    "ir_meta_category_brand": "Categoría: %1$s\nMarca: %2$s",
+    "ir_meta_category_only": "Categoría: %s",
+    "ir_no_commands_for": "No hay comandos para %s",
+    "ir_no_favorites": "Los controles marcados con estrella aparecerán aquí",
+    "ir_no_user_remotes": "Aún no has añadido controles personalizados. Toca + para importar archivos .ir.",
+    "ir_not_found": "No se encontró nada",
+    "ir_remote_not_found": "Control no encontrado",
+    "ir_remotes_for_brand_not_found": "No hay controles para %s en la base de datos",
+    "ir_remove_from_favorites": "Quitar de favoritos",
+    "ir_rename": "Renombrar",
+    "ir_rename_remote": "Renombrar control",
+    "ir_search": "Buscar",
+    "ir_search_brand": "Buscar marca",
+    "ir_section_digits": "Dígitos",
+    "ir_section_media": "Multimedia",
+    "ir_section_menu": "Menú",
+    "ir_section_other": "Otros",
+    "ir_section_unknown_cmds": "Comandos desconocidos",
+    "ir_select_category": "Seleccionar categoría",
+    "ir_send_all": "Enviar todas las señales de inhibición",
+    "ir_sending": "Enviando...",
+    "ir_smart_search": "Búsqueda inteligente",
+    "ir_storm": "TV Be Gone",
+    "ir_storm_done": "¡Listo!",
+    "ir_storm_error": "Error de tormenta IR: %s",
+    "ir_storm_loading": "Cargando...",
+    "ir_storm_ready": "Listo para enviar",
+    "ir_storm_sending": "Enviando...",
+    "ir_storm_stopped": "Detenido",
+    "ir_tv_db_not_found": "Base de datos de TV no encontrada o sin entradas",
+    "ir_tv_remotes": "Controles IR (TV)",
+    "ir_tv_short": "TV",
+    "ir_universal_remotes": "Controles remotos universales",
+    "ir_user_remotes": "Tus controles",
+    "ir_user_remotes_title": "Tus controles",
+    "lan_camera_again": "Escanear de nuevo",
+    "lan_camera_description": "Buscando cámaras en tu red.",
+    "lan_camera_found_count": "Encontrados: %d",
+    "lan_camera_mac": "MAC: %s",
+    "lan_camera_mac_unknown": "desconocido",
+    "lan_camera_ports": "Puertos: %s",
+    "lan_camera_result_empty": "No se encontraron cámaras en la red",
+    "lan_camera_result_found": "Cámaras encontradas: %d",
+    "lan_camera_results_empty_header": "No se encontraron cámaras",
+    "lan_camera_results_empty_sub": "No se encontraron cámaras IP en tu red",
+    "lan_camera_results_found_header": "Cámaras encontradas: %d",
+    "lan_camera_results_found_sub": "Los dispositivos descubiertos se muestran abajo",
+    "lan_camera_results_list_title": "Cámaras descubiertas",
+    "lan_camera_results_title": "Resultados",
+    "lan_camera_scanning": "Buscando cámaras…",
+    "lan_camera_start": "Iniciar",
+    "lan_camera_title": "Búsqueda de cámaras",
+    "lan_mitm_active": "Activo",
+    "lan_mitm_all_desc": "Portal de red experimental. El comportamiento del dispositivo depende de la red y del sistema operativo.",
+    "lan_mitm_all_start": "Iniciar",
+    "lan_mitm_all_stop": "Detener",
+    "lan_mitm_entry": "LAN MITM",
+    "lan_mitm_entry_desc": "Herramientas de red root: ARP e inspección de tráfico",
+    "lan_mitm_gateway": "Puerta de enlace: %s",
+    "lan_mitm_iface": "Interfaz: %s",
+    "lan_mitm_ip": "Tu IP: %s",
+    "lan_mitm_log": "Tráfico",
+    "lan_mitm_log_auth": "Autenticación básica · %s",
+    "lan_mitm_log_empty": "Esperando tráfico de red…",
+    "lan_mitm_log_sni": "HTTPS (SNI) · %s",
+    "lan_mitm_network": "Red",
+    "lan_mitm_root_checking": "Comprobando root…",
+    "lan_mitm_root_no": "Root: no disponible",
+    "lan_mitm_root_warn": "Estas herramientas de red requieren acceso root.",
+    "lan_mitm_root_yes": "Root: disponible",
+    "lan_mitm_ssid": "SSID: %s",
+    "lan_mitm_title": "LAN MITM",
+    "lan_scanner_brand": "Marca: %s",
+    "lan_scanner_btn_audit": "Auditoría",
+    "lan_scanner_btn_info": "Info",
+    "lan_scanner_btn_reboot": "Reiniciar",
+    "lan_scanner_complete": "Escaneo completado",
+    "lan_scanner_desc": "Descubre dispositivos en la red Wi-Fi actual",
+    "lan_scanner_device_actions": "Herramientas",
+    "lan_scanner_found_devices": "Se encontraron %d dispositivos",
+    "lan_scanner_log_audit_creds": "Comprobando credenciales predeterminadas...",
+    "lan_scanner_log_audit_starting": "Iniciando auditoría de seguridad...",
+    "lan_scanner_log_audit_warn_creds": "AVISO: ¡se encontró admin/admin!",
+    "lan_scanner_log_audit_warn_wps": "AVISO: WPS V1 habilitado",
+    "lan_scanner_log_audit_wps": "Comprobando el estado de WPS...",
+    "lan_scanner_log_fetching_info": "Obteniendo información del sistema...",
+    "lan_scanner_log_reboot_auth": "Autenticando en %s...",
+    "lan_scanner_log_reboot_sending": "Enviando comando de reinicio...",
+    "lan_scanner_log_reboot_success": "ÉXITO: ¡señal de reinicio enviada!",
+    "lan_scanner_log_vendor": "Fabricante: %s",
+    "lan_scanner_log_wifi_scanning": "Escaneando módulos Wi-Fi...",
+    "lan_scanner_ports": "Puertos: %s",
+    "lan_scanner_ready": "Listo para comandos...",
+    "lan_scanner_router_actions": "ACCIONES DEL ROUTER",
+    "lan_scanner_scanning": "Escaneando la red...",
+    "lan_scanner_subnet": "Subred: %s",
+    "lan_scanner_title": "Escáner de LAN",
+    "lan_scanner_wake_on_lan": "WakeOnLan",
+    "lan_scanner_wol_sent": "Enviado",
+    "lan_scanner_you": "TÚ",
+    "lan_tools_item_cameras": "Búsqueda de cámaras",
+    "lan_tools_item_cameras_desc": "Puertos ONVIF y de cámaras IP",
+    "lan_tools_item_scanner": "Escáner de LAN",
+    "lan_tools_item_scanner_desc": "Descubre dispositivos en la red Wi-Fi actual",
+    "lan_tools_subtitle": "Herramientas de red local",
+    "lan_tools_title": "Herramientas LAN",
+    "language_russian": "Ruso",
+    "mtrl_button_collapsed_content_description": "Contraído",
+    "mtrl_button_expanded_content_description": "Expandido",
+    "my_cam_entry_desc": "Transmisión en vivo de tu cámara doméstica (admin/admin)",
+    "my_cam_error_title": "Error",
+    "my_cam_live_label": "En vivo",
+    "my_cam_log_no_video": "No se pudo obtener video de las cámaras encontradas",
+    "my_cam_log_title": "Registro",
+    "my_cam_no_cameras": "No hay cámaras en la red",
+    "my_cam_retry": "Intentar de nuevo",
+    "my_cam_retry_all": "Probar todos los dispositivos de la red",
+    "my_cam_status_checking": "¡Éxito! Comprobando la contraseña…",
+    "my_cam_status_next_device": "Pasando a otro dispositivo",
+    "my_cam_status_no_reply": "Sin respuesta a la solicitud",
+    "my_cam_status_requesting": "Solicitud a %1$s…",
+    "my_cam_status_searching": "Buscando dispositivos",
+    "nav_bluetooth": "Bluetooth",
+    "nav_modules": "Funciones",
+    "nav_other": "Otros",
+    "nav_rail_collapsed_a11y_label": "Contraído",
+    "nav_rail_expanded_a11y_label": "Expandido",
+    "nav_settings": "Ajustes",
+    "network_hub_active_pinned": "Conectado",
+    "network_hub_admin_panel": "Panel de administración",
+    "network_hub_admin_panel_desc": "Abrir el panel web del router",
+    "network_hub_card_description": "Escaneo de red, DoS Wi-Fi y fuerza bruta de contraseñas",
+    "network_hub_error_message": "La app no detectó una conexión a la red seleccionada.",
+    "network_hub_error_title": "Error de conexión",
+    "network_hub_log_connected": "Ataque DoS a la red: %1$s",
+    "network_hub_log_failed": "Error de envío: %1$s",
+    "network_hub_log_flood": "FLOOD: %1$d paquetes enviados",
+    "network_hub_log_prepare": "Preparando el envío de paquetes UDP a 255.255.255.255:8888",
+    "network_hub_log_sent": "Paquete enviado correctamente",
+    "network_hub_log_target": "Objetivo del ataque: %1$s",
+    "network_hub_logs_title": "Registro de paquetes",
+    "network_hub_need_location": "Se requiere el permiso de ubicación para mostrar las redes Wi‑Fi.",
+    "network_hub_next": "Siguiente",
+    "network_hub_password_message": "Ingresa la contraseña de Wi‑Fi para validar «%1$s» de forma segura.",
+    "network_hub_password_title": "Conectar a la red",
+    "network_hub_requires_android_10": "Se requiere Android 10 o posterior para las conexiones con especificador Wi‑Fi.",
+    "network_hub_select_network": "Elige la red «%1$s» y conéctate a ella",
+    "network_hub_started_title": "Ataque DoS iniciado",
+    "network_hub_test": "DoS",
+    "network_hub_title": "Ataques Wi-Fi",
+    "network_hub_title_en": "DoS Wi-Fi",
+    "network_hub_waiting_message": "Conéctate a «%1$s» en los ajustes de Wi‑Fi y regresa a la app.",
+    "network_hub_waiting_title": "Esperando conexión",
+    "nfc_add": "Añadir",
+    "nfc_apply_erase": "Acerca la etiqueta al teléfono para borrar los datos",
+    "nfc_apply_tag": "Aplicar etiqueta al teléfono",
+    "nfc_apply_write": "Acerca la etiqueta al teléfono para escribir los datos",
+    "nfc_audio_spoofer": "NFC Audio Spoof",
+    "nfc_audio_spoofer_desc": "Emulación de etiqueta NFC con sitio web para control remoto de audio",
+    "nfc_cannot_emulate": "Esta etiqueta no se puede emular",
+    "nfc_contact_no_phone": "Este contacto no tiene número de teléfono",
+    "nfc_contact_permission_rationale": "Permite el acceso a contactos para elegir un número",
+    "nfc_content": "Contenido",
+    "nfc_copy_for_emulation": "Copiar etiqueta para emulación",
+    "nfc_copy_tag_default": "Copia de etiqueta",
+    "nfc_copy_tag_name": "Copia de %s",
+    "nfc_copy_title": "Copia de etiqueta",
+    "nfc_data_written": "Datos escritos",
+    "nfc_delete_selected": "Eliminar etiquetas seleccionadas",
+    "nfc_detail_1": "Acerca la etiqueta al teléfono",
+    "nfc_detail_10": "Ocultar HEX",
+    "nfc_detail_11": "Mostrar HEX",
+    "nfc_detail_12": "Habilitado",
+    "nfc_detail_13": "Deshabilitado",
+    "nfc_detail_14": "Desconocido",
+    "nfc_detail_15": "Análisis",
+    "nfc_detail_16": "Tipo",
+    "nfc_detail_17": "Tarjeta EMV",
+    "nfc_detail_18": "Guardar URL para emulación Tipo 4",
+    "nfc_detail_19": "Esta etiqueta no se puede emular",
+    "nfc_detail_2": "NFC no está disponible",
+    "nfc_detail_20": "Copia de etiqueta",
+    "nfc_detail_21": "Historial",
+    "nfc_detail_3": "Activa NFC en los ajustes del teléfono",
+    "nfc_detail_4": "Tecnologías",
+    "nfc_detail_5": "Sí",
+    "nfc_detail_6": "No",
+    "nfc_detail_7": "Tamaño de memoria",
+    "nfc_detail_8": "Tipo de registro",
+    "nfc_detail_9": "Contenido",
+    "nfc_disabled": "Deshabilitado",
+    "nfc_disabled_off": "NFC está apagado. Actívalo en los ajustes del teléfono.",
+    "nfc_edit_mode": "Editar",
+    "nfc_emulate": "Emulación NFC",
+    "nfc_emulate_description": "Crea una etiqueta URL y emula NFC Forum Tipo 4",
+    "nfc_emulating": "Emulando...",
+    "nfc_emulation_title": "Emulación de etiqueta NFC",
+    "nfc_emv_type_card": "Tarjeta EMV",
+    "nfc_enable_instruction": "Activa NFC en los ajustes del teléfono",
+    "nfc_enabled": "Habilitado",
+    "nfc_enter_name": "Ingresa el nombre de la etiqueta",
+    "nfc_error_empty_name": "Ingresa el nombre de la etiqueta",
+    "nfc_error_invalid_url": "Ingresa una URL válida",
+    "nfc_exit_edit_mode": "Salir del modo de edición",
+    "nfc_go": "Ir",
+    "nfc_hce_not_supported": "HCE no es compatible con este dispositivo.",
+    "nfc_hce_ready": "NFC Forum Tipo 4 · acerca el teléfono a un lector",
+    "nfc_hide_hex": "Ocultar HEX",
+    "nfc_history": "Historial",
+    "nfc_info_title": "Información de la etiqueta",
+    "nfc_label_email": "Correo",
+    "nfc_label_email_subject": "Asunto (opcional)",
+    "nfc_label_name": "Nombre",
+    "nfc_label_plain_text": "Texto",
+    "nfc_label_ssid": "SSID (nombre de la red)",
+    "nfc_label_wifi_password": "Contraseña de Wi‑Fi",
+    "nfc_loading": "Cargando...",
+    "nfc_memory_size": "Tamaño de memoria",
+    "nfc_new_tag": "Nueva etiqueta NFC",
+    "nfc_next": "Siguiente",
+    "nfc_no": "No",
+    "nfc_no_tags": "Aún no tienes etiquetas NFC",
+    "nfc_open_payment_settings": "Abrir los ajustes de pago NFC",
+    "nfc_open_settings": "Ajustes",
+    "nfc_password": "Protección con contraseña",
+    "nfc_present_to_reader": "Acerca el teléfono al lector.",
+    "nfc_prompt_enable": "Activa NFC en los ajustes",
+    "nfc_read": "Leer etiqueta",
+    "nfc_read_description": "Lee una etiqueta NFC y muestra toda la información",
+    "nfc_read_title": "Leer etiqueta",
+    "nfc_readonly": "Solo lectura",
+    "nfc_record_type": "Tipo de registro",
+    "nfc_retry": "Reintentar",
+    "nfc_saved_message": "Etiqueta guardada en la sección «Emulación NFC»",
+    "nfc_saved_title": "Etiqueta guardada",
+    "nfc_section_analysis": "Análisis de etiqueta",
+    "nfc_section_emv": "Tarjeta bancaria",
+    "nfc_section_link": "Enlace en la etiqueta",
+    "nfc_section_main": "Información principal",
+    "nfc_set_default_payment": "Establece Dolphy como app de pago predeterminada.",
+    "nfc_show_hex": "Mostrar HEX",
+    "nfc_status_disabled": "NFC está apagado",
+    "nfc_tag_label_unknown": "etiqueta",
+    "nfc_tag_not_found": "Etiqueta no encontrada",
+    "nfc_technologies": "Tecnologías",
+    "nfc_tool_erase_desc": "Borra los datos NDEF del usuario en una etiqueta con permiso de escritura",
+    "nfc_tool_erase_title": "Borrar etiqueta NFC",
+    "nfc_tools": "Herramientas NFC",
+    "nfc_tools_description": "Herramientas de etiquetas NFC",
+    "nfc_troll_description": "Biblioteca de etiquetas NFC sencillas con enlaces",
+    "nfc_trolls": "Etiquetas NFC",
+    "nfc_type": "Tipo",
+    "nfc_uid": "UID (hex)",
+    "nfc_unavailable": "NFC no disponible",
+    "nfc_unknown": "Desconocido",
+    "nfc_verdict": "Veredicto",
+    "nfc_waiting": "Esperando NFC...",
+    "nfc_writable": "Escribible",
+    "nfc_write_add_from_contacts": "Elegir de los contactos",
+    "nfc_write_add_from_contacts_desc": "Elige de tu libreta de direcciones",
+    "nfc_write_add_phone": "Añadir número de teléfono",
+    "nfc_write_add_phone_desc": "Ingresa el número manualmente",
+    "nfc_write_contact_title": "Contacto en la etiqueta",
+    "nfc_write_enter_phone_title": "Ingresa el número de teléfono",
+    "nfc_write_failed": "La operación falló",
+    "nfc_write_menu_title": "Escribir en etiqueta NFC",
+    "nfc_write_pick_type": "Elige qué escribir",
+    "nfc_write_title": "Escribir en la etiqueta",
+    "nfc_write_type_contact": "Contacto",
+    "nfc_write_type_contact_desc": "Número de teléfono o vCard",
+    "nfc_write_type_email": "Correo",
+    "nfc_write_type_email_desc": "Abrir redacción en la app de correo",
+    "nfc_write_type_text": "Texto sin formato",
+    "nfc_write_type_text_desc": "Texto arbitrario",
+    "nfc_write_type_url_desc": "Abrir un enlace al escanear",
+    "nfc_write_type_wifi": "Red Wi‑Fi",
+    "nfc_write_type_wifi_desc": "SSID y contraseña (registro de texto)",
+    "nfc_yes": "Sí",
+    "nrf_advertised_count": "Servicios anunciados (%d)",
+    "nrf_audio": "Audio",
+    "nrf_battery": "Batería",
+    "nrf_battery_level": "Nivel de batería",
+    "nrf_bluetooth_off_message": "Activa Bluetooth para descubrir dispositivos cercanos",
+    "nrf_bluetooth_off_title": "Bluetooth está apagado",
+    "nrf_capabilities": "Capacidades",
+    "nrf_characteristics_count": "%d características",
+    "nrf_connectable": "Conectable",
+    "nrf_disconnect": "Desconectar",
+    "nrf_filter_known_vendors": "Fabricantes conocidos",
+    "nrf_filter_named_only": "Solo con nombre",
+    "nrf_gatt_count": "Servicios GATT (%d)",
+    "nrf_keyboard": "Teclado",
+    "nrf_last_seen": "Visto por última vez",
+    "nrf_last_seen_hours": "hace %1$d h",
+    "nrf_last_seen_minutes": "hace %1$d min",
+    "nrf_last_seen_now": "justo ahora",
+    "nrf_last_seen_seconds": "hace %1$d s",
+    "nrf_mac": "Dirección MAC",
+    "nrf_more_services": "%d servicios más",
+    "nrf_profile": "Perfil",
+    "nrf_scanner_all": "Todos",
+    "nrf_scanner_beacon": "Beacon",
+    "nrf_scanner_brand_name": "Nombre de marca",
+    "nrf_scanner_bypass_1": "Bypass 1...",
+    "nrf_scanner_bypass_2": "Bypass 2...",
+    "nrf_scanner_bypass_3": "Bypass 3...",
+    "nrf_scanner_classic": "Classic",
+    "nrf_scanner_connect": "Conectar",
+    "nrf_scanner_connecting": "Conectando...",
+    "nrf_scanner_description": "Descubrimiento avanzado de dispositivos Bluetooth",
+    "nrf_scanner_device_type": "Tipo de dispositivo",
+    "nrf_scanner_error": "Error de conexión",
+    "nrf_scanner_fast_pair": "Fast Pair",
+    "nrf_scanner_found": "Encontrados: %d dispositivos",
+    "nrf_scanner_idle": "Inactivo",
+    "nrf_scanner_mac_address": "Dirección MAC",
+    "nrf_scanner_manufacturer": "Fabricante",
+    "nrf_scanner_no_devices": "No se encontraron dispositivos",
+    "nrf_scanner_scanning": "Escaneando...",
+    "nrf_scanner_services": "Servicios",
+    "nrf_scanner_signal_strength": "Intensidad de señal",
+    "nrf_scanner_start": "Iniciar escaneo",
+    "nrf_scanner_stop": "Detener escaneo",
+    "nrf_scanner_success": "Conexión exitosa",
+    "nrf_scanner_tap_to_start": "Toca «Iniciar escaneo» para comenzar",
+    "nrf_scanner_title": "Escáner NRF",
+    "nrf_scanner_vulnerable": "Vulnerable",
+    "nrf_scans": "Apariciones: %1$d",
+    "nrf_signal": "Intensidad de señal",
+    "nrf_signal_excellent": "Excelente",
+    "nrf_signal_fair": "Regular",
+    "nrf_signal_good": "Buena",
+    "nrf_signal_very_weak": "Muy débil",
+    "nrf_signal_weak": "Débil",
+    "nrf_sort_name": "Por nombre",
+    "nrf_sort_signal": "Por señal",
+    "nrf_tx_power": "Potencia Tx",
+    "nrf_type": "Tipo de dispositivo",
+    "nrf_unknown": "Desconocido",
+    "nrf_unknown_device": "Dispositivo desconocido",
+    "nrf_vendor": "Fabricante",
+    "ok": "Aceptar",
+    "onboarding_in_dolphy": "a Dolphy!",
+    "onboarding_next": "Siguiente",
+    "onboarding_tagline": "Control remoto\nuniversal",
+    "onboarding_welcome": "Bienvenido",
+    "open": "Abrir",
+    "other_bad_usb": "USB HID",
+    "other_bad_usb_desc": "Script Ducky · Gadget USB HID (root)",
+    "other_dolphy_chat_desc": "Chat BLE con otros usuarios de Dolphy",
+    "other_hid": "Teclado HID",
+    "other_hid_desc": "Emula un teclado/mouse Bluetooth inalámbrico",
+    "other_ir_flipper": "Controles IR (Flipper)",
+    "other_ir_flipper_desc": "Base de datos de controles IR de Flipper-IRDB-main",
+    "other_ir_jammer": "Inhibidor IR",
+    "other_ir_jammer_desc": "Impide que otros controlen con su control remoto tu dispositivo inhibido",
+    "other_ir_storm": "TV Be Gone",
+    "other_ir_storm_desc": "Envía señales de apagado a todas las TV",
+    "other_ir_tv": "Controles IR (TV)",
+    "other_ir_tv_desc": "Base de datos de controles IR de la carpeta TV (la mejor base de datos IR)",
+    "other_ir_universal": "Controles remotos universales",
+    "other_ir_universal_desc": "TV, aires acondicionados, audio, proyectores (de flipperzero-firmware-dev)",
+    "other_network_hub": "Centro de diagnóstico de red",
+    "other_network_hub_desc": "Pruebas de estrés seguras de tu propia infraestructura de red y validación de la estabilidad de tu enlace bajo carga extrema.",
+    "other_nfc": "Herramientas NFC",
+    "other_nfc_desc": "Herramientas de etiquetas NFC",
+    "other_qr_tools": "Herramientas QR",
+    "other_qr_tools_desc": "Generación de códigos QR y control de audio local",
+    "other_scanners": "Escáneres",
+    "other_scanners_desc": "Radar de EE. UU. y detector de dispositivos BLE/Wi-Fi",
+    "other_serial": "Terminal serie",
+    "other_serial_desc": "Puente UART mediante USB-OTG o puertos integrados (requiere root)",
+    "other_title": "Funciones adicionales",
+    "other_whisperpair": "Whisper Pair",
+    "other_whisperpair_desc": "Intercepta bocinas y audífonos Bluetooth",
+    "pabout_body_bluetooth": "api.getAndroid() ofrece publicidad, cliente/servidor GATT, RFCOMM, vinculación y detalles del adaptador. api.getDevice() ofrece escaneo BLE, capacidades de hardware y operaciones del sistema.",
+    "pabout_body_hook_modes": "replace cambia la pantalla, overlay dibuja una capa libre encima, top y bottom añaden un panel Material 3 y fab añade una acción flotante compacta. Las máscaras de ruta admiten *, p. ej. ir_* u other/*.",
+    "pabout_body_hooks": "hook_screen() añade una superposición, un FAB o reemplaza por completo la pantalla original. hook_action() intercepta operaciones con nombre y puede modificar los datos, gestionarlas o cancelar la acción. provide_service() instala una nueva implementación de una capacidad del sistema con prioridad y una alternativa original.",
+    "pabout_body_root": "api.getContext(), api.getApplicationContext(), api.getClassLoader(), api.getAndroid() y api.getDevice() devuelven objetos Java reales de Dolphy. Los comandos están disponibles mediante api.shellExec(), api.rootExec(), api.shizukuExec() y api.smartExec().",
+    "pabout_body_trusted": "Un plugin de Python se ejecuta dentro del proceso de Dolphy y puede obtener permisos de la app, datos internos, Root y Shizuku. Instala solo código que hayas leído o en el que confíes plenamente.",
+    "pabout_body_wifi": "Están disponibles los resultados de escaneo Wi-Fi, interfaces, DHCP, canales, NSD, sockets, HTTP y acceso directo al WifiManager de Android. Root y Shizuku desbloquean las herramientas de red del sistema del dispositivo.",
+    "pabout_section_full_access": "Acceso completo",
+    "pabout_section_hooking": "Enganche de la app",
+    "pabout_section_minimal": "Plugin mínimo",
+    "pabout_section_radio": "Interfaces de radio",
+    "pabout_section_state": "Estado y ajustes",
+    "pabout_title_bluetooth": "Bluetooth y BLE",
+    "pabout_title_hook_modes": "Modos de enganche de pantalla",
+    "pabout_title_hooks": "Pantallas, acciones y servicios",
+    "pabout_title_root": "Android, Root y Shizuku",
+    "pabout_title_trusted": "Modelo de confianza",
+    "pabout_title_wifi": "Wi-Fi y redes",
+    "passport_bad_hid": "Scripts BAD HID ejecutados",
+    "passport_butthurt": "Butthurt",
+    "passport_icounter": "XP (icounter)",
+    "passport_ir_send": "Señales IR enviadas",
+    "passport_level": "Nivel",
+    "passport_level_up_pending": "Subida de nivel pendiente",
+    "passport_max_level": "NIVEL MÁXIMO",
+    "passport_mood": "Ánimo",
+    "passport_name_label": "Nombre",
+    "passport_name_limit_hint": "Hasta 25 caracteres",
+    "passport_nfc_emulate": "Emulaciones NFC iniciadas",
+    "passport_nfc_read": "Tarjetas NFC leídas",
+    "passport_rename_title": "Renombrar",
+    "passport_stats": "Pasaporte: estadísticas",
+    "passport_title": "Pasaporte",
+    "passport_xp": "XP para subir de nivel",
+    "plugin_about_guide_body": "Un plugin es un único archivo de texto Python .dolphyplugin. Impórtalo desde Ajustes → General → Plugins → Elegir archivo.\n\nLos plugins pueden crear pantallas Material 3 Expressive, añadir módulos, usar Bluetooth, Wi-Fi, NFC, IR, USB, archivos, redes, Root, Shizuku y Shell, importar clases Java de Android y acceder a las partes internas de Dolphy.",
+    "plugin_about_guide_title": "Guía del autor",
+    "plugin_about_title": "Acerca de los plugins",
+    "plugin_ask_download_body": "Cuando está desactivado, todos los archivos de los plugins se descargarán automáticamente",
+    "plugin_ask_download_title": "Preguntar antes de que los plugins descarguen archivos",
+    "plugin_auto_safe_mode_body": "Si la app falla mientras se ejecutan plugins, el modo seguro se activa solo en el siguiente inicio para que el culpable quede deshabilitado",
+    "plugin_auto_safe_mode_title": "Activar el modo seguro automáticamente tras fallos",
+    "plugin_auto_update_body": "Actualizar los plugins instalados a las versiones más recientes del catálogo",
+    "plugin_auto_update_title": "Actualización automática desde la tienda",
+    "plugin_capability_ble_spam": "Modos BLE Spam personalizados",
+    "plugin_capability_bluetooth": "Bluetooth y BLE",
+    "plugin_capability_dex": "Carga de DEX y acceso a clases",
+    "plugin_capability_download": "Descargas de archivos",
+    "plugin_capability_files": "Archivos y recursos del plugin",
+    "plugin_capability_hooks": "Modificación de pantalla y lógica",
+    "plugin_capability_infrared": "Transmisor infrarrojo",
+    "plugin_capability_network": "Solicitudes de red",
+    "plugin_capability_root": "Root",
+    "plugin_capability_shell": "Comandos de shell",
+    "plugin_capability_shizuku": "Shizuku",
+    "plugin_capability_usb": "USB y Bad HID",
+    "plugin_capability_wifi": "Wi‑Fi",
+    "plugin_delete": "Eliminar",
+    "plugin_documentation_site": "Sitio web de documentación",
+    "plugin_download_allow": "Permitir",
+    "plugin_download_deny": "Denegar",
+    "plugin_download_permission_body": "El plugin %1$s solicita permiso para descargar %2$d archivos (%3$s).",
+    "plugin_download_permission_title": "Descarga de archivos",
+    "plugin_download_unknown_size": "tamaño desconocido",
+    "plugin_empty_center": "Aún no tienes plugins instalados",
+    "plugin_host_empty_screen": "Pantalla vacía",
+    "plugin_host_not_installed": "El plugin «%1$s» no está instalado.\nImporta un archivo .dolphyplugin desde el Administrador de plugins.",
+    "plugin_host_title": "Plugin",
+    "plugin_manager_about": "Más información",
+    "plugin_manager_card_body": "Un único archivo de texto .dolphyplugin: pantallas personalizadas, Bluetooth, Wi-Fi, NFC, IR, USB, Root, Shizuku, Shell y acceso directo a la API de Android.",
+    "plugin_manager_card_title": "Plugins de Python para Dolphy",
+    "plugin_manager_empty": "Aún no hay plugins. Elige un archivo .dolphyplugin arriba.",
+    "plugin_manager_error": "Error: %1$s",
+    "plugin_manager_installed": "Instalado",
+    "plugin_manager_installed_msg": "Instalado: %1$s",
+    "plugin_manager_installed_toast": "Plugin %1$s instalado",
+    "plugin_manager_pick_file": "Elegir archivo",
+    "plugin_manager_title": "Plugins",
+    "plugin_open_with_hint": "Abre el archivo del plugin con «Abrir con» y selecciona Dolphy para instalarlo",
+    "plugin_pin": "Fijar",
+    "plugin_preview_about": "Acerca de este plugin",
+    "plugin_preview_author": "Desarrollador",
+    "plugin_preview_details": "Detalles",
+    "plugin_preview_file": "Archivo",
+    "plugin_preview_identifier": "Identificador",
+    "plugin_preview_install": "Instalar",
+    "plugin_preview_install_error": "Error de instalación: %1$s",
+    "plugin_preview_install_success": "Plugin instalado",
+    "plugin_preview_installed": "Instalado",
+    "plugin_preview_invalid": "No se pudo abrir el plugin",
+    "plugin_preview_no_description": "El desarrollador no proporcionó una descripción.",
+    "plugin_preview_permissions": "Capacidades y acceso",
+    "plugin_preview_permissions_none": "No se detectaron capacidades especiales en el código",
+    "plugin_preview_security": "Acceso completo",
+    "plugin_preview_security_body": "El plugin se ejecuta dentro de Dolphy y puede usar los permisos de la app, las API de Android, Bluetooth, Wi-Fi, USB, Root y Shizuku. Instala solo archivos de desarrolladores en los que confíes.",
+    "plugin_preview_size": "Tamaño",
+    "plugin_preview_title": "Plugin de Dolphy",
+    "plugin_preview_update": "Actualizar",
+    "plugin_safe_mode_copy_log": "Copiar registro",
+    "plugin_safe_mode_crash_body": "El modo seguro está activado y tus plugins se han deshabilitado.",
+    "plugin_safe_mode_crash_title": "La app se cerró por un error de un plugin",
+    "plugin_safe_mode_disable": "Desactivar el modo seguro",
+    "plugin_safe_mode_enabled": "Todos los plugins están deshabilitados",
+    "plugin_safe_mode_log_copied": "Registro copiado",
+    "plugin_safe_mode_on": "activado",
+    "plugin_safe_mode_title": "Modo seguro",
+    "plugin_security_section": "SEGURIDAD",
+    "plugin_settings_title": "Ajustes del plugin",
+    "plugin_share": "Compartir",
+    "plugin_store_section": "Tienda",
+    "plugin_system_warning_countdown": "Aceptar (%1$d)",
+    "plugin_system_warning_text": "Esta versión introduce un potente sistema de plugins con gran libertad de acción. El precio de esa libertad y de su amplia capacidad es la seguridad. Instala plugins solo de fuentes de confianza y revísalos en busca de código malicioso. El desarrollador no se hace responsable de los daños causados por código malicioso en un plugin de usuario.",
+    "plugin_system_warning_title": "Sistema de plugins de Dolphy 2.5",
+    "plugin_translate_body": "Traduce los nombres y descripciones de los plugins a tu idioma",
+    "plugin_translate_title": "Traducción de plugins en línea",
+    "plugin_unpin": "Desfijar",
+    "pmanager_import_plugin": "Importar plugin",
+    "pmanager_plugin_store": "Tienda de plugins",
+    "print_accepted": "La impresora aceptó el trabajo%s",
+    "print_certificate_error": "El certificado de la impresora no es de confianza",
+    "print_connection_error": "No se puede conectar a la impresora",
+    "print_invalid_address": "Dirección de impresora no válida",
+    "print_timeout": "La respuesta de la impresora agotó el tiempo de espera",
+    "printer_action_admin": "Panel de administración",
+    "printer_action_change_msg": "Cambiar mensaje",
+    "printer_action_flood": "Inundar impresión",
+    "printer_action_storm": "Tormenta",
+    "printer_actions": "Acciones",
+    "printer_apply": "Aplicar",
+    "printer_available": "Impresoras disponibles",
+    "printer_connect": "Conectar",
+    "printer_connected_brand": "Conectado • %s",
+    "printer_copying_pwd": "Copiando contraseña...",
+    "printer_dialog_msg_label": "Mensaje",
+    "printer_dialog_title": "Mensaje en la pantalla de la impresora",
+    "printer_disconnect": "Desconectar",
+    "printer_grant_perm": "Conceder permiso",
+    "printer_ip_gateway": "IP: %s",
+    "printer_location_perm": "Se requiere el permiso de ubicación para buscar impresoras Wi-Fi.",
+    "printer_not_found": "No se encontraron impresoras",
+    "printer_opening_wifi": "Abriendo los ajustes de Wi-Fi",
+    "printer_password_label": "Contraseña de la impresora",
+    "printer_retry": "Intentar de nuevo",
+    "privacy_bt_rename_tip": "Recomendamos renombrar tu dispositivo Bluetooth con algo discreto para mayor privacidad.",
+    "privacy_for_anonymity": "Para el anonimato",
+    "privacy_step_bt_settings": "Abrir los ajustes de Bluetooth",
+    "privacy_step_copy_name": "Copiar el nombre invisible",
+    "privacy_step_rename": "Renombrar el dispositivo",
+    "psafe_clipboard_label": "Registro de fallos del plugin de Dolphy",
+    "qr_audio_spoofer": "QR Audio Spoofer",
+    "qr_audio_spoofer_desc": "Reproduce sonidos mediante QR dentro de la red local",
+    "qr_audio_spoofer_help": "Conecta ambos dispositivos a la misma red local, inicia el servidor y abre el código QR en el otro dispositivo. El enlace no está disponible desde internet.",
+    "qr_audio_spoofer_title": "QR Audio Spoofer",
+    "qr_connected": "¡Dispositivo conectado!",
+    "qr_generator_desc": "Crea y guarda tus códigos QR",
+    "qr_generator_main_title": "Generador de QR",
+    "qr_generator_title": "Generador de códigos QR",
+    "qr_link_or_text": "Enlace o texto",
+    "qr_log_1": "El servidor ya se está ejecutando en el puerto %1$s",
+    "qr_log_10": "Servidor iniciado en el puerto %1$s; verificación de estado superada",
+    "qr_log_11": "Falló el puerto %1$s: %2$s: %3$s",
+    "qr_log_12": "No se pudo iniciar el servidor; no hay puertos disponibles",
+    "qr_log_13": "Error de HTML: %1$s",
+    "qr_log_14": "Servidor local detenido",
+    "qr_log_2": "Iniciando Netty en el puerto %1$s…",
+    "qr_log_3": "Conexión no local rechazada: %1$s",
+    "qr_log_4": "Error de audio: %1$s",
+    "qr_log_5": "Página conectada (WS): %1$s, id=%2$s",
+    "qr_log_6": "Visita a la página: %1$s",
+    "qr_log_7": "Entrada: %1$s",
+    "qr_log_8": "Página desconectada: %1$s",
+    "qr_log_9": "Falló la verificación de estado en el puerto %1$s; probando otro puerto…",
+    "qr_name_label": "Nombre",
+    "qr_new_qr": "Nuevo código QR",
+    "qr_no_saved_qrs": "No hay códigos QR guardados",
+    "qr_notice_1": "No se puede leer el archivo",
+    "qr_notice_10": "Conéctate a Wi-Fi, Ethernet o un punto de acceso e inténtalo de nuevo",
+    "qr_notice_11": "No se usa alojamiento en internet",
+    "qr_notice_12": "Iniciando el servidor local…",
+    "qr_notice_13": "Modo de red local",
+    "qr_notice_14": "Los servidores y túneles externos están deshabilitados",
+    "qr_notice_15": "No se pudo iniciar el servidor local",
+    "qr_notice_16": "Los puertos 8080–8110 están ocupados o falló la verificación de estado",
+    "qr_notice_17": "El servidor local está listo: %1$s",
+    "qr_notice_18": "Este enlace QR solo está disponible en esta red local",
+    "qr_notice_19": "Error: %1$s",
+    "qr_notice_2": "El HTML está vacío",
+    "qr_notice_20": "Servidor detenido",
+    "qr_notice_3": "HTML importado: %1$s (%2$s caracteres)",
+    "qr_notice_4": "Falló la importación de HTML: %1$s",
+    "qr_notice_5": "Audio añadido: %1$s",
+    "qr_notice_6": "Falló la importación de audio: %1$s",
+    "qr_notice_7": "Primero importa un archivo HTML",
+    "qr_notice_8": "El servidor local ya se está ejecutando",
+    "qr_notice_9": "La red local no está disponible",
+    "qr_play_android_msg": "Mensaje de Android",
+    "qr_play_ios_msg": "Mensaje de iOS",
+    "qr_scan_me": "Escanéame",
+    "qr_server_running": "En ejecución",
+    "qr_server_status": "Estado del servidor:",
+    "qr_server_stopped": "Detenido",
+    "qr_service_active": "El servidor local se está ejecutando en segundo plano",
+    "qr_start_server": "Iniciar servidor",
+    "qr_start_server_hint": "Toca el botón para iniciar el servidor",
+    "qr_stop_server": "Detener servidor",
+    "qr_terminal_logs": "Registros de la terminal",
+    "qr_tools": "Herramientas QR",
+    "qr_waiting_connection": "Esperando conexión...",
+    "retry": "Reintentar",
+    "root_required_message": "Esta función requiere permisos de root",
+    "root_required_title": "No se encontraron permisos de root",
+    "save": "Guardar",
+    "scan": "Escanear",
+    "scooter_connect": "Conectar",
+    "scooter_disconnect": "Desconectar",
+    "scooter_empty": "No se encontraron scooters. Inicia un escaneo cerca de un dispositivo.",
+    "scooter_hack_card_desc": "Escanea Xiaomi/Ninebot, bloquea/desbloquea, pitido, batería",
+    "scooter_lock": "Bloquear",
+    "scooter_perm_denied": "Se requieren permisos de Bluetooth y ubicación",
+    "scooter_scan_start": "Escanear scooters",
+    "scooter_scan_stop": "Detener escaneo",
+    "scooter_scanning": "Buscando scooters…",
+    "scooter_sound": "Sonido",
+    "scooter_unlock": "Desbloquear",
+    "section_all_functions": "Todas las funciones",
+    "section_pinned": "Fijadas",
+    "section_recommended": "Recomendadas",
+    "settings_about_footer": "Dolphy (%1$s)\nAlgunos recursos y código derivan del proyecto de firmware de Flipper Zero.\nCopyright © Flipper Devices.\nBajo licencia GNU GPL.",
+    "settings_accent_color": "Color de acento",
+    "settings_app_style": "Estilo",
+    "settings_app_style_new": "Compacto",
+    "settings_app_style_old": "Estándar",
+    "settings_bottom_panel": "Panel inferior",
+    "settings_custom_color": "Color personalizado",
+    "settings_cyclic_dolphin_animation": "Animación cíclica",
+    "settings_developer": "Desarrollador @oosthemes",
+    "settings_fab_choose": "Elige una acción del FAB",
+    "settings_fab_functions_summary": "Abrir la pantalla completa de Funciones",
+    "settings_fab_summary": "Acción que abre el botón central del panel inferior",
+    "settings_flipper_font": "Fuente Flipper",
+    "settings_functions_menu_containers": "Contenedores",
+    "settings_functions_menu_tiles": "Mosaicos",
+    "settings_functions_menu_view": "Vista del menú de funciones",
+    "settings_functions_tile_size": "Tamaño del mosaico",
+    "settings_general": "General",
+    "settings_hid_config": "Configuración HID",
+    "settings_hid_sensitivity_move": "Sensibilidad del panel táctil (movimiento)",
+    "settings_hid_sensitivity_scroll": "Sensibilidad del panel táctil (desplazamiento)",
+    "settings_interface": "Interfaz",
+    "settings_language": "Idioma",
+    "settings_liquid_glass": "Liquid Glass",
+    "settings_liquid_glass_buttons": "Botones",
+    "settings_liquid_glass_nav": "Navegación",
+    "settings_liquid_glass_summary": "Barra de navegación de vidrio (LiquidBottomTabs)",
+    "settings_liquid_glass_topbars": "Barras superiores",
+    "settings_name_spoofing": "Suplantación del nombre BT",
+    "settings_performance_mode": "Modo de rendimiento",
+    "settings_performance_mode_auto_enabled": "Modo de rendimiento activado en este dispositivo; puedes desactivarlo en los ajustes",
+    "settings_performance_mode_summary": "Desactiva el desenfoque, el fondo animado y los efectos pesados en dispositivos de gama baja",
+    "settings_personalisation": "Personalización",
+    "settings_plugins": "Plugins",
+    "settings_plugins_summary": "Administrar e instalar plugins",
+    "settings_quick_startup": "Inicio rápido",
+    "settings_security": "Seguridad",
+    "settings_spoofed_name": "Identidad suplantada",
+    "settings_spoofed_name_summary": "Nombre visible para otros dispositivos",
+    "settings_theme": "Tema",
+    "settings_theme_auto": "Automático",
+    "settings_theme_dark": "Oscuro",
+    "settings_theme_light": "Claro",
+    "settings_title": "Ajustes",
+    "settings_ui_scale": "Escala de la interfaz",
+    "smarttv_cast_card_description": "Transmite video a la TV mediante Chromecast, DIAL, DLNA y UPnP",
+    "smarttv_cast_choose_video": "Elegir video",
+    "smarttv_cast_devices": "Dispositivos (%d)",
+    "smarttv_cast_no_devices": "No se encontraron dispositivos",
+    "smarttv_cast_open_local_site": "Abrir sitio local",
+    "smarttv_cast_pick_video": "Elige un video para enviar a tu TV",
+    "smarttv_cast_title": "SmartTV Cast",
+    "spam_status_current": "Activo: %s",
+    "spam_status_empty": "Activo: —",
+    "start": "Iniciar",
+    "stop": "Detener",
+    "store_active_source": "Fuente: %1$s",
+    "store_add_source": "Añadir fuente",
+    "store_all_plugins": "Todos los plugins",
+    "store_author": "Autor",
+    "store_delete": "Eliminar",
+    "store_description": "Descripción",
+    "store_discussion": "Discusión / publicación",
+    "store_empty_source": "No hay plugins en esta fuente",
+    "store_error_catalog": "No se pudo cargar el catálogo",
+    "store_error_file_too_large": "El archivo es demasiado grande",
+    "store_error_install": "Falló la instalación",
+    "store_error_not_ready": "La tienda no está lista",
+    "store_error_parse_url": "No se pudo analizar la URL",
+    "store_error_prefix": "Error: %1$s",
+    "store_error_redirect_no_url": "Redirección sin URL (%1$d)",
+    "store_error_too_many_redirects": "Demasiadas redirecciones",
+    "store_featured": "Destacados",
+    "store_file": "Archivo",
+    "store_install": "Instalar",
+    "store_install_success": "«%1$s» instalado",
+    "store_installed": "Instalado",
+    "store_installed_version": "Versión instalada v%1$s",
+    "store_installing": "Instalando…",
+    "store_invalid_link": "Enlace no válido",
+    "store_items_count": "%1$d elementos",
+    "store_loading_catalog": "Cargando catálogo…",
+    "store_no_description": "Sin descripción.",
+    "store_no_plugin_selected": "Ningún plugin seleccionado",
+    "store_nothing_found": "No se encontró nada",
+    "store_open_link_failed": "No se pudo abrir el enlace",
+    "store_plugin": "Plugin",
+    "store_refresh": "Actualizar",
+    "store_reinstall": "Reinstalar",
+    "store_retry": "Reintentar",
+    "store_search_hint": "Buscar plugins",
+    "store_source": "Fuente",
+    "store_source_connected": "Fuente conectada: %1$s",
+    "store_source_input_hint": "github.com/propietario/repo o enlace a index.json",
+    "store_sources": "Fuentes",
+    "store_sources_hint": "Conecta un repositorio de GitHub que contenga un archivo index.json. Pega un enlace al repositorio, propietario/repo o un enlace directo a index.json.",
+    "store_sources_title": "Fuentes de plugins",
+    "store_title": "Tienda de plugins",
+    "store_update_available": "Actualización disponible",
+    "store_update_to_version": "Actualizar a v%1$s",
+    "store_updated": "Actualizado",
+    "store_version": "Versión",
+    "success": "Éxito",
+    "theme_mode_auto_desc": "Igual que el sistema",
+    "theme_mode_dark_desc": "Tema oscuro",
+    "theme_mode_light_desc": "Tema claro",
+    "theme_selection_title": "Tema",
+    "universal_db_empty": "La base de datos está vacía",
+    "universal_db_failed": "Falló la carga de la base de datos (ver logcat UniversalRemotes)",
+    "universal_desc_ac_ir": "Base de datos de flipperzero-firmware-dev: ac.ir",
+    "universal_desc_audio_ir": "Base de datos de flipperzero-firmware-dev: audio.ir",
+    "universal_desc_projector_ir": "Base de datos de flipperzero-firmware-dev: projector.ir",
+    "universal_desc_stacked": "Botones compartidos de todos los controles de la categoría «%s»",
+    "universal_desc_tv_ir": "Base de datos de flipperzero-firmware-dev: tv.ir",
+    "universal_error_unknown": "Error: %s",
+    "universal_files_list": "Archivos: %s",
+    "universal_files_missing": "No hay archivos de base de datos configurados.",
+    "universal_loading_signals": "Cargando señales...",
+    "universal_no_signals_for": "No hay señales de %1$s en la base de datos de %2$s. %3$s",
+    "universal_signal_count": "Señales en la base de datos: %d",
+    "universal_unknown": "desconocido",
+    "us_ble_detector": "Detector de BLE spam",
+    "us_ble_detector_desc": "Busca dispositivos Flipper Zero, BLE spammers y Wi-Fi deauther cercanos.",
+    "us_cat_beacon": "Señal de baliza/posicionamiento",
+    "us_cat_echo": "Eco/Reflexiones",
+    "us_cat_jammer": "Jammer (interferencia de banda ancha)",
+    "us_cat_noise": "Interferencia/Ruido",
+    "us_cat_repellent": "Repelente/Generador ultrasónico",
+    "us_cat_sensor": "Sensor/Radar ultrasónico",
+    "us_category_possible_suffix": "(posible)",
+    "us_detected": "Detectado:",
+    "us_mic_permission": "El escáner US requiere acceso al micrófono.",
+    "us_no_threats": "No se detectaron dispositivos Flipper Zero, BLE spammers ni Wi-Fi deauther",
+    "us_radar": "Radar US",
+    "us_radar_desc": "Permite ver alrededor: sensores de movimiento, radares y jammers",
+    "us_scan_description": "Escaneo de ultrasonido: 15–22 kHz (en tiempo real).",
+    "us_scan_duration": "El escaneo tardará ~6 segundos.",
+    "us_scan_warning": "La detección de la fuente es aproximada: el sistema ve energía en el rango de 15–22 kHz, por lo que son posibles falsos positivos cercanos.",
+    "us_scanning": "Buscando dispositivos...",
+    "us_wifi_bonjour_services_found": "Servicios Bonjour/DNS‑SD encontrados: %d",
+    "us_wifi_bonjour_services_label": "Servicios Bonjour / DNS‑SD",
+    "us_wifi_bonjour_services_none": "No se encontraron servicios",
+    "us_wifi_connect": "Conectar",
+    "us_wifi_connect_admin_message": "Conéctate a «%s» en los ajustes de Wi‑Fi.",
+    "us_wifi_connect_admin_title": "Red no conectada",
+    "us_wifi_connect_failed": "No se pudo conectar a la red",
+    "us_wifi_connecting": "Conectando…",
+    "us_wifi_device_network": "Dispositivo de red",
+    "us_wifi_device_other": "Servicio de otro dispositivo",
+    "us_wifi_device_printer": "Impresora / servicio de impresión",
+    "us_wifi_device_web": "Dispositivo web / interfaz de administración",
+    "us_wifi_enable_location_services": "Activa los servicios de ubicación",
+    "us_wifi_enter_wifi_password": "Ingresa la contraseña de Wi‑Fi",
+    "us_wifi_field_device_guess": "Dispositivo probable",
+    "us_wifi_field_frequency": "Frecuencia",
+    "us_wifi_field_gateway": "Puerta de enlace",
+    "us_wifi_field_router_mac": "MAC del router (BSSID)",
+    "us_wifi_field_rssi": "Intensidad de señal",
+    "us_wifi_field_security": "Seguridad",
+    "us_wifi_field_vendor": "Fabricante",
+    "us_wifi_grant_location": "Conceder ubicación",
+    "us_wifi_hidden_ssid": "(red oculta)",
+    "us_wifi_info_open": "Info",
+    "us_wifi_last_scan_ago": "hace %d s",
+    "us_wifi_location_services_disabled_message": "Para escanear redes Wi‑Fi, activa los servicios de ubicación (GPS/Red) en los ajustes del teléfono.",
+    "us_wifi_location_services_disabled_title": "Los servicios de ubicación están apagados",
+    "us_wifi_need_location": "El escaneo de Wi‑Fi requiere el permiso de ubicación.",
+    "us_wifi_need_location_services": "Los servicios de ubicación están apagados. Activa «Servicios de ubicación» para escanear Wi‑Fi.",
+    "us_wifi_no_networks": "No se encontraron redes",
+    "us_wifi_open_admin": "Abrir administración",
+    "us_wifi_open_wifi_settings": "Ir a ajustes",
+    "us_wifi_password_placeholder": "Contraseña",
+    "us_wifi_scanning": "Escaneando Wi‑Fi y DNS‑SD…",
+    "usb_ir_connected_desc": "El módulo IR USB-C externo está listo para transmitir comandos",
+    "usb_ir_connected_title": "Módulo IR conectado",
+    "welcome_dialog_btn_ok": "Entendido",
+    "welcome_dialog_btn_support": "Soporte",
+    "welcome_dialog_btn_tg": "Suscribirse a TG",
+    "welcome_dialog_text": "¡Tu Dolphy alcanzó el nivel 1!\n\nDolphy es una app gratuita de Android para pentesting móvil que no requiere permisos de root. ¡Te recomendamos suscribirte al canal de Telegram del desarrollador para no perderte las actualizaciones!",
+    "welcome_dialog_title": "Te damos la bienvenida a Dolphy",
+    "whisperpair_about_message": "Esta función es experimental y aún se está probando. Comparte tu experiencia en el chat del canal @oosthemes en Telegram para ayudar a mejorarla.",
+    "whisperpair_about_title": "Acerca de Whisper Pair",
+    "whisperpair_all_ble": "Todos los BLE",
+    "whisperpair_connecting": "Conectando...",
+    "whisperpair_connecting_ru": "Conectando...",
+    "whisperpair_error": "ERROR: %s",
+    "whisperpair_fast_pair": "Fast Pair",
+    "whisperpair_incompatible": "Posible incompatibilidad",
+    "whisperpair_intercept": "Interceptar",
+    "whisperpair_paired": "Dispositivos emparejados",
+    "whisperpair_paired_empty": "Aún no hay dispositivos emparejados en esta lista",
+    "whisperpair_paired_success": "¡EMPAREJADO! BR/EDR: %s",
+    "whisperpair_partial": "PARCIAL: %s",
+    "whisperpair_records": "Aquí aparecerán las grabaciones de tu micrófono desde los dispositivos emparejados",
+    "whisperpair_scanner": "Escáner de dispositivos",
+    "whisperpair_scanning_all": "Escaneando todos los BLE...",
+    "whisperpair_scanning_fast": "Escaneando Fast Pair...",
+    "whisperpair_stop": "Detener",
+    "whisperpair_tws_empty": "No se encontraron dispositivos. Haz que los audífonos sean detectables.",
+    "whisperpair_tws_hint": "Elige un dispositivo de audio. El emparejamiento y el enrutamiento de audio dependen del dispositivo y de la versión de Android.",
+    "whisperpair_tws_scanning": "Escaneando dispositivos Bluetooth…",
+    "whisperpair_tws_stopped": "Detenido",
+    "whisperpair_tws_title": "Herramientas de audio TWS",
+    "wifi_brute_force_active": "Fuerza bruta activa",
+    "wifi_brute_force_desc": "Habilita grupos de contraseñas para la fuerza bruta. Orden = orden de procesamiento.",
+    "wifi_brute_force_passwords": "Contraseñas para fuerza bruta",
+    "wifi_bruteforce_successful": "Fuerza bruta exitosa",
+    "wifi_import_passwords": "Importar desde .txt",
+    "wifi_password_brute": "Fuerza bruta de contraseñas",
+    "wifi_password_label": "CONTRASEÑA:",
+    "wifi_passwords_count": "%1$d contraseñas • %2$d válidas (>= 8 caracteres)",
+    "wifi_print_add": "Añadir",
+    "wifi_print_cancel": "Cancelar",
+    "wifi_print_change_file": "Elegir otro archivo",
+    "wifi_print_choose_file": "Elegir archivo",
+    "wifi_print_color": "Color",
+    "wifi_print_copies": "Copias",
+    "wifi_print_document": "Documento",
+    "wifi_print_document_desc": "Se admiten PDF, JPEG, PNG y WebP. Dolphy convierte el archivo a PWG Raster cuando es necesario.",
+    "wifi_print_hero_desc": "Descubre impresoras IPP, verifica sus capacidades y envía documentos directamente",
+    "wifi_print_hero_title": "Imprimir sin el diálogo del sistema",
+    "wifi_print_host": "Dirección IP o nombre de host",
+    "wifi_print_manual_title": "Añadir impresora IPP",
+    "wifi_print_no_printers": "No se encontraron impresoras",
+    "wifi_print_no_printers_desc": "Asegúrate de que el teléfono y la impresora estén conectados a la misma red Wi-Fi",
+    "wifi_print_orientation": "Orientación",
+    "wifi_print_paper": "Papel",
+    "wifi_print_path": "Ruta de la cola",
+    "wifi_print_port": "Puerto",
+    "wifi_print_print": "Imprimir",
+    "wifi_print_printer_info": "Impresora",
+    "wifi_print_quality": "Calidad",
+    "wifi_print_reading": "Leyendo las capacidades de la impresora…",
+    "wifi_print_scan": "Escanear",
+    "wifi_print_searching": "Buscando…",
+    "wifi_print_secure": "Conexión IPPS segura",
+    "wifi_print_sending": "Enviando…",
+    "wifi_print_settings": "Ajustes de impresión",
+    "wifi_print_sides": "Caras",
+    "wifi_print_test_page": "Imprimir página de prueba",
+    "wifi_print_title": "Impresión Wi-Fi",
+    "wifi_stress_test": "Prueba de estrés (UDP Flood)",
+    "wifi_testing": "Probando: %s",
+}
+
+LIB_TEXTS = {
+    "abc_action_bar_up_description": "Desplazarse hacia arriba",
+    "abc_action_mode_done": "Hecho",
+    "abc_capital_off": "DESACTIVADO",
+    "abc_capital_on": "ACTIVADO",
+    "abc_menu_alt_shortcut_label": "Alt +",
+    "abc_menu_ctrl_shortcut_label": "Ctrl +",
+    "abc_menu_delete_shortcut_label": "Suprimir",
+    "abc_menu_enter_shortcut_label": "Intro",
+    "abc_menu_function_shortcut_label": "Función +",
+    "abc_menu_meta_shortcut_label": "Meta +",
+    "abc_menu_shift_shortcut_label": "Mayús +",
+    "abc_menu_space_shortcut_label": "Espacio",
+    "abc_menu_sym_shortcut_label": "Sym +",
+    "abc_prepend_shortcut_label": "Menú +",
+    "abc_search_hint": "Buscar…",
+    "abc_searchview_description_clear": "Borrar consulta",
+    "abc_searchview_description_search": "Buscar",
+    "abc_searchview_description_submit": "Enviar consulta",
+    "abc_searchview_description_voice": "Búsqueda por voz",
+    "abc_toolbar_collapse_description": "Ocultar",
+    "androidx_compose_foundation_autofill": "Autocompletar",
+    "androidx_compose_ui_autofill": "Autocompletar",
+    "bottomsheet_action_collapse": "Ocultar la hoja inferior",
+    "bottomsheet_action_expand": "Mostrar la hoja inferior",
+    "bottomsheet_action_expand_halfway": "Desplegar hasta la mitad",
+    "bottomsheet_drag_handle_content_description": "Controlador de arrastre",
+    "call_notification_answer_action": "Responder",
+    "call_notification_answer_video_action": "Vídeo",
+    "call_notification_decline_action": "Rechazar",
+    "call_notification_hang_up_action": "Colgar",
+    "call_notification_incoming_text": "Llamada entrante",
+    "call_notification_ongoing_text": "Llamada en curso",
+    "call_notification_screening_text": "Filtrando una llamada entrante",
+    "cast_ad_label": "Anuncio",
+    "cast_casting_to_device": "Enviando a %1$s",
+    "cast_closed_captions": "Subtítulos",
+    "cast_closed_captions_unavailable": "Subtítulos no disponibles",
+    "cast_connecting_to_device": "Conectando a %1$s",
+    "cast_disconnect": "Desconectar",
+    "cast_dynamic_group_name_format": "%1$s y %2$d",
+    "cast_expanded_controller_ad_image_description": "Imagen que se muestra mientras el receptor de Google Cast reproduce un anuncio",
+    "cast_expanded_controller_ad_in_progress": "Anuncio en curso…",
+    "cast_expanded_controller_background_image": "Portada del álbum",
+    "cast_expanded_controller_live_head_description": "La posición actual es anterior a la transmisión en directo",
+    "cast_expanded_controller_live_stream_indicator": "Streaming en directo",
+    "cast_expanded_controller_loading": "Cargando…",
+    "cast_expanded_controller_skip_ad_label": "Saltar anuncio",
+    "cast_expanded_controller_skip_ad_text": "Podrás saltar el anuncio en %1$d…",
+    "cast_forward": "Avanzar",
+    "cast_forward_10": "Avanzar 10 segundos",
+    "cast_forward_30": "Avanzar 30 segundos",
+    "cast_live_label": "EN DIRECTO",
+    "cast_mute": "Silenciar",
+    "cast_notification_connected_message": "Conectado a %1$s",
+    "cast_notification_connecting_message": "Conectando a %1$s",
+    "cast_notification_default_channel_name": "Enviar",
+    "cast_notification_disconnect": "Desconectar",
+    "cast_pause": "Pausar",
+    "cast_play": "Reproducir",
+    "cast_rewind": "Rebobinar",
+    "cast_rewind_10": "Rebobinar 10 segundos",
+    "cast_rewind_30": "Rebobinar 30 segundos",
+    "cast_seek_bar": "Control para buscar posición de reproducción",
+    "cast_skip_next": "Saltar al siguiente elemento",
+    "cast_skip_prev": "Saltar al elemento anterior",
+    "cast_stop": "Detener",
+    "cast_stop_live_stream": "Detener streaming en directo",
+    "cast_tracks_chooser_dialog_cancel": "Cancelar",
+    "cast_tracks_chooser_dialog_closed_captions": "Subtítulos",
+    "cast_tracks_chooser_dialog_default_track_name": "Pista %1$d",
+    "cast_tracks_chooser_dialog_none": "Ninguna",
+    "cast_tracks_chooser_dialog_ok": "Aceptar",
+    "cast_tracks_chooser_dialog_subtitles": "Subtítulos",
+    "cast_unmute": "Activar sonido",
+    "character_counter_content_description": "Caracteres introducidos: %1$d de %2$d",
+    "character_counter_overflowed_content_description": "Límite de caracteres superado (%1$d de %2$d)",
+    "clear_text_end_icon_content_description": "Borrar texto",
+    "close_drawer": "Cerrar menú de navegación",
+    "close_sheet": "Cerrar hoja",
+    "common_google_play_services_enable_button": "Habilitar",
+    "common_google_play_services_enable_text": "%1$s no funcionará hasta que no habilites Servicios de Google Play.",
+    "common_google_play_services_enable_title": "Habilita Servicios de Google Play",
+    "common_google_play_services_install_button": "Instalar",
+    "common_google_play_services_install_text": "%1$s no se ejecutará si los Servicios de Google Play no están instalados en tu dispositivo.",
+    "common_google_play_services_install_title": "Descargar Servicios de Google Play",
+    "common_google_play_services_notification_channel_name": "Disponibilidad Servicios de Google Play",
+    "common_google_play_services_notification_ticker": "Error de Servicios de Google Play",
+    "common_google_play_services_unknown_issue": "La aplicación %1$s tiene problemas con los Servicios de Google Play. Vuelve a intentarlo.",
+    "common_google_play_services_unsupported_text": "No es posible ejecutar la aplicación %1$s sin los Servicios de Google Play, que no son compatibles con tu dispositivo.",
+    "common_google_play_services_update_button": "Actualizar",
+    "common_google_play_services_update_text": "%1$s no funcionará hasta que no actualices Servicios de Google Play.",
+    "common_google_play_services_update_title": "Actualiza Servicios de Google Play",
+    "common_google_play_services_updating_text": "%1$s no se ejecutará hasta que finalice la actualización en curso de Servicios de Google Play.",
+    "common_google_play_services_wear_update_text": "Se necesita una nueva versión de Servicios de Google Play. Se actualizará en breve.",
+    "common_open_on_phone": "Abrir en teléfono",
+    "common_signin_button_text": "Iniciar sesión",
+    "common_signin_button_text_long": "Iniciar sesión con Google",
+    "confirm_device_credential_password": "Usar contraseña",
+    "default_error_message": "Entrada no válida",
+    "default_error_msg": "Error desconocido",
+    "default_popup_window_title": "Ventana emergente",
+    "dropdown_menu": "Menú desplegable",
+    "error_a11y_label": "Error: no válida",
+    "exo_controls_cc_disabled_description": "Habilitar subtítulos",
+    "exo_controls_cc_enabled_description": "Inhabilitar subtítulos",
+    "exo_controls_fastforward_description": "Avanzar rápidamente",
+    "exo_controls_fullscreen_enter_description": "Activar pantalla completa",
+    "exo_controls_fullscreen_exit_description": "Salir de pantalla completa",
+    "exo_controls_hide": "Ocultar controles de jugador",
+    "exo_controls_next_description": "Siguiente",
+    "exo_controls_overflow_hide_description": "Ocultar ajustes adicionales",
+    "exo_controls_overflow_show_description": "Mostrar ajustes adicionales",
+    "exo_controls_pause_description": "Pausar",
+    "exo_controls_play_description": "Reproducir",
+    "exo_controls_playback_speed": "Velocidad",
+    "exo_controls_previous_description": "Anterior",
+    "exo_controls_repeat_all_description": "Modo actual: Repetir todo. Cambiar de modo.",
+    "exo_controls_repeat_off_description": "Modo actual: No repetir. Cambiar de modo.",
+    "exo_controls_repeat_one_description": "Modo actual: Repetir uno. Cambiar de modo.",
+    "exo_controls_rewind_description": "Rebobinar",
+    "exo_controls_seek_bar_description": "Progreso de reproducción",
+    "exo_controls_settings_description": "Ajustes",
+    "exo_controls_show": "Mostrar controles del reproductor",
+    "exo_controls_shuffle_off_description": "Habilitar modo aleatorio",
+    "exo_controls_shuffle_on_description": "Inhabilitar modo aleatorio",
+    "exo_controls_stop_description": "Detener",
+    "exo_controls_vr_description": "Modo RV",
+    "exo_download_completed": "Descarga de archivos completado",
+    "exo_download_description": "Descargar",
+    "exo_download_downloading": "Descargando",
+    "exo_download_failed": "No se ha podido descargar",
+    "exo_download_notification_channel_name": "Descargas",
+    "exo_download_paused": "Descargas pausadas",
+    "exo_download_paused_for_network": "Descargas en espera de red",
+    "exo_download_paused_for_wifi": "Descargas en espera de Wi-Fi",
+    "exo_download_removing": "Quitando descargas",
+    "exo_track_bitrate": "%1$.2f Mb/s",
+    "exo_track_resolution": "%1$d×%2$d",
+    "exo_track_role_alternate": "Alternativa",
+    "exo_track_role_commentary": "Comentarios",
+    "exo_track_role_supplementary": "Complementaria",
+    "exo_track_selection_auto": "Automático",
+    "exo_track_selection_none": "Ninguna",
+    "exo_track_selection_title_text": "Texto",
+    "exo_track_selection_title_video": "Vídeo",
+    "exo_track_stereo": "Estéreo",
+    "exo_track_surround": "Sonido envolvente",
+    "exo_track_surround_5_point_1": "Sonido envolvente 5.1",
+    "exo_track_surround_7_point_1": "Sonido envolvente 7.1",
+    "exo_track_unknown": "Desconocido",
+    "exo_track_unknown_name": "Desconocido (%1$s)",
+    "exposed_dropdown_menu_content_description": "Mostrar menú desplegable",
+    "fingerprint_dialog_touch_sensor": "Toca sensor huellas digitales",
+    "fingerprint_error_hw_not_available": "El hardware de huella digital no está disponible.",
+    "fingerprint_error_hw_not_present": "El dispositivo no tiene ningún sensor de huellas digitales",
+    "fingerprint_error_lockout": "Has realizado demasiados intentos. Vuelve a probar más tarde.",
+    "fingerprint_error_no_fingerprints": "No se ha registrado ninguna huella digital.",
+    "fingerprint_error_user_canceled": "El usuario ha cancelado la operación de huella digital.",
+    "fingerprint_not_recognized": "No se reconoce",
+    "generic_error_no_device_credential": "No se ha definido el PIN, el patrón o la contraseña.",
+    "generic_error_no_keyguard": "Este dispositivo no admite PINs, patrones ni contraseñas.",
+    "generic_error_user_canceled": "El usuario ha cancelado la autenticación.",
+    "ic_media_route_learn_more_accessibility": "Consulta cómo enviar contenido",
+    "icon_content_description": "Icono del cuadro de diálogo",
+    "in_progress": "En curso",
+    "indeterminate": "Marcado parcialmente",
+    "item_view_role_description": "Pestaña",
+    "m3_loading_indicator_content_description": "Cargando",
+    "m3c_bottom_sheet_collapse_description": "Contrae la hoja inferior",
+    "m3c_bottom_sheet_dismiss_description": "Cierra la hoja inferior",
+    "m3c_bottom_sheet_drag_handle_description": "Controlador de arrastre",
+    "m3c_bottom_sheet_expand_description": "Despliega la hoja inferior",
+    "m3c_bottom_sheet_pane_title": "Hoja inferior",
+    "m3c_button_group_more_options": "Más opciones",
+    "m3c_date_input_headline": "Fecha introducida",
+    "m3c_date_input_headline_description": "Fecha introducida: %1$s",
+    "m3c_date_input_invalid_for_pattern": "La fecha no coincide con el patrón esperado: %1$s",
+    "m3c_date_input_invalid_not_allowed": "Fecha no permitida: %1$s",
+    "m3c_date_input_invalid_year_range": "Fecha fuera del intervalo de años previsto: %1$s - %2$s",
+    "m3c_date_input_label": "Fecha",
+    "m3c_date_input_no_input_description": "No hay datos",
+    "m3c_date_input_title": "Seleccionar fecha",
+    "m3c_date_picker_headline": "Fecha seleccionada",
+    "m3c_date_picker_headline_description": "Seleccionado: %1$s",
+    "m3c_date_picker_navigate_to_year_description": "Ir al año %1$s",
+    "m3c_date_picker_no_selection_description": "No hay datos",
+    "m3c_date_picker_scroll_to_earlier_years": "Desplázate para ver los años anteriores",
+    "m3c_date_picker_scroll_to_later_years": "Desplázate para ver los años posteriores",
+    "m3c_date_picker_switch_to_calendar_mode": "Cambiar al modo de introducción de calendario",
+    "m3c_date_picker_switch_to_day_selection": "Desliza para seleccionar un año o toca para volver a seleccionar un día",
+    "m3c_date_picker_switch_to_input_mode": "Cambiar al modo de introducción de texto",
+    "m3c_date_picker_switch_to_next_month": "Cambiar al mes siguiente",
+    "m3c_date_picker_switch_to_previous_month": "Cambiar al mes anterior",
+    "m3c_date_picker_switch_to_year_selection": "Cambiar para seleccionar un año",
+    "m3c_date_picker_title": "Seleccionar fecha",
+    "m3c_date_picker_today_description": "Hoy",
+    "m3c_date_picker_year_picker_pane_title": "Selector de año visible",
+    "m3c_date_range_input_invalid_range_input": "El intervalo de fechas no es válido",
+    "m3c_date_range_input_title": "Introducir fechas",
+    "m3c_date_range_picker_day_in_range": "Dentro del intervalo",
+    "m3c_date_range_picker_end_headline": "Fecha de finalización",
+    "m3c_date_range_picker_scroll_to_next_month": "Desplázate para ver el mes siguiente",
+    "m3c_date_range_picker_scroll_to_previous_month": "Desplázate para ver el mes anterior",
+    "m3c_date_range_picker_start_headline": "Fecha de inicio",
+    "m3c_date_range_picker_title": "Seleccionar fechas",
+    "m3c_dialog": "Cuadro de diálogo",
+    "m3c_dropdown_menu_collapsed": "Contraído",
+    "m3c_dropdown_menu_expanded": "Desplegado",
+    "m3c_dropdown_menu_toggle": "Mostrar/ocultar menú desplegable",
+    "m3c_floating_toolbar_collapse": "Ocultar la barra de herramientas",
+    "m3c_floating_toolbar_expand": "Mostrar la barra de herramientas",
+    "m3c_floating_toolbar_more_options": "Más opciones",
+    "m3c_search_bar_search": "Buscar",
+    "m3c_snackbar_dismiss": "Cerrar",
+    "m3c_snackbar_pane_title": "Alerta",
+    "m3c_suggestions_available": "Sugerencias a continuación",
+    "m3c_time_input_dialog_title": "Introduce la hora",
+    "m3c_time_picker_am": "a. m.",
+    "m3c_time_picker_dialog_title": "Selecciona la hora",
+    "m3c_time_picker_hour": "Hora",
+    "m3c_time_picker_hour_24h_suffix": "%1$d horas",
+    "m3c_time_picker_hour_error": "La hora debe estar entre 1 y 12",
+    "m3c_time_picker_hour_error_24h": "La hora debe estar entre 0 y 23",
+    "m3c_time_picker_hour_selection": "Seleccionar hora",
+    "m3c_time_picker_hour_suffix": "%1$d en punto",
+    "m3c_time_picker_hour_text_field": "para la hora",
+    "m3c_time_picker_minute": "Minutos",
+    "m3c_time_picker_minute_error": "Los minutos deben estar entre 0 y 59",
+    "m3c_time_picker_minute_selection": "Seleccionar minutos",
+    "m3c_time_picker_minute_suffix": "%1$d minutos",
+    "m3c_time_picker_minute_text_field": "para los minutos",
+    "m3c_time_picker_period_toggle_description": "Selecciona AM o PM",
+    "m3c_time_picker_pm": "p. m.",
+    "m3c_time_picker_toggle_keyboard": "Cambiar al modo de escritura",
+    "m3c_time_picker_toggle_touch": "Cambiar al modo de reloj",
+    "m3c_tooltip_long_press_label": "Mostrar descripción emergente",
+    "m3c_tooltip_pane_description": "Descripción emergente",
+    "m3c_wide_navigation_rail_close_rail": "Cerrar barra",
+    "m3c_wide_navigation_rail_pane_title": "Barra de navegación",
+    "material_clock_toggle_content_description": "Selecciona AM o PM",
+    "material_hour_24h_suffix": "%1$s horas",
+    "material_hour_selection": "Seleccionar hora",
+    "material_hour_suffix": "%1$s en punto",
+    "material_minute_selection": "Seleccionar minutos",
+    "material_minute_suffix": "%1$s minutos",
+    "material_slider_range_end": "Fin del intervalo",
+    "material_slider_range_start": "Inicio del intervalo",
+    "material_slider_value": "Valor",
+    "material_timepicker_am": "a. m.",
+    "material_timepicker_clock_mode_description": "Cambia al modo de reloj para escribir la hora.",
+    "material_timepicker_hour": "Hora",
+    "material_timepicker_minute": "Minuto",
+    "material_timepicker_pm": "p. m.",
+    "material_timepicker_select_time": "Seleccionar la hora",
+    "material_timepicker_text_input_mode_description": "Cambia al modo de introducción de texto para escribir la hora.",
+    "mr_cast_button_connected": "Enviar; conectado",
+    "mr_cast_button_connecting": "Enviar; conectando",
+    "mr_cast_button_disconnected": "Enviar; desconectado",
+    "mr_cast_dialog_title_view_placeholder": "No hay información disponible",
+    "mr_chooser_looking_for_devices": "Buscando dispositivos…",
+    "mr_chooser_title": "Enviar a",
+    "mr_chooser_wifi_learn_more": "Más información",
+    "mr_chooser_wifi_warning_description_car": "Asegúrate de que el otro dispositivo esté conectado a la misma red Wi-Fi que este coche",
+    "mr_chooser_wifi_warning_description_phone": "Asegúrate de que el otro dispositivo esté conectado a la misma red Wi-Fi que este teléfono",
+    "mr_chooser_wifi_warning_description_tablet": "Asegúrate de que el otro dispositivo esté conectado a la misma red Wi-Fi que esta tablet",
+    "mr_chooser_wifi_warning_description_tv": "Asegúrate de que el otro dispositivo esté conectado a la misma red Wi-Fi que esta televisión",
+    "mr_chooser_wifi_warning_description_unknown": "Asegúrate de que el otro dispositivo esté conectado a la misma red Wi-Fi que este dispositivo",
+    "mr_chooser_wifi_warning_description_watch": "Asegúrate de que el otro dispositivo esté conectado a la misma red Wi-Fi que este reloj",
+    "mr_chooser_zero_routes_found_title": "No hay dispositivos disponibles",
+    "mr_controller_album_art": "Carátula del álbum",
+    "mr_controller_casting_screen": "Enviando pantalla",
+    "mr_controller_close_description": "Cerrar",
+    "mr_controller_collapse_group": "Ocultar",
+    "mr_controller_disconnect": "Desconectar",
+    "mr_controller_expand_group": "Mostrar",
+    "mr_controller_no_info_available": "No hay información disponible",
+    "mr_controller_no_media_selected": "No se ha seleccionado contenido",
+    "mr_controller_pause": "Pausar",
+    "mr_controller_play": "Reproducir",
+    "mr_controller_stop": "Detener",
+    "mr_controller_stop_casting": "Detener envío",
+    "mr_controller_volume_slider": "Control deslizante de volumen",
+    "mr_dialog_default_group_name": "Grupo",
+    "mr_dialog_groupable_header": "Añadir un dispositivo",
+    "mr_dialog_transferable_header": "Reproducir en un grupo",
+    "mr_route_name_speaker": "Altavoz",
+    "mr_route_name_tv": "Televisión",
+    "mr_route_name_unknown": "Desconocido",
+    "mr_user_route_category_name": "Dispositivos",
+    "mtrl_badge_numberless_content_description": "Notificación nueva",
+    "mtrl_checkbox_state_description_checked": "Marcada",
+    "mtrl_checkbox_state_description_indeterminate": "Marcada parcialmente",
+    "mtrl_checkbox_state_description_unchecked": "Sin marcar",
+    "mtrl_chip_close_icon_content_description": "Retirar %1$s",
+    "mtrl_exceed_max_badge_number_content_description": "Más de %1$d notificaciones nuevas",
+    "mtrl_picker_a11y_next_month": "Cambiar al mes siguiente",
+    "mtrl_picker_a11y_prev_month": "Cambiar al mes anterior",
+    "mtrl_picker_announce_current_range_selection": "Selección de fecha de inicio: %1$s – Selección de fecha de finalización: %2$s",
+    "mtrl_picker_announce_current_selection": "Selección actual: %1$s",
+    "mtrl_picker_announce_current_selection_none": "ninguna",
+    "mtrl_picker_cancel": "Cancelar",
+    "mtrl_picker_confirm": "Aceptar",
+    "mtrl_picker_date_header_unselected": "Fecha seleccionada",
+    "mtrl_picker_end_date_description": "Fecha de finalización: %1$s",
+    "mtrl_picker_invalid_format": "Formato no válido.",
+    "mtrl_picker_invalid_format_example": "Ejemplo: %1$s",
+    "mtrl_picker_invalid_format_use": "Usar: %1$s",
+    "mtrl_picker_invalid_range": "El periodo no es válido.",
+    "mtrl_picker_navigate_to_current_year_description": "Ir al año actual, %1$d",
+    "mtrl_picker_navigate_to_year_description": "Ir al año %1$d",
+    "mtrl_picker_out_of_range": "Fuera del periodo válido: %1$s",
+    "mtrl_picker_range_header_only_end_selected": "Fecha de inicio–%1$s",
+    "mtrl_picker_range_header_only_start_selected": "%1$s–Fecha de finalización",
+    "mtrl_picker_range_header_unselected": "Fecha de inicio–Fecha de finalización",
+    "mtrl_picker_save": "Guardar",
+    "mtrl_picker_start_date_description": "Fecha de inicio: %1$s",
+    "mtrl_picker_text_input_date_hint": "Fecha",
+    "mtrl_picker_text_input_date_range_end_hint": "Fecha de finalización",
+    "mtrl_picker_text_input_date_range_start_hint": "Fecha de inicio",
+    "mtrl_picker_text_input_year_abbr": "a",
+    "mtrl_picker_today_description": "Hoy, %1$s",
+    "mtrl_picker_toggle_to_calendar_input_mode": "Cambiar al modo de introducción Calendario",
+    "mtrl_picker_toggle_to_day_selection": "Cambiar a la vista de calendario",
+    "mtrl_picker_toggle_to_text_input_mode": "Cambiar al modo de introducción Texto",
+    "mtrl_picker_toggle_to_year_selection": "Cambiar a la vista de año",
+    "mtrl_picker_toggled_to_day_selection": "Se ha cambiado a la vista de calendario",
+    "mtrl_picker_toggled_to_year_selection": "Se ha cambiado a la vista de año",
+    "mtrl_timepicker_cancel": "Cancelar",
+    "mtrl_timepicker_confirm": "Aceptar",
+    "navigation_menu": "Menú de navegación",
+    "not_selected": "No seleccionado",
+    "password_toggle_content_description": "Mostrar contraseña",
+    "range_end": "Fin del intervalo",
+    "range_start": "Inicio del intervalo",
+    "search_menu_title": "Buscar",
+    "searchview_clear_text_content_description": "Borrar texto",
+    "searchview_navigation_content_description": "Atrás",
+    "selected": "Seleccionado",
+    "side_sheet_accessibility_pane_title": "Hoja lateral",
+    "snackbar_pane_title": "Alerta",
+    "state_empty": "Vacío",
+    "state_off": "Desactivado",
+    "state_on": "Activado",
+    "switch_role": "Interruptor",
+    "tab": "Pestaña",
+    "template_percent": "%1$d por cien.",
+    "tooltip_description": "descripción emergente",
+    "tooltip_label": "mostrar descripción emergente",
+}
+
+NO_ENTRY = 0xFFFFFFFF
+
+
+def _len8(n):
+    return bytes([n]) if n < 0x80 else bytes([0x80 | (n >> 8), n & 0xFF])
+
+
+def _pool(strings):
+    data = bytearray()
+    offs = []
+    for s in strings:
+        b = s.encode("utf-8")
+        u16 = len(s.encode("utf-16-le")) // 2
+        offs.append(len(data))
+        data += _len8(u16) + _len8(len(b)) + b + b"\x00"
+    while len(data) % 4:
+        data.append(0)
+    n = len(strings)
+    start = 28 + 4 * n
+    head = struct.pack("<HHIIIIII", 0x0001, 28, start + len(data), n, 0, 0x100, start, 0)
+    return head + struct.pack("<%dI" % n, *offs) + bytes(data)
+
+
+def _config(lang, sdk):
+    cfg = bytearray(64)
+    struct.pack_into("<I", cfg, 0, 64)
+    if lang:
+        cfg[8:10] = lang.encode("ascii")
+    struct.pack_into("<H", cfg, 24, sdk)  # sdkVersion: gana a la config sin versión de la app
+    return bytes(cfg)
+
+
+def build_arsc(pkg_name, pkg_id, type_id, entries, langs=("", "ru")):
+    """entries: {id_de_entrada: (nombre_clave, texto)} -> bytes de un resources.arsc"""
+    texts = []
+    tidx = {}
+    keys = []
+    kidx = {}
+    for _eid, (kname, text) in entries.items():
+        if text not in tidx:
+            tidx[text] = len(texts)
+            texts.append(text)
+        if kname not in kidx:
+            kidx[kname] = len(keys)
+            keys.append(kname)
+    count = max(entries) + 1
+    type_names = ["t%d" % i for i in range(1, type_id)] + ["string"]
+    type_pool = _pool(type_names)
+    key_pool = _pool(keys)
+    global_pool = _pool(texts)
+
+    spec = struct.pack("<HHIBBHI", 0x0202, 16, 16 + 4 * count, type_id, 0, 0, count)
+    spec += b"\x00" * (4 * count)
+    chunks = [spec]
+    ordered = sorted(entries)
+    for lang in langs:
+        body = bytearray()
+        offs = [NO_ENTRY] * count
+        for eid in ordered:
+            kname, text = entries[eid]
+            offs[eid] = len(body)
+            body += struct.pack("<HHI", 8, 0, kidx[kname])
+            body += struct.pack("<HBBI", 8, 0, 3, tidx[text])
+        start = 84 + 4 * count
+        head = struct.pack("<HHIBBHII", 0x0201, 84, start + len(body), type_id, 0, 0, count, start)
+        head += _config(lang, 1)
+        chunks.append(head + struct.pack("<%dI" % count, *offs) + bytes(body))
+
+    name = pkg_name.encode("utf-16-le")[:254]
+    name = name + b"\x00" * (256 - len(name))
+    pkg_size = 288 + len(type_pool) + len(key_pool) + sum(len(c) for c in chunks)
+    pkg = struct.pack("<HHI", 0x0200, 288, pkg_size) + struct.pack("<I", pkg_id) + name
+    pkg += struct.pack("<IIIII", 288, 0, 288 + len(type_pool), 0, 0)
+    pkg += type_pool + key_pool + b"".join(chunks)
+    total = 12 + len(global_pool) + len(pkg)
+    return struct.pack("<HHII", 0x0002, 12, total, 1) + global_pool + pkg
+
+
+# ====================================================================== otros plugins
+# Los plugins pintan su interfaz con ui.text(), ui.button()... que devuelven diccionarios
+# JSON. Aquí se intercepta PluginRuntimeSession.render() y se traducen los textos antes de
+# que lleguen a la pantalla. Orden de búsqueda: diccionario -> caché -> traductor en línea
+# (en segundo plano; mientras llega la respuesta se ve el original y luego se refresca).
+
+DICT = {
+    "(hidden network)": "(red oculta)",
+    "(possible)": "(posible)",
+    "ACTIVITY LOG": "REGISTRO DE ACTIVIDAD",
+    "ATTACK IN PROGRESS": "ATAQUE EN CURSO",
+    "AV Receivers": "Receptores AV",
+    "About": "Acerca de",
+    "About Audio Spoof": "Acerca de Audio Spoof",
+    "About BlueDucky": "Acerca de BlueDucky",
+    "About Quiet Connect": "Acerca de Quiet Connect",
+    "About Whisper Pair": "Acerca de Whisper Pair",
+    "About plugins": "Acerca de los plugins",
+    "About this plugin": "Acerca de este plugin",
+    "Accent Color": "Color de acento",
+    "Action opened by the central bottom-panel button": "Acción que abre el botón central del panel inferior",
+    "Actions": "Acciones",
+    "Active": "Activo",
+    "Active: —": "Activo: —",
+    "Add": "Añadir",
+    "Add Device": "Añadir dispositivo",
+    "Add IPP printer": "Añadir impresora IPP",
+    "Add phone number": "Añadir número de teléfono",
+    "Add source": "Añadir fuente",
+    "Add to favorites": "Añadir a favoritos",
+    "Additional Features": "Funciones adicionales",
+    "Admin Panel": "Panel de administración",
+    "Advanced": "Avanzado",
+    "Advanced Bluetooth device discovery": "Descubrimiento avanzado de dispositivos Bluetooth",
+    "Advertising is already running": "La publicidad ya está en ejecución",
+    "Air Conditioners": "Aires acondicionados",
+    "Air Purifiers": "Purificadores de aire",
+    "All": "Todos",
+    "All BLE": "Todos los BLE",
+    "All Functions": "Todas las funciones",
+    "All plugins": "Todos los plugins",
+    "All plugins are disabled": "Todos los plugins están deshabilitados",
+    "Allow": "Permitir",
+    "Allow contacts access to pick a number": "Permite el acceso a contactos para elegir un número",
+    "Always": "Siempre",
+    "Analysis": "Análisis",
+    "Android / iOS Mode": "Modo Android / iOS",
+    "Android Message": "Mensaje de Android",
+    "Android, Root and Shizuku": "Android, Root y Shizuku",
+    "Animation reset to standard mode": "Animación restablecida al modo estándar",
+    "Animation set as permanent on home screen": "Animación establecida como permanente en la pantalla de inicio",
+    "App hooking": "Enganche de la app",
+    "Appearance": "Apariencia",
+    "Apple Action Modal List": "Lista de ventanas de acción de Apple",
+    "Apply": "Aplicar",
+    "Apply tag to phone": "Aplicar etiqueta al teléfono",
+    "Arbitrary text": "Texto arbitrario",
+    "Ask before plugins download files": "Preguntar antes de que los plugins descarguen archivos",
+    "Audio Systems": "Sistemas de audio",
+    "Audio profile connection timeout": "Tiempo de espera agotado en la conexión del perfil de audio",
+    "Audit": "Auditoría",
+    "Author": "Autor",
+    "Author guide": "Guía del autor",
+    "Auto": "Automático",
+    "Auto-update from store": "Actualización automática desde la tienda",
+    "Available printers": "Impresoras disponibles",
+    "BAD HID scripts run": "Scripts BAD HID ejecutados",
+    "BLE Smart Home": "Hogar inteligente BLE",
+    "BLE chat with other Dolphy users": "Chat BLE con otros usuarios de Dolphy",
+    "BLE spam detector": "Detector de BLE spam",
+    "BT Name Spoofing": "Suplantación del nombre BT",
+    "BT-Audio Hijack": "Secuestro de audio BT",
+    "Back": "Atrás",
+    "Back/ESC Spam": "Spam de Atrás/ESC",
+    "Bad HID Mode": "Modo Bad HID",
+    "Bank Card": "Tarjeta bancaria",
+    "Basic": "Básico",
+    "Battery": "Batería",
+    "Battery level": "Nivel de batería",
+    "Beacon/Positioning Signal": "Señal de baliza/posicionamiento",
+    "Bidets": "Bidés",
+    "Blu-Ray Players": "Reproductores Blu-ray",
+    "Bluetooth Classic pairing request test": "Prueba de solicitud de emparejamiento Bluetooth Classic",
+    "Bluetooth Disabled": "Bluetooth desactivado",
+    "Bluetooth HID profile active": "Perfil Bluetooth HID activo",
+    "Bluetooth access": "Acceso a Bluetooth",
+    "Bluetooth and BLE": "Bluetooth y BLE",
+    "Bluetooth and location permissions are required": "Se requieren permisos de Bluetooth y ubicación",
+    "Bluetooth is off": "Bluetooth está apagado",
+    "Bluetooth not supported": "Bluetooth no compatible",
+    "Bluetooth permissions are required for scanning.": "Se requieren permisos de Bluetooth para escanear.",
+    "BluetoothLeAdvertiser unavailable": "BluetoothLeAdvertiser no disponible",
+    "Bond Spam": "Spam de vinculación",
+    "Bonjour / DNS‑SD services": "Servicios Bonjour / DNS‑SD",
+    "Bottom panel": "Panel inferior",
+    "Brand Name": "Nombre de marca",
+    "Brightness": "Brillo",
+    "Brute Force Active": "Fuerza bruta activa",
+    "Bruteforce successful": "Fuerza bruta exitosa",
+    "Buds List": "Lista de Buds",
+    "Buttons": "Botones",
+    "By name": "Por nombre",
+    "By signal": "Por señal",
+    "CD Players": "Reproductores de CD",
+    "Cable Set-Top Boxes": "Decodificadores de cable",
+    "Camera search": "Búsqueda de cámaras",
+    "Cameras": "Cámaras",
+    "Cancel": "Cancelar",
+    "Cannot connect to printer": "No se puede conectar a la impresora",
+    "Cannot read file": "No se puede leer el archivo",
+    "Capabilities": "Capacidades",
+    "Capabilities and access": "Capacidades y acceso",
+    "Car Head Units": "Autoestéreos",
+    "Car Multimedia": "Multimedia para auto",
+    "Center Cursor": "Centrar cursor",
+    "Change Msg": "Cambiar mensaje",
+    "Chat name": "Nombre del chat",
+    "Checking WPS status...": "Comprobando el estado de WPS...",
+    "Checking default credentials...": "Comprobando credenciales predeterminadas...",
+    "Checking root…": "Comprobando root…",
+    "Checking your network for cameras.": "Buscando cámaras en tu red.",
+    "Choose a FAB action": "Elige una acción del FAB",
+    "Choose a video to send to your TV": "Elige un video para enviar a tu TV",
+    "Choose another file": "Elegir otro archivo",
+    "Choose file": "Elegir archivo",
+    "Choose from your address book": "Elige de tu libreta de direcciones",
+    "Choose video": "Elegir video",
+    "Choose what to write": "Elige qué escribir",
+    "Clear": "Borrar",
+    "Clear log": "Borrar registro",
+    "Clear logs": "Borrar registros",
+    "Clear selection": "Borrar selección",
+    "Clear user NDEF data on a writable tag": "Borra los datos NDEF del usuario en una etiqueta con permiso de escritura",
+    "Clocks": "Relojes",
+    "Close": "Cerrar",
+    "Collapsed": "Contraído",
+    "Color": "Color",
+    "Compact": "Compacto",
+    "Company Code": "Código de empresa",
+    "Computers": "Computadoras",
+    "Confirm": "Confirmar",
+    "Connect": "Conectar",
+    "Connect to a Google Cast device first.": "Primero conéctate a un dispositivo Google Cast.",
+    "Connect to a local Wi-Fi network.": "Conéctate a una red Wi-Fi local.",
+    "Connect to network": "Conectar a la red",
+    "Connectable": "Conectable",
+    "Connected": "Conectado",
+    "Connected over USB": "Conectado por USB",
+    "Connected!": "¡Conectado!",
+    "Connecting...": "Conectando...",
+    "Connecting…": "Conectando…",
+    "Connection Update Required": "Se requiere actualizar la conexión",
+    "Connection error": "Error de conexión",
+    "Connection lost, reconnecting": "Conexión perdida, reconectando",
+    "Contact": "Contacto",
+    "Contact on tag": "Contacto en la etiqueta",
+    "Containers": "Contenedores",
+    "Content": "Contenido",
+    "Continue": "Continuar",
+    "Controls": "Controles",
+    "Converters": "Convertidores",
+    "Copies": "Copias",
+    "Copy": "Copiar",
+    "Copy log": "Copiar registro",
+    "Copy tag for emulation": "Copiar etiqueta para emulación",
+    "Copy the invisible name": "Copiar el nombre invisible",
+    "Copying password...": "Copiando contraseña...",
+    "Could not connect": "No se pudo conectar",
+    "Could not get video from the cameras found": "No se pudo obtener video de las cámaras encontradas",
+    "Could not import commands from file": "No se pudieron importar los comandos del archivo",
+    "Could not make this chat discoverable.": "No se pudo hacer visible este chat.",
+    "Could not open plugin": "No se pudo abrir el plugin",
+    "Could not parse DuckyScript": "No se pudo analizar el DuckyScript",
+    "Could not parse the URL": "No se pudo analizar la URL",
+    "Could not read the video": "No se pudo leer el video",
+    "Could not send text to notepad": "No se pudo enviar el texto al bloc de notas",
+    "Count": "Cantidad",
+    "Create": "Crear",
+    "Create URL tag and emulate NFC Forum Type 4": "Crea una etiqueta URL y emula NFC Forum Tipo 4",
+    "Create and save your QR codes": "Crea y guarda tus códigos QR",
+    "Current signal:": "Señal actual:",
+    "Custom": "Personalizado",
+    "Custom BLE Spam modes": "Modos BLE Spam personalizados",
+    "Custom color": "Color personalizado",
+    "Customize animations": "Personalizar animaciones",
+    "Cyclic Animation": "Animación cíclica",
+    "DEX loading and class access": "Carga de DEX y acceso a clases",
+    "DVB-T Receivers": "Receptores DVB-T",
+    "DVD Players": "Reproductores de DVD",
+    "Dark": "Oscuro",
+    "Dark theme": "Tema oscuro",
+    "Data written": "Datos escritos",
+    "Database from flipperzero-firmware-dev: ac.ir": "Base de datos de flipperzero-firmware-dev: ac.ir",
+    "Database from flipperzero-firmware-dev: audio.ir": "Base de datos de flipperzero-firmware-dev: audio.ir",
+    "Database from flipperzero-firmware-dev: tv.ir": "Base de datos de flipperzero-firmware-dev: tv.ir",
+    "Database is empty": "La base de datos está vacía",
+    "Date": "Fecha",
+    "Default": "Predeterminado",
+    "Delay": "Retraso",
+    "Delete": "Eliminar",
+    "Delete Selected": "Eliminar seleccionados",
+    "Delete selected tags": "Eliminar etiquetas seleccionadas",
+    "Delivered to all discovered users": "Entregado a todos los usuarios descubiertos",
+    "Delivery failed for one or more users": "Falló la entrega a uno o más usuarios",
+    "Deny": "Denegar",
+    "Description": "Descripción",
+    "Details": "Detalles",
+    "Detected:": "Detectado:",
+    "Developer": "Desarrollador",
+    "Developer @oosthemes": "Desarrollador @oosthemes",
+    "Device Actions": "Acciones del dispositivo",
+    "Device Scanner": "Escáner de dispositivos",
+    "Device Type": "Tipo de dispositivo",
+    "Device accepted the video": "El dispositivo aceptó el video",
+    "Device connected!": "¡Dispositivo conectado!",
+    "Device guess": "Dispositivo probable",
+    "Device name": "Nombre del dispositivo",
+    "Device not found": "Dispositivo no encontrado",
+    "Devices": "Dispositivos",
+    "Digital Photo Frames": "Marcos digitales de fotos",
+    "Digital Signage": "Señalización digital",
+    "Digits": "Dígitos",
+    "Disable": "Desactivar",
+    "Disable Safe Mode": "Desactivar el modo seguro",
+    "Disabled": "Deshabilitado",
+    "Disconnect": "Desconectar",
+    "Disconnected": "Desconectado",
+    "Discover devices in current Wi-Fi network": "Descubre dispositivos en la red Wi-Fi actual",
+    "Discover devices on the current Wi-Fi network": "Descubre dispositivos en la red Wi-Fi actual",
+    "Discovered Devices": "Dispositivos descubiertos",
+    "Discovered cameras": "Cámaras descubiertas",
+    "Discovered devices are listed below": "Los dispositivos descubiertos se muestran abajo",
+    "Discussion / post": "Discusión / publicación",
+    "DoS attack started": "Ataque DoS iniciado",
+    "Document": "Documento",
+    "Documentation website": "Sitio web de documentación",
+    "Dolphy 2.5 plugin system": "Sistema de plugins de Dolphy 2.5",
+    "Dolphy Python plugins": "Plugins de Python para Dolphy",
+    "Dolphy plugin": "Plugin de Dolphy",
+    "Dolphy plugin crash log": "Registro de fallos del plugin de Dolphy",
+    "Don't show again": "No volver a mostrar",
+    "Done": "Listo",
+    "Done!": "¡Listo!",
+    "Download": "Descargar",
+    "Ducky Scripts": "Scripts Ducky",
+    "Ducky script": "Script Ducky",
+    "Ducky script · USB HID gadget (root)": "Script Ducky · Gadget USB HID (root)",
+    "EMV card": "Tarjeta EMV",
+    "Echo/Reflections": "Eco/Reflexiones",
+    "Edit": "Editar",
+    "Edit Device": "Editar dispositivo",
+    "Edit Mode": "Modo de edición",
+    "Electronic Whiteboards": "Pizarras electrónicas",
+    "Email": "Correo",
+    "Empty DuckyScript file": "Archivo DuckyScript vacío",
+    "Empty screen": "Pantalla vacía",
+    "Emulate wireless Bluetooth keyboard/mouse": "Emula un teclado/mouse Bluetooth inalámbrico",
+    "Emulating...": "Emulando...",
+    "Enable": "Activar",
+    "Enable NFC in phone settings": "Activa NFC en los ajustes del teléfono",
+    "Enable location services": "Activa los servicios de ubicación",
+    "Enable safe mode automatically on crashes": "Activar el modo seguro automáticamente tras fallos",
+    "Enabled": "Habilitado",
+    "Enter DuckyScript…": "Ingresa DuckyScript…",
+    "Enter Wi‑Fi password": "Ingresa la contraseña de Wi‑Fi",
+    "Enter a Ducky script": "Ingresa un script Ducky",
+    "Enter a device name": "Ingresa un nombre de dispositivo",
+    "Enter phone number": "Ingresa el número de teléfono",
+    "Enter tag name": "Ingresa el nombre de la etiqueta",
+    "Enter text": "Ingresa texto",
+    "Enter text (Latin letters, digits, symbols)": "Ingresa texto (letras latinas, dígitos, símbolos)",
+    "Enter the number manually": "Ingresa el número manualmente",
+    "Enter valid URL": "Ingresa una URL válida",
+    "Erase NFC tag": "Borrar etiqueta NFC",
+    "Error": "Error",
+    "Excellent": "Excelente",
+    "Exit": "Salir",
+    "Exit Edit Mode": "Salir del modo de edición",
+    "Expanded": "Expandido",
+    "Export": "Exportar",
+    "External servers and tunnels are disabled": "Los servidores y túneles externos están deshabilitados",
+    "Failed": "Falló",
+    "Failed to connect to the network": "No se pudo conectar a la red",
+    "Failed to load catalog": "No se pudo cargar el catálogo",
+    "Failed to open link": "No se pudo abrir el enlace",
+    "Fair": "Regular",
+    "Fans": "Ventiladores",
+    "Fast Pair List": "Lista de Fast Pair",
+    "Favorites": "Favoritos",
+    "Featured": "Destacados",
+    "Fetching system info...": "Obteniendo información del sistema...",
+    "File": "Archivo",
+    "File download": "Descarga de archivos",
+    "File downloads": "Descargas de archivos",
+    "File import error": "Error al importar el archivo",
+    "File is too large": "El archivo es demasiado grande",
+    "Filter": "Filtrar",
+    "Finish": "Finalizar",
+    "Fireplaces": "Chimeneas",
+    "Flipper Font": "Fuente Flipper",
+    "Flipper Mac script not found": "Script de Flipper Mac no encontrado",
+    "Flipper Win script not found": "Script de Flipper Win no encontrado",
+    "Flipper database not found or empty": "Base de datos de Flipper no encontrada o vacía",
+    "Flood Print": "Inundar impresión",
+    "For anonymity": "Para el anonimato",
+    "Forward": "Adelante",
+    "Frequency": "Frecuencia",
+    "Full access": "Acceso completo",
+    "Function menu view": "Vista del menú de funciones",
+    "Functions": "Funciones",
+    "Game Consoles": "Consolas de videojuegos",
+    "Gateway": "Puerta de enlace",
+    "Glass navigation bar (LiquidBottomTabs)": "Barra de navegación de vidrio (LiquidBottomTabs)",
+    "Go": "Ir",
+    "Go to settings": "Ir a ajustes",
+    "Good": "Buena",
+    "Got it": "Entendido",
+    "Grant Bluetooth access for this section.": "Concede acceso a Bluetooth para esta sección.",
+    "Grant Permission": "Conceder permiso",
+    "Grant access": "Conceder acceso",
+    "Grant location": "Conceder ubicación",
+    "HCE is not supported on this device.": "HCE no es compatible con este dispositivo.",
+    "HID Configuration": "Configuración HID",
+    "HID Keyboard": "Teclado HID",
+    "HID Keyboard Service": "Servicio de teclado HID",
+    "HID modes": "Modos HID",
+    "HTML is empty": "El HTML está vacío",
+    "Hacking...": "Hackeando...",
+    "Headphones": "Audífonos",
+    "Headphones List": "Lista de audífonos",
+    "Heaters": "Calentadores",
+    "Help": "Ayuda",
+    "Hex payload": "Carga útil hex",
+    "Hide": "Ocultar",
+    "Hide HEX": "Ocultar HEX",
+    "History": "Historial",
+    "Hold the tag near the phone": "Acerca la etiqueta al teléfono",
+    "Hold the tag near the phone to erase data": "Acerca la etiqueta al teléfono para borrar los datos",
+    "Hold the tag near the phone to write data": "Acerca la etiqueta al teléfono para escribir los datos",
+    "Home": "Inicio",
+    "Home Spam": "Spam del hogar",
+    "Humidifiers": "Humidificadores",
+    "IP address or host name": "Dirección IP o nombre de host",
+    "IR Banners": "Pancartas IR",
+    "IR Jammer": "Inhibidor IR",
+    "IR Remotes (Flipper)": "Controles IR (Flipper)",
+    "IR Remotes (TV)": "Controles IR (TV)",
+    "IR module connected": "Módulo IR conectado",
+    "IR remote database from Flipper-IRDB-main": "Base de datos de controles IR de Flipper-IRDB-main",
+    "IR signals sent": "Señales IR enviadas",
+    "Identifier": "Identificador",
+    "Idle": "Inactivo",
+    "Import": "Importar",
+    "Import .ir file": "Importar archivo .ir",
+    "Import DuckyScript": "Importar DuckyScript",
+    "Import a .txt with DuckyScript via the + button": "Importa un .txt con DuckyScript con el botón +",
+    "Import an HTML file first": "Primero importa un archivo HTML",
+    "Import from .txt": "Importar desde .txt",
+    "Import plugin": "Importar plugin",
+    "Info": "Info",
+    "Infrared transmitter": "Transmisor infrarrojo",
+    "Install": "Instalar",
+    "Installation failed": "Falló la instalación",
+    "Installed": "Instalado",
+    "Installing…": "Instalando…",
+    "Intercept": "Interceptar",
+    "Intercept Bluetooth speakers and headphones": "Intercepta bocinas y audífonos Bluetooth",
+    "Interface": "Interfaz",
+    "Interface scale": "Escala de la interfaz",
+    "Interference/Noise": "Interferencia/Ruido",
+    "Internet hosting is not used": "No se usa alojamiento en internet",
+    "Interval": "Intervalo",
+    "Invalid hex payload": "Carga útil hex no válida",
+    "Invalid link": "Enlace no válido",
+    "Invalid printer address": "Dirección de impresora no válida",
+    "Jammer (broadband interference)": "Jammer (interferencia de banda ancha)",
+    "Jamming…": "Interfiriendo…",
+    "KVM Switches": "Conmutadores KVM",
+    "Keyboard": "Teclado",
+    "Known vendors": "Fabricantes conocidos",
+    "LAN Tools": "Herramientas LAN",
+    "LAN scanner": "Escáner de LAN",
+    "LED Lighting": "Iluminación LED",
+    "Language": "Idioma",
+    "Last seen": "Visto por última vez",
+    "Learn more": "Más información",
+    "Left": "Izquierda",
+    "Level": "Nivel",
+    "Level up pending": "Subida de nivel pendiente",
+    "Library of simple NFC tags with links": "Biblioteca de etiquetas NFC sencillas con enlaces",
+    "Light": "Claro",
+    "Light theme": "Tema claro",
+    "Link in Tag": "Enlace en la etiqueta",
+    "Link or text": "Enlace o texto",
+    "Listen": "Escuchar",
+    "Listening": "Escuchando",
+    "Live": "En vivo",
+    "Live feed from your home camera (admin/admin)": "Transmisión en vivo de tu cámara doméstica (admin/admin)",
+    "Load": "Cargar",
+    "Loading": "Cargando",
+    "Loading catalog…": "Cargando catálogo…",
+    "Loading on device…": "Cargando en el dispositivo…",
+    "Loading remotes...": "Cargando controles...",
+    "Loading signals...": "Cargando señales...",
+    "Loading...": "Cargando...",
+    "Local network is unavailable": "La red local no está disponible",
+    "Local network mode": "Modo de red local",
+    "Local network tools": "Herramientas de red local",
+    "Local server failed to start": "No se pudo iniciar el servidor local",
+    "Local server is already running": "El servidor local ya se está ejecutando",
+    "Local server is running in the background": "El servidor local se está ejecutando en segundo plano",
+    "Local server stopped": "Servidor local detenido",
+    "Location services are off": "Los servicios de ubicación están apagados",
+    "Lock": "Bloquear",
+    "Log": "Registro",
+    "Log copied": "Registro copiado",
+    "Logs": "Registros",
+    "MAC address": "Dirección MAC",
+    "MAX LEVEL": "NIVEL MÁXIMO",
+    "Main Information": "Información principal",
+    "Manage and install plugins": "Administrar e instalar plugins",
+    "Manual": "Manual",
+    "Manual connection required in Bluetooth settings": "Se requiere conexión manual en los ajustes de Bluetooth",
+    "Manufacturer": "Fabricante",
+    "Match system": "Igual que el sistema",
+    "Media": "Multimedia",
+    "Memory size": "Tamaño de memoria",
+    "Menu": "Menú",
+    "Message": "Mensaje",
+    "Middle": "Central",
+    "MiniDisc Players": "Reproductores de MiniDisc",
+    "Minimal plugin": "Plugin mínimo",
+    "Miscellaneous": "Varios",
+    "Mode": "Modo",
+    "Monitors": "Monitores",
+    "Mood": "Ánimo",
+    "Moving to another device": "Pasando a otro dispositivo",
+    "Mute": "Silenciar",
+    "NFC Emulation": "Emulación NFC",
+    "NFC Forum Type 4 · hold the phone near a reader": "NFC Forum Tipo 4 · acerca el teléfono a un lector",
+    "NFC Tag Emulation": "Emulación de etiqueta NFC",
+    "NFC Tags": "Etiquetas NFC",
+    "NFC Tools": "Herramientas NFC",
+    "NFC cards read": "Tarjetas NFC leídas",
+    "NFC emulations started": "Emulaciones NFC iniciadas",
+    "NFC is off": "NFC está apagado",
+    "NFC is off. Enable NFC in phone settings.": "NFC está apagado. Actívalo en los ajustes del teléfono.",
+    "NFC is unavailable": "NFC no está disponible",
+    "NFC tag tools": "Herramientas de etiquetas NFC",
+    "NFC unavailable": "NFC no disponible",
+    "NRF Scanner": "Escáner NRF",
+    "Name": "Nombre",
+    "Name visible to other devices": "Nombre visible para otros dispositivos",
+    "Named only": "Solo con nombre",
+    "Navigation": "Navegación",
+    "Network": "Red",
+    "Network Diagnostic Hub": "Centro de diagnóstico de red",
+    "Network device": "Dispositivo de red",
+    "Network not connected": "Red no conectada",
+    "Network requests": "Solicitudes de red",
+    "Never": "Nunca",
+    "New": "Nuevo",
+    "New Airtag List": "Nueva lista de AirTag",
+    "New Apple Device List": "Nueva lista de dispositivos Apple",
+    "New NFC Tag": "Nueva etiqueta NFC",
+    "New QR Code": "Nuevo código QR",
+    "Next": "Siguiente",
+    "No": "No",
+    "No IP cameras were found on your network": "No se encontraron cámaras IP en tu red",
+    "No active HID connection": "No hay conexión HID activa",
+    "No cameras found": "No se encontraron cámaras",
+    "No cameras found on the network": "No se encontraron cámaras en la red",
+    "No cameras on the network": "No hay cámaras en la red",
+    "No database files configured.": "No hay archivos de base de datos configurados.",
+    "No description.": "Sin descripción.",
+    "No devices found": "No se encontraron dispositivos",
+    "No devices found nearby": "No se encontraron dispositivos cercanos",
+    "No devices found. Tap refresh.": "No se encontraron dispositivos. Toca actualizar.",
+    "No messages yet": "Aún no hay mensajes",
+    "No networks found": "No se encontraron redes",
+    "No paired devices in this list yet": "Aún no hay dispositivos emparejados en esta lista",
+    "No permissions for BLE advertising": "Sin permisos para la publicidad BLE",
+    "No plugin selected": "Ningún plugin seleccionado",
+    "No plugins in this source": "No hay plugins en esta fuente",
+    "No printers found": "No se encontraron impresoras",
+    "No recordings yet": "Aún no hay grabaciones",
+    "No response to request": "Sin respuesta a la solicitud",
+    "No saved QR codes": "No hay códigos QR guardados",
+    "No scooters found. Start a scan near a device.": "No se encontraron scooters. Inicia un escaneo cerca de un dispositivo.",
+    "No services found": "No se encontraron servicios",
+    "None": "Ninguno",
+    "Normal List": "Lista normal",
+    "Not Connected": "No conectado",
+    "Not Your Device List": "Lista «No es tu dispositivo»",
+    "Not enough free space for this video": "No hay suficiente espacio libre para este video",
+    "Notepad text": "Texto del bloc de notas",
+    "Nothing found": "No se encontró nada",
+    "Notifications": "Notificaciones",
+    "OFF": "APAGADO",
+    "OK": "Aceptar",
+    "ON": "ENCENDIDO",
+    "ONVIF and IP camera ports": "Puertos ONVIF y de cámaras IP",
+    "Offline": "Sin conexión",
+    "Online plugin translation": "Traducción de plugins en línea",
+    "Open": "Abrir",
+    "Open Bluetooth settings": "Abrir los ajustes de Bluetooth",
+    "Open Link": "Abrir enlace",
+    "Open NFC payment settings": "Abrir los ajustes de pago NFC",
+    "Open a link when scanned": "Abrir un enlace al escanear",
+    "Open admin": "Abrir administración",
+    "Open app settings": "Abrir ajustes de la app",
+    "Open compose in mail app": "Abrir redacción en la app de correo",
+    "Open local site": "Abrir sitio local",
+    "Open router web panel": "Abrir el panel web del router",
+    "Open the complete Functions screen": "Abrir la pantalla completa de Funciones",
+    "Opening Wi-Fi settings": "Abriendo los ajustes de Wi-Fi",
+    "Operation failed": "La operación falló",
+    "Options": "Opciones",
+    "Orientation": "Orientación",
+    "Other": "Otros",
+    "Other device service": "Servicio de otro dispositivo",
+    "PASSWORD:": "CONTRASEÑA:",
+    "PERMISSION REQUIRED": "PERMISO REQUERIDO",
+    "Packet log": "Registro de paquetes",
+    "Packet sent successfully": "Paquete enviado correctamente",
+    "Paired": "Emparejado",
+    "Paired Devices": "Dispositivos emparejados",
+    "Paper": "Papel",
+    "Passport": "Pasaporte",
+    "Passport: Statistics": "Pasaporte: estadísticas",
+    "Password": "Contraseña",
+    "Password brute force": "Fuerza bruta de contraseñas",
+    "Password protection": "Protección con contraseña",
+    "Passwords for Brute-Force": "Contraseñas para fuerza bruta",
+    "Paste": "Pegar",
+    "Pause": "Pausa",
+    "Payload too long for legacy advertising": "La carga útil es demasiado larga para la publicidad heredada",
+    "Payloads": "Cargas útiles",
+    "Performance Mode": "Modo de rendimiento",
+    "Permanent": "Permanente",
+    "Permission error. Try connecting manually": "Error de permisos. Intenta conectar manualmente",
+    "Permissions": "Permisos",
+    "Personalisation": "Personalización",
+    "Phantom Clicks": "Clics fantasma",
+    "Phone": "Teléfono",
+    "Phone number or vCard": "Número de teléfono o vCard",
+    "Pick from contacts": "Elegir de los contactos",
+    "Pin": "Fijar",
+    "Pinned": "Fijadas",
+    "Plain text": "Texto sin formato",
+    "Play": "Reproducir",
+    "Play sounds via QR inside the local network": "Reproduce sonidos mediante QR dentro de la red local",
+    "Please enable Bluetooth to use spam features": "Activa Bluetooth para usar las funciones de spam",
+    "Plugin Store": "Tienda de plugins",
+    "Plugin files and assets": "Archivos y recursos del plugin",
+    "Plugin installed": "Plugin instalado",
+    "Plugin settings": "Ajustes del plugin",
+    "Plugin sources": "Fuentes de plugins",
+    "Port": "Puerto",
+    "Possible incompatibility": "Posible incompatibilidad",
+    "Power": "Encendido",
+    "Preferences": "Preferencias",
+    "Preparing video…": "Preparando video…",
+    "Present phone to reader.": "Acerca el teléfono al lector.",
+    "Preset not found": "Preajuste no encontrado",
+    "Previous": "Anterior",
+    "Print": "Imprimir",
+    "Print settings": "Ajustes de impresión",
+    "Print test page": "Imprimir página de prueba",
+    "Print without the system dialog": "Imprimir sin el diálogo del sistema",
+    "Printer": "Impresora",
+    "Printer / printing service": "Impresora / servicio de impresión",
+    "Printer Display Message": "Mensaje en la pantalla de la impresora",
+    "Printer Password": "Contraseña de la impresora",
+    "Printer certificate is not trusted": "El certificado de la impresora no es de confianza",
+    "Printer response timed out": "La respuesta de la impresora agotó el tiempo de espera",
+    "Printers not found": "No se encontraron impresoras",
+    "Profile": "Perfil",
+    "Projectors": "Proyectores",
+    "QR Code Generator": "Generador de códigos QR",
+    "QR Generator": "Generador de QR",
+    "QR Tools": "Herramientas QR",
+    "QR code generation and local audio control": "Generación de códigos QR y control de audio local",
+    "Quality": "Calidad",
+    "Queue path": "Ruta de la cola",
+    "Quick Actions": "Acciones rápidas",
+    "Quick Startup": "Inicio rápido",
+    "Quiet connect": "Conexión silenciosa",
+    "Quit": "Salir",
+    "ROUTER ACTIONS": "ACCIONES DEL ROUTER",
+    "Radio interfaces": "Interfaces de radio",
+    "Randomize MAC": "MAC aleatoria",
+    "Read NFC tag and show full information": "Lee una etiqueta NFC y muestra toda la información",
+    "Read Tag": "Leer etiqueta",
+    "Read-only": "Solo lectura",
+    "Reading printer capabilities…": "Leyendo las capacidades de la impresora…",
+    "Ready": "Listo",
+    "Ready for commands...": "Listo para comandos...",
+    "Ready for interference…": "Listo para interferir…",
+    "Ready to send": "Listo para enviar",
+    "Reboot": "Reiniciar",
+    "Receive": "Recibir",
+    "Recommended": "Recomendadas",
+    "Record": "Grabar",
+    "Record type": "Tipo de registro",
+    "Recording...": "Grabando...",
+    "Recordings": "Grabaciones",
+    "Refresh": "Actualizar",
+    "Reinstall": "Reinstalar",
+    "Remote not found": "Control no encontrado",
+    "Remotes marked with a star will appear here": "Los controles marcados con estrella aparecerán aquí",
+    "Remove": "Quitar",
+    "Remove from favorites": "Quitar de favoritos",
+    "Rename": "Renombrar",
+    "Rename Remote": "Renombrar control",
+    "Rename the device": "Renombrar el dispositivo",
+    "Rescan": "Volver a escanear",
+    "Reset": "Restablecer",
+    "Results": "Resultados",
+    "Resume": "Reanudar",
+    "Retry": "Reintentar",
+    "Right": "Derecha",
+    "Root access denied": "Acceso root denegado",
+    "Root access required": "Se requiere acceso root",
+    "Root network tools: ARP and traffic inspection": "Herramientas de red root: ARP e inspección de tráfico",
+    "Root rights not found": "No se encontraron permisos de root",
+    "Root: available": "Root: disponible",
+    "Root: unavailable": "Root: no disponible",
+    "Router MAC (BSSID)": "MAC del router (BSSID)",
+    "Run": "Ejecutar",
+    "Run again": "Ejecutar de nuevo",
+    "Running": "En ejecución",
+    "Running…": "Ejecutando…",
+    "Russian": "Ruso",
+    "SECURITY": "SEGURIDAD",
+    "SELECT DEVICE": "SELECCIONAR DISPOSITIVO",
+    "SSID (network name)": "SSID (nombre de la red)",
+    "SSID and password (text record)": "SSID y contraseña (registro de texto)",
+    "SUCCESS: Reboot signal sent!": "ÉXITO: ¡señal de reinicio enviada!",
+    "Safe Mode": "Modo seguro",
+    "Save": "Guardar",
+    "Save URL for Type 4 emulation": "Guardar URL para emulación Tipo 4",
+    "Scan": "Escanear",
+    "Scan Me": "Escanéame",
+    "Scan Xiaomi/Ninebot, lock/unlock, beep, battery": "Escanea Xiaomi/Ninebot, bloquea/desbloquea, pitido, batería",
+    "Scan again": "Escanear de nuevo",
+    "Scan complete": "Escaneo completado",
+    "Scan scooters": "Escanear scooters",
+    "Scanner": "Escáner",
+    "Scanners": "Escáneres",
+    "Scanning Bluetooth devices…": "Escaneando dispositivos Bluetooth…",
+    "Scanning Fast Pair...": "Escaneando Fast Pair...",
+    "Scanning Wi-Fi modules...": "Escaneando módulos Wi-Fi...",
+    "Scanning Wi‑Fi and DNS‑SD…": "Escaneando Wi‑Fi y DNS‑SD…",
+    "Scanning all BLE...": "Escaneando todos los BLE...",
+    "Scanning audio devices…": "Buscando dispositivos de audio…",
+    "Scanning for cameras…": "Buscando cámaras…",
+    "Scanning for devices...": "Buscando dispositivos...",
+    "Scanning for devices…": "Buscando dispositivos…",
+    "Scanning network...": "Escaneando la red...",
+    "Scanning will take ~6 seconds.": "El escaneo tardará ~6 segundos.",
+    "Scanning...": "Escaneando...",
+    "Scanning…": "Escaneando…",
+    "Screen and logic modification": "Modificación de pantalla y lógica",
+    "Screen hook modes": "Modos de enganche de pantalla",
+    "Screens, actions, and services": "Pantallas, acciones y servicios",
+    "Screenshot": "Captura de pantalla",
+    "Screenshot Spam": "Spam de capturas de pantalla",
+    "Script failed": "El script falló",
+    "Script finished": "Script finalizado",
+    "Search": "Buscar",
+    "Search Brand": "Buscar marca",
+    "Search plugins": "Buscar plugins",
+    "Searching for devices": "Buscando dispositivos",
+    "Searching for devices...": "Buscando dispositivos...",
+    "Searching for devices…": "Buscando dispositivos…",
+    "Searching scooters…": "Buscando scooters…",
+    "Searching...": "Buscando...",
+    "Searching…": "Buscando…",
+    "Secure IPPS connection": "Conexión IPPS segura",
+    "Select": "Seleccionar",
+    "Select Category": "Seleccionar categoría",
+    "Select a device for spam": "Selecciona un dispositivo para el spam",
+    "Select all": "Seleccionar todo",
+    "Select an .ir file": "Selecciona un archivo .ir",
+    "Select scripts": "Seleccionar scripts",
+    "Send": "Enviar",
+    "Send all jammer signals": "Enviar todas las señales de inhibición",
+    "Send logs": "Enviar registros",
+    "Send power off signals to all TVs": "Envía señales de apagado a todas las TV",
+    "Sending finished": "Envío finalizado",
+    "Sending reboot command...": "Enviando comando de reinicio...",
+    "Sending signals...": "Enviando señales...",
+    "Sending...": "Enviando...",
+    "Sending…": "Enviando…",
+    "Sent": "Enviado",
+    "Serial Terminal": "Terminal serie",
+    "Server could not start; no available ports": "No se pudo iniciar el servidor; no hay puertos disponibles",
+    "Server status:": "Estado del servidor:",
+    "Server stopped": "Servidor detenido",
+    "Services": "Servicios",
+    "Set Dolphy as default payment app.": "Establece Dolphy como app de pago predeterminada.",
+    "Set animation as permanent on home screen?": "¿Establecer la animación como permanente en la pantalla de inicio?",
+    "Setting up the HID gadget…": "Configurando el gadget HID…",
+    "Settings": "Ajustes",
+    "Share": "Compartir",
+    "Shell commands": "Comandos de shell",
+    "Show": "Mostrar",
+    "Show HEX": "Mostrar HEX",
+    "Shutdown": "Apagar",
+    "Sides": "Caras",
+    "Signal Strength": "Intensidad de señal",
+    "Size": "Tamaño",
+    "Skip": "Omitir",
+    "Slow Connection": "Conexión lenta",
+    "Smart Light": "Luz inteligente",
+    "Smart Search": "Búsqueda inteligente",
+    "Sort": "Ordenar",
+    "Sound": "Sonido",
+    "Soundbars": "Barras de sonido",
+    "Source": "Fuente",
+    "Sources": "Fuentes",
+    "Spam interval (ms)": "Intervalo de spam (ms)",
+    "Speakers": "Bocinas",
+    "Speed": "Velocidad",
+    "Spoofed Identity": "Identidad suplantada",
+    "Standard": "Estándar",
+    "Standard Flipper Database": "Base de datos estándar de Flipper",
+    "Start": "Iniciar",
+    "Start IR storm": "Iniciar tormenta IR",
+    "Start Scanning": "Iniciar escaneo",
+    "Start Server": "Iniciar servidor",
+    "Start scan": "Iniciar escaneo",
+    "Starting hijack…": "Iniciando secuestro…",
+    "Starting local server…": "Iniciando el servidor local…",
+    "Starting security audit...": "Iniciando auditoría de seguridad...",
+    "Starting...": "Iniciando...",
+    "State and settings": "Estado y ajustes",
+    "Status": "Estado",
+    "Stop": "Detener",
+    "Stop IR storm": "Detener tormenta IR",
+    "Stop Scanning": "Detener escaneo",
+    "Stop Server": "Detener servidor",
+    "Stop scan": "Detener escaneo",
+    "Stopped": "Detenido",
+    "Stopped.": "Detenido.",
+    "Store": "Tienda",
+    "Store is not ready": "La tienda no está lista",
+    "Storm": "Tormenta",
+    "Streaming Devices": "Dispositivos de streaming",
+    "Stress test (UDP Flood)": "Prueba de estrés (UDP Flood)",
+    "Style": "Estilo",
+    "Subject (optional)": "Asunto (opcional)",
+    "Subscribe to TG": "Suscribirse a TG",
+    "Success": "Éxito",
+    "Success! Checking password…": "¡Éxito! Comprobando la contraseña…",
+    "Successfully connected": "Conexión exitosa",
+    "Support": "Soporte",
+    "TARGET": "OBJETIVO",
+    "TV Tuners": "Sintonizadores de TV",
+    "TV database not found or contains no entries": "Base de datos de TV no encontrada o sin entradas",
+    "TVs": "TV",
+    "TWS audio tools": "Herramientas de audio TWS",
+    "Tablet": "Tableta",
+    "Tag Analysis": "Análisis de etiqueta",
+    "Tag Information": "Información de la etiqueta",
+    "Tag Saved": "Etiqueta guardada",
+    "Tag copy": "Copia de etiqueta",
+    "Tag not found": "Etiqueta no encontrada",
+    "Tag saved to \"NFC Emulation\" section": "Etiqueta guardada en la sección «Emulación NFC»",
+    "Tap \"Start Scanning\" to begin": "Toca «Iniciar escaneo» para comenzar",
+    "Tap a device to attack": "Toca un dispositivo para atacar",
+    "Tap the button to start the server": "Toca el botón para iniciar el servidor",
+    "Target:": "Objetivo:",
+    "Technologies": "Tecnologías",
+    "Terminal logs": "Registros de la terminal",
+    "Test": "Probar",
+    "Text": "Texto",
+    "The Bluetooth name shown to other devices.": "El nombre de Bluetooth que ven otros dispositivos.",
+    "The app was closed because of a plugin error": "La app se cerró por un error de un plugin",
+    "The developer did not provide a description.": "El desarrollador no proporcionó una descripción.",
+    "Theme": "Tema",
+    "These network tools require root access.": "Estas herramientas de red requieren acceso root.",
+    "This contact has no phone number": "Este contacto no tiene número de teléfono",
+    "This device does not support BLE advertising": "Este dispositivo no es compatible con la publicidad BLE",
+    "This feature requires Root rights": "Esta función requiere permisos de root",
+    "This tag cannot be emulated": "Esta etiqueta no se puede emular",
+    "Tile size": "Tamaño del mosaico",
+    "Tiles": "Mosaicos",
+    "Time": "Hora",
+    "Too many redirects": "Demasiadas redirecciones",
+    "Tools": "Herramientas",
+    "Top bars": "Barras superiores",
+    "Touchpad": "Panel táctil",
+    "Touchpad Sensitivity (Move)": "Sensibilidad del panel táctil (movimiento)",
+    "Touchpad Sensitivity (Scroll)": "Sensibilidad del panel táctil (desplazamiento)",
+    "Touchscreens": "Pantallas táctiles",
+    "Toys": "Juguetes",
+    "Traffic": "Tráfico",
+    "Trusted model": "Modelo de confianza",
+    "Try again": "Intentar de nuevo",
+    "Try all devices on the network": "Probar todos los dispositivos de la red",
+    "Turn on Bluetooth and try again.": "Activa Bluetooth e inténtalo de nuevo.",
+    "Turn on Bluetooth first": "Primero activa Bluetooth",
+    "Turn on Bluetooth to discover nearby devices": "Activa Bluetooth para descubrir dispositivos cercanos",
+    "Turn on NFC in settings": "Activa NFC en los ajustes",
+    "Tx power": "Potencia Tx",
+    "Type": "Tipo",
+    "Type a message": "Escribe un mensaje",
+    "Type to notepad": "Escribir en el bloc de notas",
+    "URL to open": "URL por abrir",
+    "US Radar": "Radar US",
+    "US radar and BLE/Wi-Fi device detector": "Radar de EE. UU. y detector de dispositivos BLE/Wi-Fi",
+    "US scanner requires microphone access.": "El escáner US requiere acceso al micrófono.",
+    "USB and Bad HID": "USB y Bad HID",
+    "Ultrasonic Repellent/Generator": "Repelente/Generador ultrasónico",
+    "Ultrasonic Sensor/Radar": "Sensor/Radar ultrasónico",
+    "Ultrasound scanning: 15–22 kHz (real-time).": "Escaneo de ultrasonido: 15–22 kHz (en tiempo real).",
+    "Uninstall": "Desinstalar",
+    "Universal Remotes": "Controles remotos universales",
+    "Unknown": "Desconocido",
+    "Unknown commands": "Comandos desconocidos",
+    "Unknown device": "Dispositivo desconocido",
+    "Unlock": "Desbloquear",
+    "Unnamed": "Sin nombre",
+    "Unpin": "Desfijar",
+    "Up to 25 characters": "Hasta 25 caracteres",
+    "Update": "Actualizar",
+    "Update available": "Actualización disponible",
+    "Updated": "Actualizado",
+    "Upload": "Subir",
+    "Username": "Usuario",
+    "VCRs": "Videocaseteras",
+    "Vacuum Cleaners": "Aspiradoras",
+    "Value": "Valor",
+    "Vendor": "Fabricante",
+    "Verdict": "Veredicto",
+    "Version": "Versión",
+    "Very weak": "Muy débil",
+    "Video Conferencing": "Videoconferencia",
+    "Video ready. Choose a device.": "Video listo. Elige un dispositivo.",
+    "Vivo Gamepad List": "Lista de gamepads Vivo",
+    "Vivo TWS List": "Lista de Vivo TWS",
+    "Volume": "Volumen",
+    "Volume +": "Volumen +",
+    "Volume -": "Volumen -",
+    "Volume Down": "Bajar volumen",
+    "Volume Spam": "Spam de volumen",
+    "Volume Up": "Subir volumen",
+    "WARN: WPS V1 Enabled": "AVISO: WPS V1 habilitado",
+    "WARN: admin/admin found!": "AVISO: ¡se encontró admin/admin!",
+    "WI-FI Attacks": "Ataques Wi-Fi",
+    "Waiting for NFC...": "Esperando NFC...",
+    "Waiting for connection": "Esperando conexión",
+    "Waiting for connection...": "Esperando conexión...",
+    "Waiting for network traffic…": "Esperando tráfico de red…",
+    "Waiting...": "Esperando...",
+    "Warning": "Advertencia",
+    "Watch List": "Lista de relojes",
+    "Weak": "Débil",
+    "Web device / admin interface": "Dispositivo web / interfaz de administración",
+    "Welcome": "Bienvenido",
+    "Welcome to Dolphy": "Te damos la bienvenida a Dolphy",
+    "Wi-Fi DoS": "DoS Wi-Fi",
+    "Wi-Fi Print": "Impresión Wi-Fi",
+    "Wi-Fi and networking": "Wi-Fi y redes",
+    "Window Cleaners": "Limpiaventanas",
+    "Wi‑Fi network": "Red Wi‑Fi",
+    "Wi‑Fi password": "Contraseña de Wi‑Fi",
+    "Wi‑Fi scanning requires location permission.": "El escaneo de Wi‑Fi requiere el permiso de ubicación.",
+    "Writable": "Escribible",
+    "Write to NFC tag": "Escribir en etiqueta NFC",
+    "Write to tag": "Escribir en la etiqueta",
+    "XP to Level Up": "XP para subir de nivel",
+    "YOU": "TÚ",
+    "Yes": "Sí",
+    "You don’t have any installed plugins yet": "Aún no tienes plugins instalados",
+    "You have no NFC tags yet": "Aún no tienes etiquetas NFC",
+    "You have not added any devices yet.": "Aún no has añadido ningún dispositivo.",
+    "Your Remotes": "Tus controles",
+    "device": "dispositivo",
+    "e.g. 0x004C for Apple": "p. ej. 0x004C para Apple",
+    "e.g. AirPods Fake 2026": "p. ej. AirPods Falsos 2026",
+    "github.com/owner/repo or index.json link": "github.com/propietario/repo o enlace a index.json",
+    "iOS Crash List": "Lista de fallos de iOS",
+    "iOS Message": "Mensaje de iOS",
+    "just now": "justo ahora",
+    "tag": "etiqueta",
+    "to Dolphy!": "a Dolphy!",
+    "unknown size": "tamaño desconocido",
+}
+
+DICT_LOW = {}
+for _k, _v in DICT.items():
+    DICT_LOW.setdefault(_k.lower(), _v)
+
+TEXT_KEYS = ("text", "title", "subtitle", "description", "label", "message", "confirmText",
+             "dismissText", "primaryText", "placeholder", "hint", "summary")
+SKIP_TYPES = ("logPanel", "webView", "image", "icon")
+SKIP_RE = re.compile(r"(?:[0-9A-Fa-f]{2}[:-]){3,}|\b\d{1,3}(?:\.\d{1,3}){3}\b|https?://|www\.|"
+                     r"\S+@\S+\.\S+|^[/~]\S|0x[0-9A-Fa-f]{4,}|\b[0-9A-Fa-f]{12,}\b")
+TAIL_RE = re.compile(r"^(.*?)([\s:.…!?]*)$", re.S)
+
+
+def gtx(text):
+    import urllib.parse
+    import urllib.request
+    url = ("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=es&dt=t&q="
+           + urllib.parse.quote(text))
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=8) as r:
+        data = json.loads(r.read().decode("utf-8"))
+    return "".join(seg[0] for seg in data[0] if seg and seg[0])
+
+
+class Translator:
+    def __init__(self, cache_path=None, fetch=gtx, on_ready=None):
+        self.enabled = True
+        self.online = True
+        self.cache_path = cache_path
+        self.fetch = fetch
+        self.on_ready = on_ready          # fn(lista_de_sesiones) -> refresca pantallas
+        self.cache = collections.OrderedDict()
+        self.queue = collections.deque()
+        self.queued = set()
+        self.waiters = set()
+        self.lock = threading.Lock()
+        self.worker = None
+        self.fails = 0
+        self.pause_until = 0.0
+        self.dirty = False
+        self._load()
+
+    # ---- caché en disco
+    def _load(self):
+        try:
+            if self.cache_path and os.path.exists(self.cache_path):
+                with open(self.cache_path, encoding="utf-8") as f:
+                    for k, v in json.load(f).items():
+                        self.cache[k] = v
+        except Exception:
+            self.cache.clear()
+
+    def _save(self):
+        try:
+            if self.cache_path and self.dirty:
+                tmp = self.cache_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(dict(self.cache), f, ensure_ascii=False)
+                os.replace(tmp, self.cache_path)
+                self.dirty = False
+        except Exception:
+            pass
+
+    # ---- reglas
+    @staticmethod
+    def worth(s):
+        if len(s) < 2 or len(s) > 400:
+            return False
+        letters = sum(c.isalpha() for c in s)
+        if letters < 2 or letters * 10 < len(s) * 4:
+            return False
+        return not SKIP_RE.search(s)
+
+    def _dict(self, core):
+        hit = DICT.get(core)
+        if hit is None:
+            hit = DICT_LOW.get(core.lower())
+        if hit is not None and len(core) > 2 and core.isupper():
+            hit = hit.upper()
+        return hit
+
+    def tr(self, s, session=None):
+        """Devuelve la traducción si ya se conoce; si no, la pide en segundo plano."""
+        if not isinstance(s, str) or not self.worth(s):
+            return s
+        pre = s[:len(s) - len(s.lstrip())]
+        body = s.strip()
+        m = TAIL_RE.match(body)
+        core, tail = (m.group(1), m.group(2)) if m else (body, "")
+        if not core:
+            return s
+        hit = self._dict(core)
+        if hit is not None:
+            return pre + hit + tail
+        hit = self.cache.get(body)
+        if hit is not None:
+            return pre + hit + s[len(s.rstrip()):]
+        if self.online and sum(c.isdigit() for c in s) < 4:
+            self._enqueue(body, session)
+        return s
+
+    # ---- cola en segundo plano
+    def _enqueue(self, body, session):
+        with self.lock:
+            if session is not None:
+                self.waiters.add(session)
+            if body in self.queued or len(self.queue) > 200:
+                return
+            self.queued.add(body)
+            self.queue.append(body)
+            if self.worker is None or not self.worker.is_alive():
+                self.worker = threading.Thread(target=self._run, daemon=True)
+                self.worker.start()
+
+    def _run(self):
+        while True:
+            with self.lock:
+                if not self.queue:
+                    waiters = list(self.waiters)
+                    self.waiters.clear()
+                    self.worker = None
+                    break
+                body = self.queue.popleft()
+            if time.time() < self.pause_until:
+                with self.lock:
+                    self.queued.discard(body)
+                continue
+            try:
+                out = self.fetch(body)
+                if not out or not str(out).strip():
+                    out = body
+                self.cache[body] = str(out).strip()
+                while len(self.cache) > 5000:
+                    self.cache.popitem(last=False)
+                self.dirty = True
+                self.fails = 0
+            except Exception:
+                self.fails += 1
+                if self.fails >= 4:
+                    self.pause_until = time.time() + 120.0
+                    self.fails = 0
+            with self.lock:
+                self.queued.discard(body)
+            time.sleep(0.15)
+        self._save()
+        if waiters and self.on_ready is not None:
+            try:
+                self.on_ready(waiters)
+            except Exception:
+                pass
+
+    # ---- recorrido de estructuras de UI / ajustes
+    def walk(self, node, session=None):
+        if isinstance(node, dict):
+            if node.get("type") in SKIP_TYPES:
+                return node
+            for k, v in list(node.items()):
+                if k in TEXT_KEYS and isinstance(v, str):
+                    node[k] = self.tr(v, session)
+                elif k == "options" and isinstance(v, list):
+                    for opt in v:
+                        if isinstance(opt, list) and len(opt) > 1 and isinstance(opt[1], str):
+                            opt[1] = self.tr(opt[1], session)
+                        elif isinstance(opt, dict):
+                            self.walk(opt, session)
+                elif k == "tabs" and isinstance(v, list):
+                    node[k] = [self.tr(t, session) if isinstance(t, str) else t for t in v]
+                elif isinstance(v, (dict, list)):
+                    self.walk(v, session)
+        elif isinstance(node, list):
+            for item in node:
+                if isinstance(item, (dict, list)):
+                    self.walk(item, session)
+        return node
+
+    def json_text(self, raw, session=None):
+        return json.dumps(self.walk(json.loads(raw), session), ensure_ascii=False)
+
+
+class Bridge:
+    """Envoltorio del puente de un plugin: traduce lo que registra (ajustes, módulos...)."""
+
+    def __init__(self, inner, tr):
+        object.__setattr__(self, "_b", inner)
+        object.__setattr__(self, "_t", tr)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_b"), name)
+
+    def _t_(self, s):
+        t = object.__getattribute__(self, "_t")
+        return t.tr(s) if t.enabled else s
+
+    def registerSettings(self, title, spec, *rest):
+        t = object.__getattribute__(self, "_t")
+        try:
+            if t.enabled:
+                title = t.tr(str(title))
+                spec = t.json_text(spec)
+        except Exception:
+            pass
+        return object.__getattribute__(self, "_b").registerSettings(title, spec, *rest)
+
+    def registerModule(self, section, title, description, *rest):
+        try:
+            title, description = self._t_(str(title)), self._t_(str(description))
+        except Exception:
+            pass
+        return object.__getattribute__(self, "_b").registerModule(section, title, description, *rest)
+
+    def registerBleMode(self, mode_id, title, description, *rest):
+        try:
+            title, description = self._t_(str(title)), self._t_(str(description))
+        except Exception:
+            pass
+        return object.__getattribute__(self, "_b").registerBleMode(mode_id, title, description, *rest)
+
+
+def runtime_module():
+    mod = sys.modules.get("dolphy_runtime")
+    if mod is None:
+        import dolphy_runtime as mod
+    return mod
+
+
+def install_patches(rt, tr):
+    S = rt.PluginRuntimeSession
+    B = rt.BasePlugin
+    S._es_tr = tr
+    if getattr(S, "_es_installed", False):
+        return
+    S._es_installed = True
+    orig_render = S.render
+    orig_init = S.__init__
+    orig_toast = B.toast
+
+    def render(self, screen_id, state_json):
+        out = orig_render(self, screen_id, state_json)
+        t = getattr(S, "_es_tr", None)
+        if t is None or not t.enabled:
+            return out
+        try:
+            return t.json_text(out, self)
+        except Exception:
+            return out
+
+    def init(self, source, bridge, manifest_json):
+        t = getattr(S, "_es_tr", None)
+        try:
+            if t is not None and t.enabled and json.loads(manifest_json).get("id") != "dolphy_es":
+                bridge = Bridge(bridge, t)
+        except Exception:
+            pass
+        orig_init(self, source, bridge, manifest_json)
+
+    def toast(self, text):
+        t = getattr(S, "_es_tr", None)
+        if t is not None and t.enabled:
+            try:
+                text = t.tr(str(text))
+            except Exception:
+                pass
+        return orig_toast(self, text)
+
+    S.render = render
+    S.__init__ = init
+    B.toast = toast
+
+
+def uninstall_patches(rt):
+    try:
+        rt.PluginRuntimeSession._es_tr = None
+    except Exception:
+        pass
+
+
+def make_run():
+    from java import dynamic_proxy, jclass
+    Runnable = jclass("java.lang.Runnable")
+
+    class Run(dynamic_proxy(Runnable)):
+        def __init__(self, fn):
+            super().__init__()
+            self.fn = fn
+
+        def run(self):
+            self.fn()
+
+    return Run
+
+
+class DolphyEs(BasePlugin):
+    def on_plugin_load(self):
+        self.enabled = bool(self.get_setting("es_enabled", True))
+        self.tr = None
+        self.loader = None
+        self.targets = []
+        self.handler = None
+        self.Run = None
+        self.err = ""
+        self.tries = 0
+        self.alive = True
+        self.api.registerSettings("Español", json.dumps([
+            {"type": "header", "title": "Dolphy en Español"},
+            {"type": "switch", "key": "es_enabled", "title": "Traducir la app al español",
+             "subtitle": "Apágalo para volver al idioma original. Si algo no cambia al instante, cierra y abre Dolphy.",
+             "default": True},
+            {"type": "switch", "key": "es_plugins", "title": "Traducir también los otros plugins",
+             "subtitle": "Pantallas, botones, avisos y ajustes de los demás plugins. Los plugins que se cargan después de este se traducen por completo; los anteriores, sus pantallas y avisos.",
+             "default": True},
+            {"type": "switch", "key": "es_online", "title": "Traductor en línea para textos desconocidos",
+             "subtitle": "Envía a Google Translate los textos de plugins que no estén en el diccionario (no se envían direcciones, números largos ni lo que escribes). Las traducciones se guardan en el teléfono.",
+             "default": True},
+        ]), 40)
+        self._setup_translator()
+        try:
+            from java import jclass
+            self.handler = jclass("android.os.Handler")(jclass("android.os.Looper").getMainLooper())
+            self.Run = make_run()
+            self._post(self._boot, 300)
+        except Exception as e:
+            self._fail("inicio", e)
+
+    def on_plugin_unload(self):
+        self.alive = False
+        self._remove()
+        self._teardown_translator()
+
+    def on_plugin_disable(self):
+        self.alive = False
+        self._remove()
+        self._teardown_translator()
+
+    def on_activity_create(self, activity):
+        if self.alive and self.handler is not None:
+            self._post(lambda: self._apply(activity), 0)
+            self._post(lambda: self._apply(activity), 700)
+
+    def on_setting_changed(self, payload):
+        self.enabled = bool(self.get_setting("es_enabled", True))
+        if self.tr is not None:
+            self.tr.enabled = bool(self.get_setting("es_plugins", True))
+            self.tr.online = bool(self.get_setting("es_online", True))
+        if self.handler is None:
+            return
+        if self.enabled:
+            self._post(self._boot, 0)
+        else:
+            self._post(self._remove, 0)
+
+    # ------------------------------------------------------------------ otros plugins
+    def _setup_translator(self):
+        try:
+            path = None
+            try:
+                ctx = self.api.getApplicationContext()
+                path = os.path.join(str(ctx.getFilesDir().getAbsolutePath()), "dolphy_es_cache.json")
+            except Exception:
+                pass
+            self.tr = Translator(path, gtx, self._refresh_sessions)
+            self.tr.enabled = bool(self.get_setting("es_plugins", True))
+            self.tr.online = bool(self.get_setting("es_online", True))
+            install_patches(runtime_module(), self.tr)
+        except Exception as e:
+            self._fail("otros plugins", e)
+
+    def _teardown_translator(self):
+        try:
+            if self.tr is not None:
+                self.tr.enabled = False
+            uninstall_patches(runtime_module())
+        except Exception:
+            pass
+
+    def _refresh_sessions(self, sessions):
+        # Se llama desde el hilo del traductor: la actualización se hace en el hilo principal.
+        def go():
+            for s in sessions:
+                try:
+                    s.bridge.refresh()
+                except Exception:
+                    pass
+        if self.handler is not None and self.Run is not None:
+            self._post(go, 0)
+
+    def _say(self, text):
+        try:
+            self.api.toast(str(text))
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ utilidades
+    def _post(self, fn, delay=0):
+        try:
+            r = self.Run(fn)
+            if delay:
+                self.handler.postDelayed(r, delay)
+            else:
+                self.handler.post(r)
+        except Exception as e:
+            self._fail("post", e)
+
+    def _fail(self, stage, e):
+        try:
+            tb = traceback.extract_tb(e.__traceback__)
+            line = (" @L" + str(tb[-1].lineno)) if tb else ""
+            self.err = "[" + stage + "] " + type(e).__name__ + line + ": " + str(e)[:160]
+            self._say("Dolphy ES: " + self.err)
+        except Exception:
+            pass
+
+    def _boot(self):
+        if not self.alive or not self.enabled:
+            return
+        try:
+            act = self.api.getActivity()
+            if act is None:
+                self.tries += 1
+                if self.tries < 100:
+                    self._post(self._boot, 600)
+                return
+            self._apply(act)
+        except Exception as e:
+            self._fail("boot", e)
+
+    # ------------------------------------------------------------------ traducción
+    def _ensure_loader(self, act):
+        if self.loader is not None:
+            return True
+        from java import jclass
+        sdk = int(jclass("android.os.Build$VERSION").SDK_INT)
+        if sdk < 30:
+            self._say("Dolphy ES: se necesita Android 11 o superior")
+            return False
+        res = act.getResources()
+        pkg = str(act.getPackageName())
+        entries = {}
+        pkg_id = None
+        type_id = None
+        merged = dict(LIB_TEXTS)
+        merged.update(TEXTS)
+        for name, text in merged.items():
+            rid = int(res.getIdentifier(name, "string", pkg))
+            if rid == 0:
+                continue
+            p = (rid >> 24) & 0xFF
+            t = (rid >> 16) & 0xFF
+            e = rid & 0xFFFF
+            if pkg_id is None:
+                pkg_id, type_id = p, t
+            if p != pkg_id or t != type_id:
+                continue
+            entries[e] = (name, text)
+        if not entries:
+            self._say("Dolphy ES: no se encontraron cadenas que traducir")
+            return False
+        data = build_arsc(pkg, pkg_id, type_id, entries)
+        path = os.path.join(str(act.getCacheDir().getAbsolutePath()), "dolphy_es.arsc")
+        with open(path, "wb") as f:
+            f.write(data)
+        File = jclass("java.io.File")
+        PFD = jclass("android.os.ParcelFileDescriptor")
+        pfd = PFD.open(File(path), PFD.MODE_READ_ONLY)
+        provider = jclass("android.content.res.loader.ResourcesProvider").loadFromTable(pfd, None)
+        loader = jclass("android.content.res.loader.ResourcesLoader")()
+        loader.addProvider(provider)
+        self.loader = loader
+        self.count = len(entries)
+        return True
+
+    def _apply(self, act):
+        if not self.alive or not self.enabled:
+            return
+        try:
+            if not self._ensure_loader(act):
+                return
+            for getter in (lambda: act.getResources(),
+                           lambda: act.getBaseContext().getResources(),
+                           lambda: act.getApplicationContext().getResources()):
+                try:
+                    r = getter()
+                    r.addLoaders(self.loader)
+                    self.targets.append(r)
+                except Exception:
+                    pass
+            self._kick(act)
+        except Exception as e:
+            self._fail("aplicar", e)
+
+    def _remove(self):
+        try:
+            if self.loader is not None:
+                for r in self.targets:
+                    try:
+                        r.removeLoaders(self.loader)
+                    except Exception:
+                        pass
+            self.targets = []
+            act = self.api.getActivity()
+            if act is not None:
+                self._kick(act)
+        except Exception as e:
+            self._fail("quitar", e)
+
+    def _kick(self, act):
+        # Hace que Compose vuelva a leer las cadenas sin recrear la actividad.
+        def go():
+            try:
+                decor = act.getWindow().getDecorView()
+                decor.dispatchConfigurationChanged(act.getResources().getConfiguration())
+            except Exception as e:
+                self._fail("refrescar", e)
+        self._post(go, 150)
+        self._post(go, 900)
