@@ -1,6 +1,6 @@
 {
   "format": "dolphy-plugins-v1",
-  "count": 38,
+  "count": 39,
   "plugins": [
     {
       "id": 16,
@@ -141,6 +141,20 @@
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/dolphy_ai_assistant/dolphy_ai_assistant.dolphyplugin",
       "post_url": "https://t.me/c/3966541757/46035",
       "updated_at": "2026-11-14 17:36:37"
+    },
+    {
+      "id": 39,
+      "name": "Dolphy en Español",
+      "version": "1.1.0",
+      "author": "Woodchaman",
+      "description": {
+        "ru": "переводить английский и русский на испанский",
+        "en": "Translate English and Russian into Spanish"
+      },
+      "file": "plugins/dolphy_en_espa_ol/dolphy_en_espa_ol.dolphyplugin",
+      "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/dolphy_en_espa_ol/dolphy_en_espa_ol.dolphyplugin",
+      "post_url": "https://t.me/c/3966541757/48418",
+      "updated_at": "2026-11-24 20:16:48"
     },
     {
       "id": 13,
