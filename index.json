@@ -1,6 +1,6 @@
 {
   "format": "dolphy-plugins-v1",
-  "count": 39,
+  "count": 40,
   "plugins": [
     {
       "id": 16,
@@ -519,6 +519,20 @@
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/metalloiskatel_pro/metalloiskatel_pro.dolphyplugin",
       "post_url": "https://t.me/c/3966541757/35337",
       "updated_at": "2026-10-20 17:22:06"
+    },
+    {
+      "id": 40,
+      "name": "Новогодний плагин",
+      "version": "1.0.1",
+      "author": "@Da_koroche",
+      "description": {
+        "ru": "Что?.. СНЕГ?! Да, теперь даже Dolphy готовится к Новому году!\n\n❄️ Новогодний плагин с анимированным снегопадом на фоне всего приложения.\n\n🎄 Погрузитесь в зимнюю атмосферу прямо во время использования Dolphy!\n\nА Dolphy... похоже, зима уже здесь!",
+        "en": "What? SNOW?! Yes, now even Dolphy is getting ready for the New Year!\n\n❄️ New Year's plugin with animated snowfall in the background of the entire app.\n\n🎄 Immerse yourself in the winter atmosphere right while you use it."
+      },
+      "file": "plugins/novogodniy_plagin/novogodniy_plagin.dolphyplugin",
+      "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/novogodniy_plagin/novogodniy_plagin.dolphyplugin",
+      "post_url": "https://t.me/c/3966541757/48522",
+      "updated_at": "2026-11-25 14:58:18"
     },
     {
       "id": 26,
