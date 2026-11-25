@@ -215,7 +215,7 @@
     {
       "id": 36,
       "name": "Glass Bar",
-      "version": "3.70.3",
+      "version": "3.73.17",
       "author": "@Da_koroche",
       "description": {
         "ru": "Glass Bar — нижняя панель навигации в стиле Liquid Glass с реалистичным преломлением, размытием, свечением и радужной дисперсией. Плавная анимация и гибкая настройка эффектов. Не работает? Перезапустите или переключите плагин.",
@@ -223,8 +223,8 @@
       },
       "file": "plugins/glass_bar/glass_bar.dolphyplugin",
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/glass_bar/glass_bar.dolphyplugin",
-      "post_url": "https://t.me/c/3966541757/47981",
-      "updated_at": "2026-11-23 05:36:10"
+      "post_url": "https://t.me/c/3966541757/48525",
+      "updated_at": "2026-11-25 15:03:15"
     },
     {
       "id": 32,
