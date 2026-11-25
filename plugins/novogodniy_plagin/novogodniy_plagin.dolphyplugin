@@ -1,0 +1,421 @@
+import json
+import time
+
+__id__ = "new_year_winter"
+__name__ = "Новогодний плагин"
+__version__ = "1.0.1"
+__author__ = "Dolphy"
+__description__ = "Глобальный снегопад на всех экранах"
+__icon__ = "rounded:ac_unit"
+
+PAGE = r'''<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<style>html,body{margin:0;height:100%;background:transparent;overflow:hidden;pointer-events:none}canvas{position:fixed;left:0;top:0;width:100%;height:100%}</style></head>
+<body><canvas id="c"></canvas><script>
+var cv=document.getElementById('c'),x=cv.getContext('2d'),W=0,H=0,D=1,
+cfg={snow:true,tree:false,count:45,tx:0,dy:-70,ay:null,ays:null,ts:100,eco:false},
+fl=[],mini=[],spr={},treeSpr=null,TB=null,lights=[],star={x:0,y:0},last=0,run=false,paused=false,raf=0;
+function mk(w,h,f){var c=document.createElement('canvas');c.width=Math.ceil(w*D);c.height=Math.ceil(h*D);var g=c.getContext('2d');g.scale(D,D);f(g,w,h);return c}
+function dot(r,col){return mk(r*2,r*2,function(g){var q=g.createRadialGradient(r,r,0,r,r,r);q.addColorStop(0,'rgba('+col+',1)');q.addColorStop(.45,'rgba('+col+',.55)');q.addColorStop(1,'rgba('+col+',0)');g.fillStyle=q;g.fillRect(0,0,r*2,r*2)})}
+function flake(r){return mk(r*2,r*2,function(g){g.translate(r,r);g.strokeStyle='rgba(235,247,255,.95)';g.lineWidth=Math.max(1,r/6);g.lineCap='round';for(var i=0;i<6;i++){g.rotate(Math.PI/3);g.beginPath();g.moveTo(0,0);g.lineTo(0,-r*.92);g.moveTo(0,-r*.55);g.lineTo(r*.22,-r*.78);g.moveTo(0,-r*.55);g.lineTo(-r*.22,-r*.78);g.stroke()}})}
+function sprites(){spr={s:dot(3,'255,255,255'),m:dot(5,'232,245,255'),l:flake(9),
+ w:dot(9,'255,255,255'),b:dot(9,'170,200,255'),v:dot(9,'200,150,255'),k:dot(9,'255,160,225'),y:dot(9,'235,205,255')}}
+function rnd(a,b){return a+Math.random()*(b-a)}
+function mkFlake(k,top){var s=k<.6?'s':k<.9?'m':'l',r=s=='s'?rnd(1.5,3):s=='m'?rnd(3,5):rnd(6,9);
+ return{t:s,r:r,x:rnd(0,W),y:top?-r*2:rnd(-r,H),vy:(s=='s'?rnd(28,48):s=='m'?rnd(46,76):rnd(66,100)),sw:rnd(8,26),f:rnd(.4,1.1),ph:rnd(0,6.28),a:s=='s'?rnd(.5,.8):rnd(.7,1),rot:rnd(0,6.28),rv:rnd(-.8,.8)}}
+function fillFlakes(){fl=[];var n=cfg.eco?Math.min(cfg.count,25):cfg.count;for(var i=0;i<n;i++)fl.push(mkFlake(i/n,false))}
+function buildTree(){
+ var th=112*cfg.ts/100,tw=th*.92,pad=th*.32,w=tw+pad*2,h=th+pad*.95,cx=w/2,top=pad*.62,bot=top+th;
+ lights=[];
+ treeSpr=mk(w,h,function(g){
+  var gl=g.createRadialGradient(cx,h*.5,0,cx,h*.5,Math.min(w,h)/2);gl.addColorStop(0,'rgba(190,140,255,.30)');gl.addColorStop(1,'rgba(190,140,255,0)');g.fillStyle=gl;g.fillRect(0,0,w,h);
+  var hl=g.createLinearGradient(0,bot-th*.1,0,bot+th*.14);hl.addColorStop(0,'rgba(245,238,255,.95)');hl.addColorStop(1,'rgba(160,130,210,.55)');g.fillStyle=hl;
+  g.beginPath();g.ellipse(cx,bot+th*.02,tw*.68,th*.11,0,0,6.29);g.fill();g.beginPath();g.ellipse(cx+tw*.5,bot+th*.07,tw*.32,th*.07,0,0,6.29);g.fill();
+  g.fillStyle='#3a3048';g.fillRect(cx-th*.04,bot-th*.05,th*.08,th*.09);
+  var T=[[0,.36,.2],[.2,.58,.31],[.4,.8,.42],[.6,1,.54]];
+  T.forEach(function(t,ti){var y0=top+th*t[0],y1=top+th*t[1],hw=tw*t[2],hh=y1-y0;
+   var q=g.createLinearGradient(0,y0,0,y1);q.addColorStop(0,'#4a4366');q.addColorStop(1,'#241f38');g.fillStyle=q;
+   g.beginPath();g.moveTo(cx,y0);g.lineTo(cx+hw,y1);g.lineTo(cx-hw,y1);g.closePath();g.fill();
+   g.fillStyle='#f6f0ff';g.beginPath();g.moveTo(cx,y0-hh*.02);g.lineTo(cx+hw*.62,y0+hh*.62);
+   for(var i=0;i<4;i++){var xa=cx+hw*.62-hw*1.24*(i+1)/4,xm=cx+hw*.62-hw*1.24*(i+.5)/4;g.quadraticCurveTo(xm,y0+hh*(.8-(i%2)*.1),xa,y0+hh*(.62-(i%2==0?.04:.0)))}
+   g.closePath();g.fill();
+   g.fillStyle='rgba(255,255,255,.95)';for(var i=0;i<5;i++){g.beginPath();g.arc(cx-hw+hw*2*(i+.5)/5,y1-hh*.01,hh*.07,0,6.29);g.fill()}
+   var gy=y0+hh*.7,gh=hw*.82,sag=hh*.2;g.strokeStyle='rgba(225,195,255,.9)';g.lineWidth=Math.max(1,th*.01);g.beginPath();g.moveTo(cx-gh,gy);g.quadraticCurveTo(cx,gy+sag,cx+gh,gy+hh*.04);g.stroke();
+   var n=5;for(var k=0;k<n;k++){var u=(k+.5)/n,m=1-u,px=m*m*(cx-gh)+2*m*u*cx+u*u*(cx+gh),py=m*m*gy+2*m*u*(gy+sag)+u*u*(gy+hh*.04);lights.push({x:px,y:py,c:['k','v','w','b'][(k+ti)%4],ph:rnd(0,6.28),sp:rnd(.8,1.7)})}
+  });
+  [['#d9b8ff',.5,.5],['#ffd1f1',.38,.72],['#ffffff',.64,.78],['#b9a6ff',.28,.9]].forEach(function(b){var bx=cx+(b[1]-.5)*tw*.8*(.4+b[2]*.8),by=top+th*b[2],r=th*.022;
+   var q=g.createRadialGradient(bx-r*.3,by-r*.3,0,bx,by,r);q.addColorStop(0,'#fff');q.addColorStop(.4,b[0]);q.addColorStop(1,'rgba(60,40,100,.9)');g.fillStyle=q;g.beginPath();g.arc(bx,by+r,r,0,6.29);g.fill()});
+ });
+ TB={w:w,h:h,cx:cx,top:top,th:th};
+ star.r=th*.085;star.sx=cx;star.sy=top-star.r*.1;
+ mini=[];for(var i=0;i<(cfg.eco?5:12);i++)mini.push({x:rnd(0,w),y:rnd(0,h),vy:rnd(14,30),ph:rnd(0,6.28),r:rnd(1,2.2)});
+}
+function starPath(g,cx,cy,R,r){g.beginPath();for(var i=0;i<10;i++){var a=-Math.PI/2+i*Math.PI/5,q=i%2?r:R;g.lineTo(cx+Math.cos(a)*q,cy+Math.sin(a)*q)}g.closePath()}
+function drawTree(t,dt){
+ var ox=W-TB.w-2+cfg.tx,oy=cfg.ays+cfg.dy;
+ x.save();x.translate(ox,oy);x.globalAlpha=1;x.drawImage(treeSpr,0,0,TB.w,TB.h);
+ lights.forEach(function(l){var a=.45+.55*Math.sin(t*l.sp*2+l.ph);x.globalAlpha=a;x.drawImage(spr[l.c],l.x-7,l.y-7,14,14)});
+ var cyc=(t%4.5)/4.5,tw=cyc>.82?Math.sin((cyc-.82)/.18*3.14):0,R=star.r*(1+tw*.45);
+ x.globalAlpha=.55+.45*tw;x.drawImage(spr.y,star.sx-R*2.6,star.sy-R*2.6,R*5.2,R*5.2);
+ x.globalAlpha=1;var q=x.createLinearGradient(0,star.sy-R,0,star.sy+R);q.addColorStop(0,'#fff4ff');q.addColorStop(1,'#d9a8ff');x.fillStyle=q;starPath(x,star.sx,star.sy,R,R*.45);x.fill();
+ mini.forEach(function(m){m.y+=m.vy*dt;if(m.y>TB.h){m.y=-3;m.x=rnd(0,TB.w)}x.globalAlpha=.8;x.drawImage(spr.s,m.x+Math.sin(t+m.ph)*5-m.r*2,m.y-m.r*2,m.r*4,m.r*4)});
+ x.restore();x.globalAlpha=1}
+function frame(ts){
+ if(!run)return;raf=requestAnimationFrame(frame);
+ if(cfg.eco&&ts-last<33)return;
+ var dt=Math.min((ts-last)/1000,.05);if(!last)dt=.016;last=ts;var t=ts/1000;
+ x.setTransform(D,0,0,D,0,0);x.clearRect(0,0,W,H);
+ if(cfg.snow){for(var i=0;i<fl.length;i++){var f=fl[i];f.y+=f.vy*dt;f.rot+=f.rv*dt;var px=f.x+Math.sin(t*f.f+f.ph)*f.sw;
+  if(f.y>H+f.r*2){var n=mkFlake(Math.random(),true);fl[i]=n;continue}
+  x.globalAlpha=f.a;var s=spr[f.t],d=f.r*2;
+  if(f.t=='l'){x.save();x.translate(px,f.y);x.rotate(f.rot);x.drawImage(s,-f.r,-f.r,d,d);x.restore()}else x.drawImage(s,px-f.r,f.y-f.r,d,d)}}
+ x.globalAlpha=1;if(cfg.ay!==null)cfg.ays=cfg.ays===null?cfg.ay:cfg.ays+(cfg.ay-cfg.ays)*.7;if(cfg.tree&&treeSpr&&cfg.ays!==null)drawTree(t,dt)}
+function size(){D=Math.min(window.devicePixelRatio||1,2);W=window.innerWidth;H=window.innerHeight;cv.width=Math.ceil(W*D);cv.height=Math.ceil(H*D);sprites();buildTree();fillFlakes()}
+function sync(){var need=(cfg.snow||cfg.tree)&&!paused;if(need&&!run){run=true;last=0;raf=requestAnimationFrame(frame)}else if(!need&&run){run=false;cancelAnimationFrame(raf);x.setTransform(1,0,0,1,0,0);x.clearRect(0,0,cv.width,cv.height)}}
+window.setCfg=function(o){var rs=o.ts!==undefined&&o.ts!==cfg.ts,rc=o.count!==undefined&&o.count!==cfg.count||o.eco!==undefined&&o.eco!==cfg.eco;
+ for(var k in o)cfg[k]=o[k];if(rs)buildTree();if(rc){fillFlakes();buildTree()}sync()};
+window.setAnchor=function(v){cfg.ay=v;if(v===null)cfg.ays=null};window.setPaused=function(p){paused=!!p;sync()};
+window.addEventListener('resize',size);document.addEventListener('visibilitychange',function(){paused=document.hidden;sync()});
+size();sync();
+</script></body></html>
+'''
+
+SETTINGS = [
+    {"type": "header", "title": "Новогодний плагин"},
+    {"type": "switch", "key": "snow", "title": "Снегопад", "subtitle": "Снег на всех экранах, касания не перехватывает", "default": True},
+    {"type": "slider", "key": "density", "title": "Количество снежинок", "min": 10, "max": 120, "default": 45, "steps": 109},
+    {"type": "switch", "key": "eco", "title": "Экономный режим", "subtitle": "30 кадров/с и меньше снежинок", "default": False},
+]
+
+
+class NewYearWinter(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        self.view = None
+        self.host = None
+        self.on_settings = False
+        self.ready = False
+        self.polling = False
+        self.handler = None
+        self.proxy = None
+        self.mode = None
+        self.node = None
+        self.cv = None
+        self.last = None
+        self.ts = 0.0
+
+    # ---------- lifecycle ----------
+    def _bridge(self, on):
+        try:
+            p = self.api.getContext().getSharedPreferences("dolphy_cross_plugin_state", 0)
+            import time
+            p.edit().putBoolean("new_year_active", bool(on)).putLong("new_year_beat", int(time.time() * 1000)).apply()
+        except Exception:
+            pass
+
+    def on_plugin_load(self):
+        self._bridge(True)
+        self.api.registerSettings("Новогодний плагин", json.dumps(SETTINGS), 0)
+        act = self.api.getActivity()
+        if act is not None:
+            self._attach(act)
+
+    def on_plugin_unload(self):
+        self._bridge(False)
+        self._detach()
+
+    def on_activity_create(self, activity):
+        self._attach(activity)
+
+    def on_activity_destroy(self, activity):
+        self._detach()
+
+    def on_activity_pause(self, activity):
+        self._js("setPaused(true)")
+
+    def on_activity_resume(self, activity):
+        self._js("setPaused(false)")
+
+    def on_navigation(self, route):
+        self.on_settings = str(route).split("/")[0] == "settings"
+        self._push()
+
+    def on_setting_changed(self, payload):
+        self._push()
+
+    # ---------- helpers ----------
+    def _run(self, activity, fn):
+        from java import jclass, dynamic_proxy
+
+        class _R(dynamic_proxy(jclass("java.lang.Runnable"))):
+            def run(self_inner):
+                try:
+                    fn()
+                except Exception:
+                    pass
+
+        activity.runOnUiThread(_R())
+
+    def _attach(self, activity):
+        self._detach()
+        self.host = activity
+
+        def build():
+            from java import jclass
+            decor = activity.getWindow().getDecorView()
+            token = decor.getWindowToken()
+            if token is None:
+                return
+            WebView = jclass("android.webkit.WebView")
+            LP = jclass("android.view.WindowManager$LayoutParams")
+            wv = WebView(activity)
+            wv.setBackgroundColor(0)
+            wv.setLayerType(2, None)
+            wv.setClickable(False)
+            wv.setFocusable(False)
+            wv.setLongClickable(False)
+            wv.setHapticFeedbackEnabled(False)
+            wv.setVerticalScrollBarEnabled(False)
+            wv.setHorizontalScrollBarEnabled(False)
+            wv.setOverScrollMode(2)
+            wv.getSettings().setJavaScriptEnabled(True)
+            flags = 0x8 | 0x10 | 0x100 | 0x200 | 0x1000000
+            lp = LP(-1, -1, 1000, flags, -3)
+            lp.token = token
+            lp.setTitle("NewYearWinter")
+            activity.getWindowManager().addView(wv, lp)
+            self.view = wv
+            wv.loadDataWithBaseURL(None, PAGE, "text/html", "utf-8", None)
+            self.ready = True
+            self._push()
+
+        self._run(activity, lambda: self._after_attached(activity, build))
+
+    def _after_attached(self, activity, build):
+        decor = activity.getWindow().getDecorView()
+        if decor.getWindowToken() is not None:
+            build()
+        else:
+            from java import jclass, dynamic_proxy
+
+            class _R(dynamic_proxy(jclass("java.lang.Runnable"))):
+                def run(self_inner):
+                    try:
+                        build()
+                    except Exception:
+                        pass
+
+            decor.postDelayed(_R(), 400)
+
+    def _detach(self):
+        self._stop_poll()
+        self.cv = None
+        self.node = None
+        self.mode = None
+        act, wv = self.host, self.view
+        self.view = None
+        self.host = None
+        self.ready = False
+        if act is None or wv is None:
+            return
+
+        def kill():
+            try:
+                wv.loadUrl("about:blank")
+                act.getWindowManager().removeViewImmediate(wv)
+            except Exception:
+                pass
+            try:
+                wv.destroy()
+            except Exception:
+                pass
+
+        try:
+            self._run(act, kill)
+        except Exception:
+            pass
+
+    # ---------- слежение за профилем ----------
+    def _start_poll(self):
+        act = self.host
+        if self.polling or act is None or self.view is None:
+            return
+        from java import jclass, dynamic_proxy
+        self.polling = True
+        self.last = None
+        h = jclass("android.os.Handler")(jclass("android.os.Looper").getMainLooper())
+        plugin = self
+
+        class _P(dynamic_proxy(jclass("java.lang.Runnable"))):
+            def run(me):
+                delay = 16
+                try:
+                    delay = plugin._tick()
+                except Exception:
+                    pass
+                if plugin.polling and plugin.view is not None and delay:
+                    h.postDelayed(me, delay)
+
+        self.handler = h
+        self.proxy = _P()
+        self._run(act, lambda: h.post(self.proxy))
+
+    def _stop_poll(self):
+        if not self.polling:
+            return
+        self.polling = False
+        h, p, act = self.handler, self.proxy, self.host
+        if h is not None and act is not None:
+            try:
+                self._run(act, lambda: h.removeCallbacks(p))
+            except Exception:
+                pass
+        self.node = None
+        self.last = None
+        self._js("setAnchor(null)")
+
+    def _put(self, y):
+        if y is None:
+            if self.last is not None:
+                self.last = None
+                self.view.evaluateJavascript("setAnchor(null)", None)
+        elif self.last is None or abs(y - self.last) >= 0.5:
+            self.last = y
+            self.view.evaluateJavascript("setAnchor(%.1f)" % y, None)
+
+    def _tick(self):
+        # пульс: пока плагин работает, раз в секунду обновляем метку (бар проверяет её свежесть)
+        if time.time() - getattr(self, "_beat_t", 0.0) > 1.0:
+            self._beat_t = time.time()
+            self._bridge(True)
+        if self.view is None or self.host is None:
+            return 0
+        if self.mode is None:
+            self.mode = self._detect()
+            self.toast("Ёлка: режим " + self.mode)
+        if self.mode == "sem":
+            self._put(self._y_sem())
+            return 16
+        if self.mode == "a11y":
+            self._put(self._y_a11y())
+            return 50
+        self._put(110.0)
+        return 0
+
+    def _compose_view(self, need_name):
+        if self.cv is not None:
+            return self.cv
+        from java import jclass, cast
+        VG = jclass("android.view.ViewGroup")
+        stack = [self.host.getWindow().getDecorView()]
+        while stack:
+            v = stack.pop()
+            if need_name:
+                if str(v.getClass().getName()).endswith("AndroidComposeView"):
+                    self.cv = cast(jclass("androidx.compose.ui.platform.AndroidComposeView"), v)
+                    return self.cv
+            elif v.getAccessibilityNodeProvider() is not None:
+                self.cv = v
+                return v
+            if VG.isInstance(v):
+                g = cast(VG, v)
+                for i in range(g.getChildCount()):
+                    stack.append(g.getChildAt(i))
+        return None
+
+    def _detect(self):
+        try:
+            self._compose_view(True).getSemanticsOwner().getUnmergedRootSemanticsNode()
+            return "sem"
+        except Exception:
+            self.cv = None
+        try:
+            if self._compose_view(False) is not None:
+                return "a11y"
+        except Exception:
+            pass
+        return "static"
+
+    def _find_sem(self):
+        root = self._compose_view(True).getSemanticsOwner().getUnmergedRootSemanticsNode()
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            try:
+                it = n.getConfig().iterator()
+                while it.hasNext():
+                    e = it.next()
+                    if str(e.getKey().getName()) == "Text":
+                        v = e.getValue()
+                        if v is not None and str(v.get(0)).strip() == "PASSPORT":
+                            return n
+            except Exception:
+                pass
+            ch = n.getChildren()
+            for i in range(ch.size()):
+                stack.append(ch.get(i))
+        return None
+
+    def _dens(self):
+        return float(self.host.getResources().getDisplayMetrics().density)
+
+    def _y_sem(self):
+        try:
+            if self.node is None:
+                if time.time() - self.ts < 0.25:
+                    return None
+                self.ts = time.time()
+                self.node = self._find_sem()
+                if self.node is None:
+                    return None
+            info = self.node.getLayoutInfo()
+            if not (info.isAttached() and info.isPlaced()):
+                self.node = None
+                return None
+            r = self.node.getBoundsInWindow()
+            if r.getBottom() - r.getTop() <= 0:
+                self.node = None
+                return None
+            return r.getTop() / self._dens()
+        except Exception:
+            self.node = None
+            return None
+
+    def _y_a11y(self):
+        try:
+            from java import jclass
+            lst = self._compose_view(False).getAccessibilityNodeProvider().findAccessibilityNodeInfosByText("PASSPORT", -1)
+            if lst is None:
+                return None
+            for i in range(lst.size()):
+                n = lst.get(i)
+                if str(n.getText()).strip() == "PASSPORT":
+                    rect = jclass("android.graphics.Rect")()
+                    n.getBoundsInScreen(rect)
+                    return rect.top / self._dens()
+        except Exception:
+            pass
+        return None
+
+    def _js(self, code):
+        wv, act = self.view, self.host
+        if wv is None or act is None:
+            return
+        self._run(act, lambda: wv.evaluateJavascript(code, None))
+
+    def _push(self):
+        if not self.ready:
+            return
+        cfg = {
+            "snow": bool(self.get_setting("snow", True)),
+            "count": int(self.get_setting("density", 45)),
+            "tree": False,
+            "ts": int(self.get_setting("tree_size", 100)),
+            "tx": int(self.get_setting("tree_x", 0)),
+            "dy": int(self.get_setting("tree_dy", -70)),
+            "eco": bool(self.get_setting("eco", False)),
+        }
+        self._js("setCfg(" + json.dumps(cfg) + ")")
+        if cfg["tree"]:
+            self._start_poll()
+        else:
+            self._stop_poll()
