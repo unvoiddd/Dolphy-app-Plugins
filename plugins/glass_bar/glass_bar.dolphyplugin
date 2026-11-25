@@ -1,6 +1,6 @@
 __id__ = "glass_bar"
 __name__ = "Glass Bar"
-__version__ = "3.70.3"
+__version__ = "3.73.17"
 __author__ = "@Da_koroche"
 __description__ = "Glass Bar: реалистичное стекло и общий журнал логов плагинов"
 __icon__ = "rounded:blur_on"
@@ -200,6 +200,7 @@ uniform float blurK;   // множитель размытия фона
 uniform float frostK;  // матирование: рассеивание и мягкое снижение насыщенности
 uniform float grainK;  // интенсивность мелкой фактуры матового стекла
 uniform float3 touch;  // x, y и сила водяного бугорка
+uniform float tm;      // время для волн от пальца
 
 float sdBox(float2 p, float2 c, float2 hs) {
     float r = min(hs.x, hs.y);
@@ -338,6 +339,9 @@ half4 main(float2 p) {
     float water = clamp(touch.z, 0.0, 1.0) * exp(-dot(td, td) / (tr * tr));
     float2 waterDir = td / max(length(td), 1.0);
     base += waterDir * water * dpx * 5.0;
+    // расходящаяся волна от пальца: кольца затухают с расстоянием
+    float ripple = sin(length(td) * 0.12 - tm * 7.0) * exp(-length(td) / (dpx * 45.0)) * water;
+    base += waterDir * ripple * dpx * 3.0;
 
     // дисперсия: R, G, B преломляются по-разному
     float disp = (0.14 + 0.06 * g) * dispK;
@@ -382,10 +386,11 @@ half4 main(float2 p) {
     col = mix(col, float3(0.28, 0.26, 0.31), 0.40 * lensIn * (1.0 - g));
     col += 0.015 + 0.03 * lensG;
 
-    // иконки и подписи проходят через то же преломление (и дисперсию по каналам)
-    float4 ir = float4(icons.eval(cp(pr)));
-    float4 ig = float4(icons.eval(cp(pg)));
-    float4 ib = float4(icons.eval(cp(pb)));
+    // иконки и подписи преломляет только линза (панель их не искажает)
+    float2 offI = -nL * mL;
+    float4 ir = float4(icons.eval(cp(p + (bub.xy - p) * mag + offI * (1.0 - disp) - sh)));
+    float4 ig = float4(icons.eval(cp(p + (bub.xy - p) * mag + offI)));
+    float4 ib = float4(icons.eval(cp(p + (bub.xy - p) * mag + offI * (1.0 + disp) + sh)));
     col = float3(col.r * (1.0 - ir.a) + ir.r,
                  col.g * (1.0 - ig.a) + ig.g,
                  col.b * (1.0 - ib.a) + ib.b);
@@ -406,7 +411,7 @@ half4 main(float2 p) {
     float3 rim = float3(exp(-abs(dl + dpx * 0.8) / wR),
                         exp(-abs(dl) / wR),
                         exp(-abs(dl - dpx * 0.8) / wR));
-    col += rim * rimTint * s1 * 0.70 * g;
+    col += rim * rimTint * s1 * 0.85 * g;
     float band = exp(-depL / (dpx * 5.5)) * lensG;
     col += band * (pow(max(dot(nL, -L), 0.0), 1.5) * 0.16 + pow(max(dot(nL, L), 0.0), 2.0) * 0.12);
     // тёмная канавка сразу за яркой кромкой: толстое стекло
@@ -423,7 +428,9 @@ half4 main(float2 p) {
 
     if (glowK > 0.0) {
         float cg = exp(-depL / (dpx * 3.0)) * lensG * (0.012 + 0.03 * g);
-        col += glowCol * cg * glowK;
+        // рассеивание: спад как у реального света (обратно-квадратичный), без жёсткого края
+        float halo = lensG * g * 0.026 / (1.0 + pow(max(depL, 0.0) / (dpx * 6.0), 2.0));
+        col += (glowCol * cg + rimTint * halo) * glowK;
     }
 
     // трещины: тёмная сердцевина, светлая кромка, блик отражения вдоль линии
@@ -710,10 +717,12 @@ half4 main(float2 p) {
     float ringB = exp(-abs(dBq) / (dpx * 1.3)) * lensG;
     col += ringB * (pow(max(dot(nBq, L2), 0.0), 2.0) + 0.55 * pow(max(dot(nBq, -L2), 0.0), 2.0) + 0.10) * 0.60;
 
-    // иконки и подписи проходят через то же преломление и дисперсию
-    float4 ir = float4(icons.eval(cp(pr)));
-    float4 ig = float4(icons.eval(cp(pg)));
-    float4 ib = float4(icons.eval(cp(pb)));
+    // иконки и подписи преломляет только линза (панель их не искажает)
+    float3 NI = normalize(float3(nL * sL, 1.0));
+    float2 bI = p + (bub.xy - p) * (0.045 * lensG * min(thickMul, 1.5));
+    float4 ir = float4(icons.eval(cp(bI + refrDisp(NI, max(ior - dispD, 1.0), thL) * lensG - shf)));
+    float4 ig = float4(icons.eval(cp(bI + refrDisp(NI, ior, thL) * lensG)));
+    float4 ib = float4(icons.eval(cp(bI + refrDisp(NI, ior + dispD, thL) * lensG + shf)));
     col = float3(col.r * (1.0 - ir.a) + ir.r,
                  col.g * (1.0 - ig.a) + ig.g,
                  col.b * (1.0 - ib.a) + ib.b);
@@ -1145,7 +1154,155 @@ THEMES = (
     ((0.30, 0.80, 1.00), (0.20, 0.62, 1.00), (0.45, 0.80, 1.00)),  # 1 Неон-голубой
     ((1.00, 0.35, 0.90), (0.72, 0.25, 1.00), (1.00, 0.55, 0.95)),  # 2 Фиолетово-розовый
     ((0.95, 0.97, 1.00), (0.85, 0.90, 1.00), (0.95, 0.97, 1.00)),  # 3 Стеклянный белый
+    ((0.78, 0.93, 1.00), (0.55, 0.84, 1.00), (0.80, 0.93, 1.00)),  # 4 Лёд (включается новогодним плагином)
 )
+
+
+# ---- Новогодний декор бара: чистая геометрия (без Android), отрисовка отдельно ----
+AGSL_NYMASK = """
+uniform shader content;
+uniform float4 bub;
+float sdL(float2 p) {
+    float r = min(bub.z, bub.w);
+    float2 q = abs(p - bub.xy) - bub.zw + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+half4 main(float2 p) {
+    float d = sdL(p);
+    if (d > 0.0) return content.eval(p);          // вне линзы декор как есть: панель его не преломляет
+    float e = 1.0;
+    float2 g = float2(sdL(p + float2(e, 0.0)) - sdL(p - float2(e, 0.0)),
+                      sdL(p + float2(0.0, e)) - sdL(p - float2(0.0, e)));
+    float gl = length(g);
+    g = gl > 0.0001 ? g / gl : float2(0.0, -1.0);
+    float dep = -d;
+    float t = clamp(dep / (bub.w * 0.32), 0.0, 1.0);
+    float m = bub.w * 0.34 * pow(1.0 - t, 2.0);
+    float2 base = p + (bub.xy - p) * 0.03;
+    float2 oR = base - g * m * 0.86;
+    float2 oG = base - g * m;
+    float2 oB = base - g * m * 1.14;
+    float4 cr = float4(content.eval(oR));
+    float4 cg = float4(content.eval(oG));
+    float4 cb = float4(content.eval(oB));
+    return half4(half(cr.r), half(cg.g), half(cb.b), half(cg.a));
+}
+"""
+
+
+def ny_shapes(win_w, win_h, bar_top, bar_h, bar_w, pad, u):
+    """Список операций рисования. u — пикселей в одном dp бара."""
+    import math, random
+    rnd = random.Random(11)
+    ops = []
+    L = float(pad)
+    R_ = float(pad + bar_w)
+    T = float(bar_top)
+    B = float(bar_top + bar_h)
+    rad = bar_h / 2.0
+    WH = (255, 250, 253, 255)
+    WB = (255, 200, 220, 255)
+    ICE0 = (235, 225, 240, 255)
+    ICE1 = (150, 190, 245, 255)
+
+    def blob(x0, x1, ybase, thick_top, thick_bot, seed, fade=True, wob=1.0):
+        r = random.Random(seed)
+        p1, p2, p3 = r.uniform(0, 6), r.uniform(0, 6), r.uniform(0, 6)
+        n = max(12, int((x1 - x0) / (2.0 * u)))
+        top, bot = [], []
+        for i in range(n + 1):
+            f = i / n
+            x = x0 + (x1 - x0) * f
+            env = math.sin(math.pi * f) ** 0.35 if fade else 1.0
+            w1 = 0.5 + 0.5 * math.sin(f * 17.0 + p1) * wob
+            w2 = 0.5 + 0.5 * math.sin(f * 41.0 + p2)
+            top.append((x, ybase - (thick_top * (0.55 + 0.45 * w1)) * u * env))
+            drip = abs(math.sin(f * 23.0 + p3)) ** 1.6
+            bot.append((x, ybase + (thick_bot * (0.45 + 0.9 * drip) * (0.7 + 0.3 * w2)) * u * env))
+        return top + bot[::-1]
+
+    # 1. снежная шапка по верхней кромке
+    x0, x1 = L + rad * 0.55, R_ - rad * 0.55
+    cap = blob(x0, x1, T + 0.5 * u, 7.0, 5.0, 3)
+    ops.append(("poly", cap, WH, (215, 228, 255, 255)))
+    # 2. сосульки под шапкой (в бар) и тонкие по нижней кромке
+    x = x0 + 6 * u
+    while x < x1 - 6 * u:
+        ln = rnd.uniform(4.5, 12.0) * u
+        wd = rnd.uniform(1.4, 2.6) * u
+        ops.append(("poly", [(x - wd, T + 3.5 * u), (x + wd, T + 3.5 * u), (x, T + 3.5 * u + ln)], ICE0, ICE1))
+        x += rnd.uniform(9.0, 17.0) * u
+    x = L + rad
+    while x < R_ - rad:
+        ln = rnd.uniform(2.0, 6.0) * u
+        wd = rnd.uniform(1.0, 1.9) * u
+        ops.append(("poly", [(x - wd, B - 0.5 * u), (x + wd, B - 0.5 * u), (x, B - 0.5 * u + ln)], ICE0, ICE1))
+        x += rnd.uniform(10.0, 20.0) * u
+    # 3. сугробы по нижним углам
+    for side in (0, 1):
+        cx = (L + rad * 0.15) if side == 0 else (R_ - rad * 0.15)
+        wid = rad * 2.1
+        xa, xb = (cx - rad * 0.5, cx + wid) if side == 0 else (cx - wid, cx + rad * 0.5)
+        m = blob(xa, xb, B + 2.5 * u, 9.0, 3.0, 21 + side, True, 1.3)
+        ops.append(("poly", m, WH, (205, 222, 255, 255)))
+        for k in range(3):
+            tx = (xa + (xb - xa) * (0.18 + 0.27 * k)) if side == 0 else (xa + (xb - xa) * (0.25 + 0.27 * k))
+            ops.append(("dot", tx, B - 3.0 * u + k * 1.5 * u, 1.1 * u, (200, 255, 255, 255), 0))
+    # верхние углы: небольшие сугробы
+    for side in (0, 1):
+        xa, xb = (L - 2 * u, L + rad * 1.3) if side == 0 else (R_ - rad * 1.3, R_ + 2 * u)
+        ops.append(("poly", blob(xa, xb, T + 3 * u, 6.0, 4.5, 31 + side, True, 1.2), WH, (214, 226, 255, 255)))
+    # 4. подарок (слева сверху)
+    gx, gy = L + 5.0 * u, T + 0.5 * u
+    bw, bh = 15.0 * u, 10.0 * u
+    ops.append(("poly", [(gx, gy - bh), (gx + bw, gy - bh), (gx + bw, gy), (gx, gy)], (235, 70, 70, 255), (175, 30, 45, 255)))
+    ops.append(("poly", [(gx - 1.5 * u, gy - bh - 3.0 * u), (gx + bw + 1.5 * u, gy - bh - 3.0 * u),
+                         (gx + bw + 1.5 * u, gy - bh), (gx - 1.5 * u, gy - bh)], (245, 85, 85, 255), (200, 45, 55, 255)))
+    ops.append(("poly", [(gx + bw / 2 - 1.8 * u, gy - bh - 3.0 * u), (gx + bw / 2 + 1.8 * u, gy - bh - 3.0 * u),
+                         (gx + bw / 2 + 1.8 * u, gy), (gx + bw / 2 - 1.8 * u, gy)], (150, 200, 120, 255), (80, 140, 80, 255)))
+    for s in (-1, 1):
+        bx = gx + bw / 2 + s * 4.2 * u
+        ops.append(("poly", [(gx + bw / 2, gy - bh - 3.0 * u), (bx - s * 0.5 * u, gy - bh - 7.5 * u),
+                             (bx + s * 3.0 * u, gy - bh - 5.0 * u), (bx + s * 1.0 * u, gy - bh - 3.0 * u)],
+                    (170, 215, 130, 255), (80, 150, 80, 255)))
+    ops.append(("poly", blob(gx - 1.5 * u, gx + bw + 1.5 * u, gy - bh - 4.5 * u, 2.6, 1.6, 41, True, 1.0), WH, (225, 235, 255, 255)))
+    # 5. леденец (справа сверху)
+    hx, hy0 = R_ - 12.5 * u, T + 3.0 * u
+    hr = 5.0 * u
+    hy1 = T - 12.0 * u
+    pts = []
+    nv = 8
+    for i in range(nv):
+        pts.append((hx, hy0 + 2.0 * u + (hy1 - hy0 - 2.0 * u) * i / nv))
+    for i in range(1, 15):
+        a = math.pi * i / 14.0
+        pts.append((hx - hr + hr * math.cos(a), hy1 - hr * math.sin(a)))
+    for i in range(1, 4):
+        pts.append((hx - 2.0 * hr, hy1 + 1.2 * u * i))
+    ops.append(("line", pts, 4.2 * u, (255, 250, 250, 255)))
+    seg = []
+    for i in range(len(pts) - 1):
+        if (i // 2) % 2 == 1:
+            ops.append(("line", [pts[i], pts[i + 1]], 4.2 * u, (225, 40, 55, 255), False))
+    # 6. гирлянда: провод и огоньки вокруг боковых торцов бара
+    cols = [(255, 120, 200, 255), (130, 170, 255, 255), (255, 225, 120, 255), (150, 235, 190, 255), (200, 140, 255, 255)]
+    k = 0
+    for side in (0, 1):
+        cx = L + rad if side == 0 else R_ - rad
+        wire = []
+        for i in range(0, 21):
+            a = math.radians(105 + 150.0 * i / 20.0) if side == 0 else math.radians(-75 + 150.0 * i / 20.0)
+            wire.append((cx + (rad + 1.2 * u) * math.cos(a), (T + B) / 2 - (rad + 1.2 * u) * math.sin(a)))
+        ops.append(("line", wire, 0.9 * u, (60, 50, 70, 200)))
+        for i in range(2, 19, 4):
+            ops.append(("dot", wire[i][0], wire[i][1], 1.7 * u, cols[k % 5], 5.0 * u))
+            k += 1
+    # 7. искры/снежинки на баре
+    for _ in range(14):
+        sx = rnd.uniform(L + rad * 0.5, R_ - rad * 0.5)
+        sy = rnd.uniform(T + 6 * u, B - 4 * u)
+        ops.append(("dot", sx, sy, rnd.uniform(0.6, 1.4) * u, (235, 235, 245, 255), 0))
+    return ops
 
 
 class GlassBar(BasePlugin):
@@ -1173,6 +1330,9 @@ class GlassBar(BasePlugin):
         self.dlg = None
         self.root = None
         self.row = None
+        self.ny_iv = None
+        self.ny_bmp = None
+        self.ny_geo = None
         self.bub = None
         self.anim = None
         self.bub_target = None
@@ -1180,6 +1340,11 @@ class GlassBar(BasePlugin):
         self.busy = {}
         self.pending = {}
         self.ui_generation = 0
+        self._setup_busy = False
+        self._setup_last_t = 0.0
+        self.copy_pause_until = 0.0
+        self._last_go_t = 0.0
+        self._last_go_route = None
         self.copy_sequence = 0
         self.copy_callbacks = {}
         self.copy_inflight = {}
@@ -1198,8 +1363,14 @@ class GlassBar(BasePlugin):
         self.scale_amt = 50.0
         self.bk = 1.0
         self.bdp = lambda v: int(v * 3 + 0.5)
-        self.fps_amt = 30.0
+        self.fps_amt = 20.0
         self.opt = True
+        self.q_tier = 0
+        self.gv_t = 0.0
+        self.gv_buf = []
+        self.gv_cool = 0.0
+        self.gv_on = True
+        self.geo_t = 0.0
         self.perf_profile = "balanced"
         self.ovs = {}
         self.handler = None
@@ -1213,6 +1384,8 @@ class GlassBar(BasePlugin):
         self.touch_x = 0.0
         self.touch_y = 0.0
         self.touch_strength = 0.0
+        self.bar_top = 0.0
+        self.bar_h = 0.0
         self.sx = 0.0
         self.sv = 0.0
         self.infl = 0.0
@@ -1305,6 +1478,9 @@ class GlassBar(BasePlugin):
              "icon": "tune", "screen": "glass_panel"},
             {"type": "nav", "title": "Визуальные параметры", "subtitle": "Свечение, преломление, прозрачность и Frosted Glass",
              "icon": "tune", "screen": "glass_settings"},
+            {"type": "switch", "key": "glass_ny_beta_enabled", "title": "Новогодний бар (бета)",
+             "subtitle": "Снег, сосульки и праздничный декор. По умолчанию выключен",
+             "default": False},
             {"type": "nav", "title": "Бета · Реалистичное стекло", "subtitle": "Физический шейдер: преломление, дисперсия, Френель, блики. Отключает обычные настройки стекла",
              "icon": "science", "screen": "glass_beta"},
             {"type": "nav", "title": "Анимация", "subtitle": "Желейная анимация, верхние накладки, наклон, движение",
@@ -1354,14 +1530,48 @@ class GlassBar(BasePlugin):
 
     def on_activity_destroy(self, activity):
         self._log("activity destroy")
+        self.pressed = False
+        self.dragging = False
+        self.hover = None
+        self.touch_strength = 0.0
+        self.nav_pending = None
         self._teardown_ui()
 
+    def _route_matches_target(self, route, target):
+        r = str(route or "").lower()
+        t = str(target or "").lower()
+        if t == "plugin_manager":
+            return r.startswith("plugin")
+        if t == "other":
+            return any(r.startswith(p) for p in TABS[1][3])
+        if t == "settings":
+            return any(r.startswith(p) for p in TABS[2][3])
+        if t == "bluetooth":
+            return any(r.startswith(p) for p in TABS[0][3])
+        return r == t or r.startswith(t + "/")
+
     def on_navigation(self, route):
-        self.route = str(route)
-        if self.route.startswith("other/"):
-            self.route = self.route[len("other/"):]
-        self.nav_pending = None
+        incoming = str(route)
+        if incoming.startswith("other/"):
+            incoming = incoming[len("other/"):]
+        # Dolphy иногда доставляет старое событие навигации через несколько секунд.
+        # Если пользователь уже выбрал другую вкладку, не даём этому событию
+        # откатить маршрут и запустить повторную синхронизацию/пересборку окон.
+        intent_t = getattr(self, "_last_go_t", 0.0)
+        intent_route = getattr(self, "_last_go_route", None)
+        age = time.time() - intent_t if intent_t else 999.0
+        if (intent_route and age < 8.0
+                and not self._route_matches_target(incoming, intent_route)):
+            self._log("nav: устаревшее событие " + incoming + " пропущено; ожидается "
+                      + str(intent_route) + " (" + str(int(age * 1000)) + " мс после выбора)")
+            return
+        self.route = incoming
+        if intent_route and self._route_matches_target(self.route, intent_route):
+            self.nav_pending = None
+        elif not intent_route or age >= 8.0:
+            self.nav_pending = None
         self.scr_miss = 0
+        self.nav_quiet = time.time() + 0.70  # ждём, пока Activity и её Surface стабилизируются
         self._scr_watch_start()
         lc = getattr(self, "last_nav_call", 0.0)
         late = (" (+" + str(int((time.time() - lc) * 1000)) + " мс после navigate_app)") if lc and time.time() - lc < 10.0 else ""
@@ -1372,6 +1582,8 @@ class GlassBar(BasePlugin):
             self.preview = False
         if self.handler is not None:
             self._post(self._sync, 0)
+            if self._winter_decor_enabled() != getattr(self, "ice_applied", False):
+                self._post(self._apply_live, 0)
         self.refresh()
 
     def on_setting_changed(self, payload):
@@ -1380,6 +1592,7 @@ class GlassBar(BasePlugin):
         if self.get_setting("glass_enabled", True):
             if self.handler is not None:
                 self.scr_dead = False  # явное включение — разрешаем пересборку
+                self.geom_pending = True  # изменение настроек требует явного обновления UI
                 self.tick_running = True
                 self._post(self._setup, 0)
         else:
@@ -1515,6 +1728,24 @@ class GlassBar(BasePlugin):
         return cont, iv
 
     def _setup(self):
+        # Несколько событий lifecycle/setting/navigation могут поставить setup
+        # в очередь почти одновременно. Не пересоздаём Dialog повторно для той же Activity.
+        if self._setup_busy:
+            return
+        try:
+            current_act = self.api.getActivity()
+        except Exception:
+            current_act = None
+        if (self.dlg is not None and self.shown and not self.geom_pending
+                and current_act is not None and current_act == self.act):
+            return
+        self._setup_busy = True
+        try:
+            self._setup_impl()
+        finally:
+            self._setup_busy = False
+
+    def _setup_impl(self):
         self.geom_pending = False
         self.scr_resize_pending = False
         self.geom_sig = None
@@ -1576,6 +1807,9 @@ class GlassBar(BasePlugin):
             bub_h = (bar_h + bdp(12)) if sh else bdp(45)
             self.bub_w = int(self.tw * 1.18) if sh else (self.tw - bdp(3))
             bub_top = bar_top + (bar_h - bub_h) // 2
+            self.bar_top, self.bar_h = bar_top, bar_h  # нужны касаниям даже без шейдера
+            self.ny_geo = (win_w, win_h, bar_top, bar_h, w, self.pad)
+            self.ny_iv = None
 
             dlg = Dialog(act)
             dlg.requestWindowFeature(1)
@@ -1676,6 +1910,10 @@ class GlassBar(BasePlugin):
                 self._log("ERR панель логов: " + type(le).__name__ + ": " + str(le)[:160])
             self.stage = "tabs"
             self._fill_tabs()
+            try:
+                self._ny_sync()
+            except Exception as ne:
+                self._log("ERR новогодний декор: " + type(ne).__name__ + ": " + str(ne)[:120])
             self.native_ok = True
             self.err = ""
             self.stage = "show"
@@ -1713,10 +1951,17 @@ class GlassBar(BasePlugin):
 
     def _on_tab_touch(self, idx, event):
         from java import jclass
+        row = self.row  # бар могли пересобрать между касаниями
+        child = row.getChildAt(idx) if row is not None else None
+        if child is None:
+            return False
         cp = jclass("android.view.MotionEvent").obtain(event)
         try:
-            cp.offsetLocation(float(self.row.getChildAt(idx).getLeft()), 0.0)
+            cp.offsetLocation(float(child.getLeft()), 0.0)
             return self._on_touch(cp)
+        except Exception as e:
+            self._log("ERR касание вкладки: " + type(e).__name__ + ": " + str(e)[:100])
+            return False
         finally:
             cp.recycle()
 
@@ -1987,6 +2232,8 @@ class GlassBar(BasePlugin):
         sh.setFloatUniform("dispK", float(self.disp_amt / 100.0))
         sh.setFloatUniform("edgeK", float(max(self.edge_amt, 10.0) / 100.0))
         sh.setFloatUniform("touch", float(self.touch_x), float(self.touch_y), 0.0)
+        if self.shader_mode != "beta":
+            sh.setFloatUniform("tm", float(time.time() % 1000.0))
         if self.shader_mode == "beta":
             self._apply_beta_uniforms(sh)
         self.win_w, self.win_h, self.bar_top, self.bar_h = win_w, win_h, bar_top, bar_h
@@ -2021,7 +2268,7 @@ class GlassBar(BasePlugin):
         i = max(0, min(len(THEMES) - 1, int(getattr(self, "theme", 0))))
         rim, glow, refr = THEMES[i]
         sh.setFloatUniform("refrTint", float(refr[0]), float(refr[1]), float(refr[2]))
-        sh.setFloatUniform("crackK", 1.0 if (bool(self.get_setting("glass_cracks", False)) and not bool(self.get_setting("glass_opt", True))) else 0.0)
+        sh.setFloatUniform("crackK", 1.0 if (bool(self.get_setting("glass_cracks", False)) and not bool(self.get_setting("glass_opt", True)) and int(self.q_tier) < 2) else 0.0)
         sh.setFloatUniform("rimTint", float(rim[0]), float(rim[1]), float(rim[2]))
         sh.setFloatUniform("glowTint", float(glow[0]), float(glow[1]), float(glow[2]))
 
@@ -2029,7 +2276,25 @@ class GlassBar(BasePlugin):
                 "glass_tint_amt": 100.0, "glass_blur_amt": 100.0,
                 "glass_frost_amt": 55.0, "glass_grain_amt": 28.0,
                 "glass_jelly_amt": 100.0, "glass_disp_amt": 100.0, "glass_edge_amt": 100.0,
-                "glass_scale_amt": 50.0, "glass_fps_amt": 30.0, "glass_theme": 0.0}
+                "glass_scale_amt": 50.0, "glass_fps_amt": 20.0, "glass_theme": 0.0}
+
+    def _winter_decor_enabled(self):
+        # Отдельный переключатель в бета-разделе выключен по умолчанию.
+        # Совместимость с внешним new_year_winter сохраняется.
+        now = time.time()
+        if now - getattr(self, "_ice_t", 0.0) < 0.5:
+            return getattr(self, "_ice_v", False)
+        self._ice_t = now
+        v = bool(self.get_setting("glass_ny_beta_enabled", False))
+        try:
+            sp = self.api.getContext().getSharedPreferences("dolphy_cross_plugin_state", 0)
+            beat = int(sp.getLong("new_year_beat", 0))
+            external = bool(sp.getBoolean("new_year_active", False)) and (int(time.time() * 1000) - beat) < 15000
+            v = v or external
+        except Exception:
+            pass
+        self._ice_v = v
+        return v
 
     def _read_settings(self):
         def val(k):
@@ -2064,17 +2329,164 @@ class GlassBar(BasePlugin):
         self.opt = bool(self.get_setting("glass_opt", True))
         if self.opt:
             # Оптимизированный режим: дорогие эффекты выключены, буферы захвата уменьшены, цель — 60 кадров/с
-            self.scale_amt = min(self.scale_amt, 40.0)
+            self.scale_amt = min(self.scale_amt, 55.0)
             self.fps_amt = max(self.fps_amt, 60.0)
-            self.blur_amt = min(self.blur_amt, 35.0)
-            self.frost_amt = 0.0
+            self.blur_amt = min(self.blur_amt, 60.0)
+            self.frost_amt = min(self.frost_amt, 40.0)   # матовость остаётся (было 0 — стекло выглядело плоским)
             self.grain_amt = 0.0
-            self.disp_amt = 0.0
+            self.disp_amt = min(self.disp_amt, 60.0)     # радужная кайма остаётся, только слабее
             self.beta_enabled = False
+        self.gv_on = bool(self.get_setting("glass_auto_q", True))
+        t = int(self.q_tier)
+        if t >= 1:
+            self.scale_amt = min(self.scale_amt, 60.0)
+            self.grain_amt = 0.0
+        if t >= 2:
+            self.scale_amt = min(self.scale_amt, 45.0)
+            self.frost_amt = min(self.frost_amt, 30.0)
+            self.disp_amt = min(self.disp_amt, 40.0)
+            self.blur_amt = min(self.blur_amt, 60.0)
+            self.beta_enabled = False
+        if t >= 3:
+            self.scale_amt = min(self.scale_amt, 35.0)
+            self.frost_amt = 0.0
+            self.disp_amt = 0.0
+            self.blur_amt = min(self.blur_amt, 35.0)
+
+    def _ny_bitmap(self):
+        from java import jclass, jint
+        win_w, win_h, bar_top, bar_h, w, pad = self.ny_geo
+        Bitmap = jclass("android.graphics.Bitmap")
+        cached = getattr(self, "_ny_cached_bitmap", None)
+        if cached is None or int(cached.getWidth()) != int(win_w) or int(cached.getHeight()) != int(win_h):
+            bmp = Bitmap.createBitmap(int(win_w), int(win_h), jclass("android.graphics.Bitmap$Config").ARGB_8888)
+            self._ny_cached_bitmap = bmp
+            self._ny_cached_canvas = jclass("android.graphics.Canvas")(bmp)
+        else:
+            bmp = cached
+        cv = getattr(self, "_ny_cached_canvas", None)
+        if cv is None:
+            cv = jclass("android.graphics.Canvas")(bmp)
+            self._ny_cached_canvas = cv
+        PorterDuff = jclass("android.graphics.PorterDuff")
+        cv.drawColor(0, PorterDuff.Mode.CLEAR)
+        Paint = jclass("android.graphics.Paint")
+        Path = jclass("android.graphics.Path")
+        LG = jclass("android.graphics.LinearGradient")
+        RG = jclass("android.graphics.RadialGradient")
+        TM = jclass("android.graphics.Shader$TileMode")
+        Style = jclass("android.graphics.Paint$Style")
+        Cap = jclass("android.graphics.Paint$Cap")
+
+        def C(c):
+            return jint(argb((int(c[3]) << 24) | (int(c[0]) << 16) | (int(c[1]) << 8) | int(c[2])))
+
+        u = self.bdp(10) / 10.0
+        for op in ny_shapes(win_w, win_h, bar_top, bar_h, w, pad, u):
+            kind = op[0]
+            p = Paint(1)
+            if kind == "poly":
+                pts = op[1]
+                path = Path()
+                path.moveTo(float(pts[0][0]), float(pts[0][1]))
+                for q in pts[1:]:
+                    path.lineTo(float(q[0]), float(q[1]))
+                path.close()
+                ys = [q[1] for q in pts]
+                y0, y1 = float(min(ys)), float(max(ys)) + 0.01
+                p.setShader(LG(0.0, y0, 0.0, y1, C(op[2]), C(op[3]), TM.CLAMP))
+                cv.drawPath(path, p)
+                if len(op) > 3 and op[3] is not None:
+                    ep = Paint(1)
+                    ep.setStyle(Style.STROKE)
+                    ep.setStrokeWidth(float(max(1.0, 0.45 * u)))
+                    ep.setColor(C(op[3]))
+                    cv.drawPath(path, ep)
+            elif kind == "line":
+                pts = op[1]
+                path = Path()
+                path.moveTo(float(pts[0][0]), float(pts[0][1]))
+                for q in pts[1:]:
+                    path.lineTo(float(q[0]), float(q[1]))
+                p.setStyle(Style.STROKE)
+                p.setStrokeWidth(float(op[2]))
+                p.setStrokeCap(Cap.ROUND if (len(op) < 5 or op[4]) else Cap.BUTT)
+                p.setColor(C(op[3]))
+                cv.drawPath(path, p)
+            else:
+                x, y, r, col, gl = op[1], op[2], op[3], op[4], op[5]
+                if gl:
+                    gp = Paint(1)
+                    gp.setShader(RG(float(x), float(y), float(gl), C((col[0], col[1], col[2], 110)), C((col[0], col[1], col[2], 0)), TM.CLAMP))
+                    cv.drawCircle(float(x), float(y), float(gl), gp)
+                p.setColor(C(col))
+                cv.drawCircle(float(x), float(y), float(r), p)
+        return bmp
+
+    def _ny_mask(self, cx, cy, hw, hh):
+        # линза всегда сверху: декор под ней «вырезается»
+        sh = getattr(self, "ny_sh", None)
+        if sh is None or self.ny_iv is None:
+            return
+        sh.setFloatUniform("bub", float(cx), float(cy), float(hw), float(hh))
+        self.ny_iv.setRenderEffect(self.RE.createRuntimeShaderEffect(sh, "content"))
+
+    def _ny_sync(self):
+        # декор как у новогоднего плагина: снег, сосульки, подарок, леденец, гирлянда
+        root = self.root
+        if root is None or self.ny_geo is None:
+            return
+        want = bool(self._winter_decor_enabled())
+        if want:
+            self._ny_off_t = None
+        if want and self.ny_iv is None:
+            from java import jclass
+            FLP = jclass("android.widget.FrameLayout$LayoutParams")
+            IV = jclass("android.widget.ImageView")
+            if self.ny_bmp is None or getattr(self, "ny_bmp_geo", None) != self.ny_geo:
+                self.ny_bmp = self._ny_bitmap()
+                self.ny_bmp_geo = self.ny_geo
+            iv = IV(self.act)
+            iv.setScaleType(IV.ScaleType.FIT_XY)
+            iv.setImageBitmap(self.ny_bmp)
+            iv.setClickable(False)
+            iv.setFocusable(False)
+            iv.setImportantForAccessibility(2)
+            root.addView(iv, FLP(-1, -1))
+            self.ny_iv = iv
+            self.ny_sh = None
+            try:
+                if self.RE is not None:
+                    self.ny_sh = jclass("android.graphics.RuntimeShader")(AGSL_NYMASK)
+                    self._ny_mask(-9999.0, -9999.0, 1.0, 1.0)
+            except Exception as me:
+                self.ny_sh = None
+                self._log("ERR маска декора: " + str(me)[:100])
+            self._log("новогодний декор: включён")
+        elif not want and self.ny_iv is not None:
+            # гистерезис: убираем декор только если флаг выключен непрерывно дольше 2.5 с
+            now = time.time()
+            if getattr(self, "_ny_off_t", None) is None:
+                self._ny_off_t = now
+                return
+            if now - self._ny_off_t < 2.5:
+                return
+            self._ny_off_t = None
+            try:
+                root.removeView(self.ny_iv)
+            except Exception:
+                pass
+            self.ny_iv = None
+            self._log("новогодний декор: выключен")
 
     def _apply_live(self):
         # применяем настройки сразу, без пересборки окна
+        try:
+            self._ny_sync()
+        except Exception as e:
+            self._log("ERR новогодний декор: " + type(e).__name__ + ": " + str(e)[:120])
         self._read_settings()
+
         sh = self.shader
         if sh is None or not self.sh:
             self._log("Frosted Glass: настройки прочитаны, но шейдер не активен (sh=" + str(bool(self.sh)) + ", shader=" + str(sh is not None) + ")")
@@ -2142,6 +2554,19 @@ class GlassBar(BasePlugin):
             self._teardown_ui()
         self.refresh()
 
+    def _ny_beta_toggle_cb(self, enabled):
+        enabled = bool(enabled)
+        self.set_setting("glass_ny_beta_enabled", enabled)
+        # Сбрасываем кэш, чтобы переключатель применился сразу.
+        self._ice_t = 0.0
+        self._ice_v = enabled
+        self._log("Новогодний бар (бета): " + ("включён" if enabled else "выключен"))
+        if self.handler is not None:
+            self._post(self._apply_live, 0)
+        else:
+            self._apply_live()
+        self.refresh()
+
     def _beta_reset_cb(self):
         for k, _lab, _lo, _hi, _st, dflt, _fmt in BETA_PARAMS:
             self.set_setting(k, float(dflt))
@@ -2160,7 +2585,7 @@ class GlassBar(BasePlugin):
         "quality": {"title": "Качество", "subtitle": "Максимальная детализация: масштаб 100%, до 60 кадров/с",
                      "scale": 100.0, "fps": 60.0, "blur": 100.0},
         "balanced": {"title": "Баланс", "subtitle": "Оптимальный режим для повседневного использования",
-                      "scale": 70.0, "fps": 30.0, "blur": 85.0},
+                      "scale": 70.0, "fps": 20.0, "blur": 85.0},
         "battery": {"title": "Экономия батареи", "subtitle": "Меньше захватов экрана и ниже разрешение буферов",
                      "scale": 45.0, "fps": 15.0, "blur": 55.0},
         "manual": {"title": "Свои значения", "subtitle": "Используются значения из ручных слайдеров",
@@ -2172,6 +2597,7 @@ class GlassBar(BasePlugin):
         if profile is None:
             return
         self.set_setting("glass_perf_profile", name)
+        self.q_tier = 0  # явный выбор профиля сбрасывает авто-снижение
         if profile["scale"] is not None:
             self.set_setting("glass_scale_amt", profile["scale"])
             self.set_setting("glass_fps_amt", profile["fps"])
@@ -2285,6 +2711,8 @@ class GlassBar(BasePlugin):
         return self._rows_screen(ui, "Bluetooth", [
             ("sw", "glass_scr", "Стекло на экране Bluetooth", "Матовый переключатель All/BLE/Advert и кромка-стекло вокруг карточки и кнопок", True),
             ("sw", "glass_scr_auto_cal", "Автокалибровка экрана Bluetooth", "Учитывает высоту области приложения, отступы и соотношение сторон", True),
+            ("sw", "glass_scr_top_on", "Верхний блок", "Переключатель All / BLE / Advert", True),
+            ("sw", "glass_scr_bot_on", "Нижний блок", "Карточка устройств и кнопки «Выберите» и «Старт»", True),
             ("sw", "glass_scr_fx", "Анимации стекла на экране", "Появление с «пробегом» света, живой блик по кромке, вспышка при смене секции", True),
             ("sl", "glass_scr_btn_scale", "Масштаб стеклянных накладок кнопок, %", 70, 130, 61, 100),
             ("sl", "glass_scr_dy_top", "Сдвиг стекла сверху, dp", -30, 30, 59, 0),
@@ -2333,6 +2761,10 @@ class GlassBar(BasePlugin):
             content=ui.lazy_column([
                 ui.text("Профиль влияет на частоту PixelCopy, размер буферов и силу размытия.", "bodyMedium", W2),
                 ui.text("Текущий режим: " + self.PERF_PROFILES[self.perf_profile]["title"], "titleSmall", W),
+                ui.column([
+                    ui.text("Автокачество (само снижает эффекты, если кадров мало)", "titleSmall", W),
+                    ui.switch(bool(self.get_setting("glass_auto_q", True)), self._key_cb("glass_auto_q"), "", ""),
+                ], 0, 2),
                 *items,
                 ui.spacer(80),
             ], 16, 12))
@@ -2371,7 +2803,14 @@ class GlassBar(BasePlugin):
         ]
         if self.beta_failed:
             head.append(ui.text("Бета-шейдер не удалось скомпилировать на этом устройстве, используется обычный. Подробности в окне логов.", "bodySmall", "#FFFFB4A9"))
-        cards = [ui.card(head)]
+        cards = [
+            ui.card([
+                ui.text("Новогодний бар", "titleMedium", W),
+                ui.text("Снег, сосульки и праздничный декор поверх панели. По умолчанию выключен.", "bodySmall", W2),
+                ui.switch(bool(self.get_setting("glass_ny_beta_enabled", False)), self._ny_beta_toggle_cb, "", ""),
+            ]),
+            ui.card(head),
+        ]
         if not self.beta_enabled:
             cards.append(ui.text("Параметры сохраняются, но применяются только при включённом бета-шейдере.", "bodySmall", W2))
         for gtitle, keys in BETA_GROUPS:
@@ -2525,15 +2964,22 @@ class GlassBar(BasePlugin):
             touch_s_ = self.touch_strength if not jelly_mode else 0.0
             key = (round(cx, 1), round(cy, 1), round(hw, 1), round(hh, 1),
                    round(g, 3), round(v, 3), round(touch_x_, 1),
-                   round(touch_y_, 1), round(touch_s_, 3))
+                   round(touch_y_, 1), round(touch_s_, 3),
+                   round(time.time() * 30.0) if touch_s_ > 0.01 else 0)
             if key == self.last_push and not force:
                 return  # ничего не изменилось — не пересоздаём эффект
             self.last_push = key
             sh.setFloatUniform("bub", float(cx), float(cy), float(hw), float(hh))
+            try:
+                self._ny_mask(cx, cy, hw, hh)
+            except Exception:
+                pass
             sh.setFloatUniform("infl", float(g))
             sh.setFloatUniform("vel", float(v))
             sh.setFloatUniform("lean", float(v * 0.22 * self.jelly) if jelly_mode else float(v * 0.08))
             sh.setFloatUniform("touch", float(touch_x_), float(touch_y_), float(touch_s_))
+            if self.shader_mode != "beta":
+                sh.setFloatUniform("tm", float(time.time() % 1000.0))
             iv.setRenderEffect(self.RE.createRuntimeShaderEffect(sh, "content"))
         except Exception as e:
             self.shader = None
@@ -2574,6 +3020,14 @@ class GlassBar(BasePlugin):
             x = float(e.getX())
             y = float(e.getY())
             if act == 0:
+                if self.pressed:
+                    # Новый DOWN без завершающего UP означает потерянное касание
+                    # (часто при быстрой смене Activity/перекрытии окон).
+                    self._log("touch: сброшено незавершённое предыдущее касание")
+                    self.pressed = False
+                    self.dragging = False
+                    self.touch_strength = 0.0
+                    self.hover = None
                 self.touch_x = float(self.pad + x)
                 self.touch_y = float(self.bar_top + y)
                 self.touch_strength = 1.0
@@ -2600,6 +3054,8 @@ class GlassBar(BasePlugin):
                     pass
                 return True
             if act == 2:
+                if not self.pressed:
+                    return True
                 self.touch_x = float(self.pad + x)
                 self.touch_y = float(self.bar_top + y)
                 self.touch_strength = 1.0
@@ -2619,20 +3075,27 @@ class GlassBar(BasePlugin):
                         self._set_lens(self.bub_target, 1.0, 1.0)
                     idx = self._idx_at(x)
                     if idx != self.hover:
+                        # Во время жеста только подсвечиваем целевую вкладку и
+                        # двигаем линзу. Реальную навигацию выполняем один раз на UP.
                         self.hover = idx
                         self._fill_tabs(idx, move=False)
-                        if idx != self._sel_index() and idx != getattr(self, "drag_nav_idx", None):
-                            self.drag_nav_idx = idx
-                            self._log("drag: переход на вкладку " + str(idx))
-                            self._go(idx)
                 return True
             if act == 1 or act == 3:
+                if not self.pressed:
+                    self._log("touch: запоздавший UP/CANCEL без активного DOWN пропущен")
+                    return True
                 self.touch_x = float(self.pad + x)
                 self.touch_y = float(self.bar_top + y)
                 self.pressed = False
                 was_drag = self.dragging
                 self.dragging = False
                 self.hover = None
+                try:
+                    p_ = self.row.getParent() if self.row is not None else None
+                    if p_ is not None:
+                        p_.requestDisallowInterceptTouchEvent(False)
+                except Exception:
+                    pass
                 if self.touch_strength > 0.0:
                     self._ensure_spring()
                 # Некоторые устройства (жесты навигации у нижнего края, оверлеи) присылают
@@ -2646,8 +3109,9 @@ class GlassBar(BasePlugin):
                     idx = self._idx_at(self.down_x if tap_cancel else x)
                     self._fill_tabs(idx)
                     self._ensure_spring()
-                    if idx != getattr(self, "drag_nav_idx", None):
-                        self._go(idx)
+                    # Один переход после завершения касания/свайпа.
+                    self._log(("drag: завершён, вкладка " if was_drag else "tap: вкладка ") + str(idx))
+                    self._go(idx)
                 else:
                     self._fill_tabs()
                     self._ensure_spring()
@@ -2735,15 +3199,31 @@ class GlassBar(BasePlugin):
         cb = self.Pcl(finished)
         self.copy_callbacks[token] = cb
         try:
+            # PixelCopy нельзя вызывать, пока окно Activity пересоздаётся:
+            # Android в этот момент может не иметь backing Surface.
+            decor = window.getDecorView()
+            if (decor is None or not decor.isAttachedToWindow()
+                    or decor.getWindowToken() is None
+                    or int(decor.getWidth()) <= 0 or int(decor.getHeight()) <= 0):
+                raise RuntimeError("Activity window is not attached")
             jclass("android.view.PixelCopy").request(window, rect, bmp, cb, self.handler)
-        except Exception:
+        except Exception as ex:
             self.copy_callbacks.pop(token, None)
             self.copy_inflight.pop(bid, None)
-            self.copy_retired.pop(bid, None)
+            retired = self.copy_retired.pop(bid, None)
             self.busy[key] = False
             if self.pending.get(key) is bmp:
                 self.pending.pop(key, None)
-            raise
+            self._recycle_bitmap(bmp)
+            if retired is not None:
+                self._recycle_bitmap(retired)
+            # IllegalArgumentException: Window doesn't have a backing surface!
+            # Это штатная гонка при смене Activity; ставим паузу и продолжаем позже.
+            self.copy_pause_until = max(getattr(self, "copy_pause_until", 0.0), time.time() + 0.85)
+            if "backing surface" not in str(ex).lower() and "not attached" not in str(ex).lower():
+                if not getattr(self, "copy_req_err_once", False):
+                    self.copy_req_err_once = True
+                    self._log("WARN PixelCopy request[" + str(key) + "]: " + type(ex).__name__ + ": " + str(ex)[:100])
 
     def _recycle_bitmap(self, bmp):
         # Намеренно НЕ вызываем Bitmap.recycle(): bitmap мог остаться в ImageView/шейдере, и отрисовка
@@ -2939,6 +3419,8 @@ class GlassBar(BasePlugin):
         self._post(lambda: sv.scrollTo(0, int(tv.getHeight())), 0)
 
     def _capture_log(self):
+        if time.time() < max(getattr(self, "nav_quiet", 0.0), getattr(self, "copy_pause_until", 0.0)):
+            return
         lw = self.logw
         if lw is None or not lw["shown"] or lw["iv"] is None or self.busy.get("log"):
             return
@@ -2976,14 +3458,24 @@ class GlassBar(BasePlugin):
         self._request_copy("log", self.act.getWindow(), jclass("android.graphics.Rect")(l, t, r, b), bufs[pidx])
 
     def _go(self, idx):
-        # Переход на вкладку. Если хост не прислал on_navigation в течение ~1 с,
-        # _tick покажет тост с маршрутом, чтобы можно было понять причину.
+        # Переход только при смене вкладки. Повторные тапы/дублирующиеся UP
+        # не должны перезагружать текущий экран и провоцировать teardown Activity.
         route = TABS[idx][0]
         changed = idx != self._sel_index()
-        self._log("navigate_app('" + route + "') из " + str(self.route or "-") + (" (та же вкладка)" if not changed else ""))
-        self.last_nav_call = time.time()
+        now = time.time()
+        if not changed:
+            self._log("tap: уже открыта вкладка " + route + " — без повторной навигации")
+            self.nav_pending = None
+            return
+        if now - self._last_go_t < 0.16:
+            self._log("tap: слишком быстрый повторный переход на " + route + " подавлен")
+            return
+        self._last_go_route = route
+        self._last_go_t = now
+        self._log("navigate_app('" + route + "') из " + str(self.route or "-"))
+        self.last_nav_call = now
         self.navigate_app(route)
-        self.nav_pending = (route, time.time(), 0) if changed else None
+        self.nav_pending = (route, time.time(), 0)
 
     def _sync(self):
         if self.dlg is None:
@@ -3068,9 +3560,45 @@ class GlassBar(BasePlugin):
                 pass
 
     # ------------------------------------------------------------------ блюр
+    def _governor(self):
+        # Авто-качество: если во время движения кадров мало (<~45/с), снижаем эффекты на один уровень
+        now = time.time()
+        dt = now - self.gv_t
+        self.gv_t = now
+        if not self.gv_on or self.q_tier >= 3 or dt <= 0 or dt > 0.25:
+            self.gv_buf = []
+            return
+        busy = self.pressed or self.infl > 0.05 or getattr(self, "scr_infl", 0.0) > 0.05
+        if not busy:
+            self.gv_buf = []
+            return
+        self.gv_buf.append(dt)
+        if len(self.gv_buf) < 36:
+            return
+        avg = sum(self.gv_buf) / len(self.gv_buf)
+        self.gv_buf = []
+        if avg > 0.022 and now > self.gv_cool:
+            self.q_tier += 1
+            self.gv_cool = now + 4.0
+            self._log("авто-качество: уровень " + str(self.q_tier) + " (кадр " + str(int(avg * 1000)) + " мс)")
+            self._read_settings()
+            self._apply_live()
+            if self.q_tier >= 2 and self.shader_mode == "beta" and self.handler is not None:
+                self._post(self._setup, 0)
+
     def _tick(self):
         if not self.alive or not self.tick_running:
             return
+        if time.time() - getattr(self, "_nys_t", 0.0) > 1.0:
+            self._nys_t = time.time()
+            try:
+                self._ny_sync()
+            except Exception:
+                pass
+        try:
+            self._governor()
+        except Exception:
+            pass
         if self.anim is None and self.bub is not None and self.bub_target is not None:
             try:
                 self._spring_step(0.0)
@@ -3086,7 +3614,11 @@ class GlassBar(BasePlugin):
             pass
         try:
             pend = self.nav_pending
-            if pend is not None and time.time() - pend[1] > 1.0:
+            if pend is not None and self._route_matches_target(self.route, pend[0]):
+                self.nav_pending = None
+                pend = None
+            if (pend is not None and pend[0] == getattr(self, "_last_go_route", None)
+                    and time.time() - pend[1] > 1.0):
                 try:
                     focus = str(self.act.hasWindowFocus()) if self.act is not None else "?"
                 except Exception:
@@ -3122,9 +3654,12 @@ class GlassBar(BasePlugin):
                 self._log("ERR tick панели логов: " + type(lex).__name__ + ": " + str(lex)[:160])
         try:
             if self.dlg is not None:
-                self._check_geometry()
-                if self.dlg is not None and self.shown:
-                    self._adjust_position()
+                now_g = time.time()
+                if now_g - self.geo_t > 0.2:
+                    self.geo_t = now_g
+                    self._check_geometry()
+                    if self.dlg is not None and self.shown:
+                        self._adjust_position()
                 for key in tuple(self.targets.keys()):
                     self._capture(key)
         except Exception:
@@ -3641,6 +4176,8 @@ class GlassBar(BasePlugin):
                 o["shown"] = False
 
     def _capture_ov(self, key):
+        if time.time() < max(getattr(self, "nav_quiet", 0.0), getattr(self, "copy_pause_until", 0.0)):
+            return
         o = self.ovs.get(key)
         if o is None or not o["shown"] or self.busy.get(key):
             return
@@ -3716,6 +4253,8 @@ class GlassBar(BasePlugin):
         self._request_copy("glass", self.act.getWindow(), Rect(l, t, r, b), bufs[idx])
 
     def _capture(self, key):
+        if time.time() < max(getattr(self, "nav_quiet", 0.0), getattr(self, "copy_pause_until", 0.0)):
+            return
         if key == "glass":
             return self._capture_glass()
         tgt = self.targets.get(key)
@@ -3769,7 +4308,9 @@ class GlassBar(BasePlugin):
         if self.pc_err.get(key, 0) != result:
             self.pc_err[key] = result
             if result != 0:
-                self._log("WARN PixelCopy[" + str(key) + "] result=" + str(result))
+                self.copy_pause_until = max(getattr(self, "copy_pause_until", 0.0), time.time() + 0.85)
+                if time.time() >= getattr(self, "nav_quiet", 0.0):
+                    self._log("WARN PixelCopy[" + str(key) + "] result=" + str(result))
         if key.startswith("s_"):
             try:
                 self._scr_on_copy(key, result)
@@ -3969,7 +4510,11 @@ class GlassBar(BasePlugin):
             key = self._bt_det_key(dh)
             g = self.bt_det.get(key)
             if g is not None:
+                self.bt_last_color = g
                 return g
+            last = getattr(self, "bt_last_color", None)
+            if last is not None:
+                return last  # уже найдено по цвету: не переходим на dp (иначе карточка прыгает)
             mk = (key, int(self.bt_ins[0]), int(self.bt_ins[1]))
             g = self.bt_dp_memo.get(mk)
             if g is None:
@@ -3991,6 +4536,11 @@ class GlassBar(BasePlugin):
             w, h = (x1 - x0) * bs, (y1 - y0) * bs
             out[key] = (cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
         out["card"] = tuple(g["boxes"]["card"])
+        for key in list(out):
+            x0, y0, x1, y1 = out[key]
+            x0, x1 = max(0.0, x0), min(float(W), x1)
+            y0, y1 = max(0.0, y0), min(float(dh), y1)
+            out[key] = (x0, y0, x1, y1)
         return out
 
     def _bt_all(self, dh):
@@ -4009,7 +4559,7 @@ class GlassBar(BasePlugin):
         g = (p >> 8) & 255
         b = p & 255
         mx = max(r, g, b)
-        return mx >= 170 and (mx - min(r, g, b)) >= 0.14 * mx
+        return mx >= 150 and (mx - min(r, g, b)) >= 0.10 * mx
 
     @staticmethod
     def _bt_runs(vals, test, minlen, gap=2):
@@ -4251,17 +4801,20 @@ class GlassBar(BasePlugin):
 
         # 1) большие горизонтальные «таблетки» акцента: «Выберите устройство» и «Старт»
         minb = max(6, int(0.030 * h))
-        ca = self._bt_runs(col(0.25 * w), acc, minb)
-        cb = self._bt_runs(col(0.75 * w), acc, minb)
         cands = []
-        for (a1, b1) in ca:
-            for (a2, b2) in cb:
-                if abs(a1 - a2) <= 3 and abs(b1 - b2) <= 3:
-                    y0, y1 = (a1 + a2) // 2, (b1 + b2) // 2
-                    rw = row((y0 + y1) // 2)
-                    xs = [i for i in range(w) if acc(rw[i])]
-                    if xs and (xs[-1] - xs[0] + 1) >= 0.45 * w:
-                        cands.append((y0, y1, xs[0], xs[-1]))
+        for xl, xr_ in ((0.25, 0.75), (0.18, 0.82)):  # запасные вертикали для других экранов
+            ca = self._bt_runs(col(xl * w), acc, minb)
+            cb = self._bt_runs(col(xr_ * w), acc, minb)
+            for (a1, b1) in ca:
+                for (a2, b2) in cb:
+                    if abs(a1 - a2) <= 4 and abs(b1 - b2) <= 4:
+                        y0, y1 = (a1 + a2) // 2, (b1 + b2) // 2
+                        rw = row((y0 + y1) // 2)
+                        xs = [i for i in range(w) if acc(rw[i])]
+                        if xs and (xs[-1] - xs[0] + 1) >= 0.45 * w:
+                            cands.append((y0, y1, xs[0], xs[-1]))
+            if len(cands) >= 2:
+                break
         if len(cands) < 2:
             return None
         cands.sort()
@@ -4697,7 +5250,10 @@ class GlassBar(BasePlugin):
             sh.setFloatUniform("sty", 1.0, 1.0, 0.9, 0.022)
         else:
             sh.setFloatUniform("band", float(band))
-        osc = 0.4 if bool(self.get_setting("glass_opt", True)) else 1.0
+        area = float(w) * float(h)
+        osc = 0.35 if area > 350000.0 else (0.5 if area > 120000.0 else 0.7)  # кромке не нужен полный размер
+        if bool(self.get_setting("glass_opt", True)):
+            osc = min(osc, 0.4)
         bw = max(8, int(w * osc))
         bh = max(8, int(h * osc))
         bufs = [Bitmap.createBitmap(bw, bh, Cfg.ARGB_8888), Bitmap.createBitmap(bw, bh, Cfg.ARGB_8888)]
@@ -4728,7 +5284,7 @@ class GlassBar(BasePlugin):
         self.scr_cand = -1
         self.scr_cand_n = 0
         self.scr_fx = (bool(self.get_setting("glass_scr_fx", True)) and not self.get_setting("glass_reduce_motion", False)
-                       and not self.get_setting("glass_opt", True))
+                       and not self.get_setting("glass_opt", True) and int(self.q_tier) < 1)
         self.scr_tl = 0.0
         self.scr_t0 = time.time()
         self.scr_opt = None
@@ -4750,7 +5306,11 @@ class GlassBar(BasePlugin):
         self._log("стекло экрана: S=" + str(round(S, 3)) + " Sy=" + str(round(Sy, 3))
                   + " низ=" + str(int(base)) + " inset=" + str(int(inset))
                   + " dy_top=" + str(int(dy_top)) + " dy_bot=" + str(int(dy_bot)))
+        top_on = bool(self.get_setting("glass_scr_top_on", True))
+        bot_on = bool(self.get_setting("glass_scr_bot_on", True))
         for (key, sec, x0, y0, x1, y1, r, band, seed, delay, bot) in SCR_ELEMS:
+            if (bot and not bot_on) or ((not bot) and not top_on):
+                continue  # блок выключен тумблером на вкладке Bluetooth
             top = (base - (SCR_REF_BOTTOM - y0) * Sy + dy_bot + self.bt_dy.get(key, 0.0)) if bot else (self.scr_origin_y + y0 * Sy + dy_top)
             bb = self.bt_boxes.get(key)
             if bb is not None:
@@ -4772,10 +5332,11 @@ class GlassBar(BasePlugin):
             o["kb"] = 0.42  # базовая яркость кругов шапки: спокойнее, без пёстрой каймы
             self.scr[key] = o
             self._log("  слой " + key + ": x=" + str(o["x"]) + " y=" + str(o["y"]) + " " + str(o["w"]) + "x" + str(o["h"]))
-        pill = self.scr["pill"]
-        pill["lw"] = (SCR_SEG_X1 - SCR_SEG_X0) / 3.0 * S
-        pill["lh"] = (295.0 - 175.0) * Sy
-        pill["lt"] = pad + (175.0 - 147.0) * Sy
+        pill = self.scr.get("pill")
+        if pill is not None:
+            pill["lw"] = (SCR_SEG_X1 - SCR_SEG_X0) / 3.0 * S
+            pill["lh"] = (295.0 - 175.0) * Sy
+            pill["lt"] = pad + (175.0 - 147.0) * Sy
         self._tilt_start()
         self.scr_lt = self._scr_lens_x(self.scr_sel if self.scr_sel is not None else 0)
         self.scr_lx = self.scr_lt
@@ -4793,10 +5354,22 @@ class GlassBar(BasePlugin):
         # Датчик наклона (акселерометр): сверено с документацией — getAndroid().sensorStart(type, onEvent).
         # Формат события в документации не описан, поэтому разбираем защитно и пишем первые события в лог.
         self._tilt_stop()
-        if not self.get_setting("glass_tilt", False) or self.get_setting("glass_opt", True):
+        if not self.get_setting("glass_tilt", False) or self.get_setting("glass_opt", True) or int(self.q_tier) >= 2:
             return
         try:
-            self.tilt_id = self.api.getAndroid().sensorStart(1, lambda ev: self._tilt_on(ev))
+            # sensorStart ожидает kotlin.jvm.functions.Function1, а не Python
+            # callable. Создаём настоящий JVM proxy с методом invoke(Object).
+            from java import dynamic_proxy, jclass
+            Function1 = jclass("kotlin.jvm.functions.Function1")
+            owner = self
+            class SensorCallback(dynamic_proxy(Function1)):
+                def __init__(self):
+                    super().__init__()
+                def invoke(self, ev):
+                    owner._tilt_on(ev)
+                    return None
+            self.tilt_callback = SensorCallback()  # держим ссылку на время работы датчика
+            self.tilt_id = self.api.getAndroid().sensorStart(1, self.tilt_callback)
             self._log("наклон: датчик " + ("включён" if self.tilt_id else "недоступен"))
         except Exception as e:
             self.tilt_id = None
@@ -4804,6 +5377,7 @@ class GlassBar(BasePlugin):
 
     def _tilt_stop(self):
         sid = self.tilt_id
+        callback = getattr(self, "tilt_callback", None)
         self.tilt_id = None
         self.tilt_x = 0.0
         self.tilt_y = 0.0
@@ -4814,11 +5388,20 @@ class GlassBar(BasePlugin):
                 self.api.getAndroid().sensorStop(sid)
             except Exception:
                 pass
+        self.tilt_callback = None
 
     def _tilt_on(self, ev):
         try:
-            d = json.loads(str(ev))
-            vals = d if isinstance(d, list) else (d.get("values") or d.get("v") or [])
+            vals = None
+            # Android SensorEvent передаёт значения в float[]; некоторые обёртки
+            # возвращают JSON-строку или объект с полем values.
+            try:
+                vals = getattr(ev, "values", None)
+            except Exception:
+                vals = None
+            if vals is None:
+                d = json.loads(str(ev))
+                vals = d if isinstance(d, list) else (d.get("values") or d.get("v") or [])
             ax = float(vals[0])
             ay = float(vals[1])
         except Exception:
@@ -4982,6 +5565,11 @@ class GlassBar(BasePlugin):
             self._recycle_bitmap(o.get("lbl"))
 
     def _scr_fail(self, e):
+        msg = str(e).lower()
+        if ("backing surface" in msg or "not attached" in msg
+                or time.time() < getattr(self, "nav_quiet", 0.0)):
+            self.scr_pause_until = max(getattr(self, "scr_pause_until", 0.0), time.time() + 1.0)
+            return
         self.scr_fails += 1
         if self.scr_fails >= 20:
             self._scr_kill()
@@ -5089,6 +5677,8 @@ class GlassBar(BasePlugin):
             self._scr_set_sel(best)
 
     def _scr_capture(self, o, now, animating):
+        if now < max(getattr(self, "nav_quiet", 0.0), getattr(self, "copy_pause_until", 0.0)):
+            return
         k = "s_" + o["key"]
         if self.busy.get(k):
             return
