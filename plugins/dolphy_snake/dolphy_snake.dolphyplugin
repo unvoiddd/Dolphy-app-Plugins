@@ -1,0 +1,438 @@
+__id__ = "dolphy_snake"
+__name__ = "Dolphy Snake"
+__version__ = "1.0.2"
+__author__ = "@CMEPTOHOCTNbIY"
+__description__ = "Классическая Змейка"
+__icon__ = "rounded:sports_esports"
+__permissions__ = []
+
+SPEED_DELAYS = {
+    "slow": 165,
+    "normal": 115,
+    "fast": 75,
+}
+
+
+class DolphySnake(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        self.speed = "normal"
+
+    def on_plugin_load(self):
+        saved_speed = self.get_setting("speed", "normal")
+        if saved_speed in SPEED_DELAYS:
+            self.speed = saved_speed
+
+        self.add_module(
+            title="Змейка",
+            description="Мини-игра Змейка от @CMEPTOHOCTNbIY",
+            icon="sports_esports",
+            screen="main",
+            section="PLUGINS",
+            order=5,
+        )
+
+    def change_speed(self, mode):
+        if mode not in SPEED_DELAYS or mode == self.speed:
+            return
+        self.speed = mode
+        self.set_setting("speed", mode)
+        self.refresh()
+
+    def build_page(self):
+        tick = SPEED_DELAYS.get(self.speed, 115)
+
+        return f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }}
+html, body {{
+  width: 100%; height: 100%;
+  background: #0d1117;
+  color: #e6edf3;
+  font-family: sans-serif;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px;
+}}
+.top-bar {{
+  width: 100%;
+  max-width: 340px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: bold;
+}}
+.pts {{ color: #3fb950; }}
+.rec {{ color: #f2cc60; }}
+.hint {{ color: #8b949e; font-size: 11px; }}
+.field-box {{
+  position: relative;
+  width: 304px;
+  height: 304px;
+  margin: 4px 0;
+}}
+canvas {{
+  width: 304px;
+  height: 304px;
+  background: #090d12;
+  border: 2px solid #30363d;
+  border-radius: 12px;
+  display: block;
+}}
+.menu-layer {{
+  position: absolute;
+  left: 0; top: 0; right: 0; bottom: 0;
+  background: rgba(9, 13, 18, 0.88);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 14px;
+  z-index: 10;
+}}
+.hidden {{ display: none; }}
+.menu-layer h2 {{ font-size: 20px; color: #58a6ff; margin-bottom: 6px; }}
+.menu-layer p {{ font-size: 12px; color: #8b949e; margin-bottom: 14px; line-height: 1.4; }}
+.play-btn {{
+  background: #238636;
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  padding: 11px 26px;
+  font-size: 15px;
+  font-weight: bold;
+}}
+.pad {{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 2px;
+}}
+.pad-line {{
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  margin: 3px 0;
+}}
+.key, .gap {{
+  width: 62px;
+  height: 46px;
+  margin: 0 4px;
+  border-radius: 10px;
+}}
+.key {{
+  background: #161b22;
+  border: 1px solid #30363d;
+  color: #e6edf3;
+  font-size: 18px;
+  font-weight: bold;
+}}
+</style>
+</head>
+<body>
+  <div class="top-bar">
+    <span class="pts">Счёт: <span id="pts">0</span></span>
+    <span class="hint" id="state-lbl">Свайп или кнопки</span>
+    <span class="rec">Рекорд: <span id="rec">0</span></span>
+  </div>
+
+  <div class="field-box">
+    <canvas id="c" width="304" height="304"></canvas>
+    <div id="menu" class="menu-layer">
+      <h2 id="title-txt">DOLPHY SNAKE</h2>
+      <p id="desc-txt">Собирай яблоки, не врезайся в себя.<br>Стены переносят на другой край.</p>
+      <button type="button" class="play-btn" id="play-btn">ИГРАТЬ</button>
+    </div>
+  </div>
+
+  <div class="pad">
+    <div class="pad-line">
+      <div class="gap"></div>
+      <button type="button" class="key" id="k-up">▲</button>
+      <div class="gap"></div>
+    </div>
+    <div class="pad-line">
+      <button type="button" class="key" id="k-left">◀</button>
+      <button type="button" class="key" id="k-down">▼</button>
+      <button type="button" class="key" id="k-right">▶</button>
+    </div>
+  </div>
+
+<script>
+(function() {{
+  var CELLS = 16;
+  var DELAY = {tick};
+  var STORAGE_KEY = "cmep_snake_rec";
+
+  var c = document.getElementById("c");
+  var ctx = c.getContext("2d");
+  var ptsEl = document.getElementById("pts");
+  var recEl = document.getElementById("rec");
+  var stateEl = document.getElementById("state-lbl");
+  var menuEl = document.getElementById("menu");
+  var titleEl = document.getElementById("title-txt");
+  var descEl = document.getElementById("desc-txt");
+  var playBtn = document.getElementById("play-btn");
+
+  var bestScore = 0;
+  try {{
+    bestScore = parseInt(localStorage.getItem(STORAGE_KEY) || "0", 10) || 0;
+  }} catch (err) {{}}
+  recEl.textContent = String(bestScore);
+
+  var cellPx = c.width / CELLS;
+  var body = [];
+  var way = {{ x: 1, y: 0 }};
+  var queuedWay = {{ x: 1, y: 0 }};
+  var apple = {{ x: 10, y: 8 }};
+  var score = 0;
+  var active = false;
+  var loopId = null;
+  var lastClick = 0;
+
+  function box(x, y, w, h, r) {{
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+    ctx.fill();
+  }}
+
+  function placeApple() {{
+    for (var tries = 0; tries < 400; tries++) {{
+      var ax = Math.floor(Math.random() * CELLS);
+      var ay = Math.floor(Math.random() * CELLS);
+      var busy = false;
+      for (var i = 0; i < body.length; i++) {{
+        if (body[i].x === ax && body[i].y === ay) {{
+          busy = true;
+          break;
+        }}
+      }}
+      if (!busy) {{
+        apple = {{ x: ax, y: ay }};
+        return;
+      }}
+    }}
+  }}
+
+  function startMatch() {{
+    var t = Date.now();
+    if (t - lastClick < 250) return;
+    lastClick = t;
+
+    body = [{{ x: 6, y: 8 }}, {{ x: 5, y: 8 }}, {{ x: 4, y: 8 }}];
+    way = {{ x: 1, y: 0 }};
+    queuedWay = {{ x: 1, y: 0 }};
+    score = 0;
+    ptsEl.textContent = "0";
+    stateEl.textContent = "В игре";
+    placeApple();
+    active = true;
+    menuEl.className = "menu-layer hidden";
+    if (loopId) clearInterval(loopId);
+    loopId = setInterval(tickGame, DELAY);
+    render();
+  }}
+
+  function turn(dir) {{
+    if (!active) return;
+    if (dir === "U" && way.y !== 1) queuedWay = {{ x: 0, y: -1 }};
+    else if (dir === "D" && way.y !== -1) queuedWay = {{ x: 0, y: 1 }};
+    else if (dir === "L" && way.x !== 1) queuedWay = {{ x: -1, y: 0 }};
+    else if (dir === "R" && way.x !== -1) queuedWay = {{ x: 1, y: 0 }};
+  }}
+
+  function finishMatch() {{
+    active = false;
+    if (loopId) {{
+      clearInterval(loopId);
+      loopId = null;
+    }}
+    stateEl.textContent = "Конец игры";
+    try {{
+      if (navigator.vibrate) navigator.vibrate([80, 40, 120]);
+    }} catch (err) {{}}
+    titleEl.textContent = "ИГРА ОКОНЧЕНА";
+    descEl.innerHTML = "Счёт: <b>" + score + "</b> · Рекорд: <b>" + bestScore + "</b>";
+    playBtn.textContent = "ЕЩЁ РАЗ";
+    menuEl.className = "menu-layer";
+  }}
+
+  function tickGame() {{
+    if (!active) return;
+    way = queuedWay;
+    var head = {{
+      x: (body[0].x + way.x + CELLS) % CELLS,
+      y: (body[0].y + way.y + CELLS) % CELLS
+    }};
+
+    for (var i = 0; i < body.length; i++) {{
+      if (body[i].x === head.x && body[i].y === head.y) {{
+        finishMatch();
+        return;
+      }}
+    }}
+
+    body.unshift(head);
+
+    if (head.x === apple.x && head.y === apple.y) {{
+      score += 10;
+      ptsEl.textContent = String(score);
+      try {{
+        if (navigator.vibrate) navigator.vibrate(25);
+      }} catch (err) {{}}
+      if (score > bestScore) {{
+        bestScore = score;
+        recEl.textContent = String(bestScore);
+        try {{
+          localStorage.setItem(STORAGE_KEY, String(bestScore));
+        }} catch (err) {{}}
+      }}
+      placeApple();
+    }} else {{
+      body.pop();
+    }}
+
+    render();
+  }}
+
+  function render() {{
+    ctx.fillStyle = "#090d12";
+    ctx.fillRect(0, 0, c.width, c.height);
+
+    ctx.strokeStyle = "rgba(48, 54, 61, 0.35)";
+    ctx.lineWidth = 1;
+    for (var i = 1; i < CELLS; i++) {{
+      ctx.beginPath();
+      ctx.moveTo(i * cellPx, 0);
+      ctx.lineTo(i * cellPx, c.height);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(0, i * cellPx);
+      ctx.lineTo(c.width, i * cellPx);
+      ctx.stroke();
+    }}
+
+    ctx.fillStyle = "#f85149";
+    ctx.beginPath();
+    ctx.arc(
+      apple.x * cellPx + cellPx / 2,
+      apple.y * cellPx + cellPx / 2,
+      cellPx * 0.36,
+      0,
+      Math.PI * 2
+    );
+    ctx.fill();
+
+    for (var j = 0; j < body.length; j++) {{
+      var part = body[j];
+      var inset = j === 0 ? 1.5 : 2.5;
+      ctx.fillStyle = j === 0 ? "#56d364" : "#2ea043";
+      box(
+        part.x * cellPx + inset,
+        part.y * cellPx + inset,
+        cellPx - inset * 2,
+        cellPx - inset * 2,
+        4
+      );
+    }}
+  }}
+
+  function hookKey(id, code) {{
+    var btn = document.getElementById(id);
+    if (!btn) return;
+    btn.addEventListener("touchstart", function(e) {{
+      e.preventDefault();
+      turn(code);
+    }}, false);
+    btn.addEventListener("mousedown", function(e) {{
+      e.preventDefault();
+      turn(code);
+    }}, false);
+  }}
+
+  hookKey("k-up", "U");
+  hookKey("k-down", "D");
+  hookKey("k-left", "L");
+  hookKey("k-right", "R");
+
+  playBtn.addEventListener("touchend", function(e) {{
+    e.preventDefault();
+    startMatch();
+  }}, false);
+  playBtn.addEventListener("click", function(e) {{
+    e.preventDefault();
+    startMatch();
+  }}, false);
+
+  var startX = 0;
+  var startY = 0;
+  c.addEventListener("touchstart", function(e) {{
+    if (e.touches && e.touches.length > 0) {{
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+    }}
+  }}, false);
+
+  c.addEventListener("touchend", function(e) {{
+    if (!e.changedTouches || e.changedTouches.length === 0) return;
+    var dx = e.changedTouches[0].clientX - startX;
+    var dy = e.changedTouches[0].clientY - startY;
+    if (Math.abs(dx) < 18 && Math.abs(dy) < 18) return;
+    if (Math.abs(dx) > Math.abs(dy)) {{
+      turn(dx > 0 ? "R" : "L");
+    }} else {{
+      turn(dy > 0 ? "D" : "U");
+    }}
+  }}, false);
+
+  render();
+}})();
+</script>
+</body>
+</html>"""
+
+    def screen_main(self, ui, api, state):
+        speed_row = ui.row([
+            ui.chip("Медленно", selected=(self.speed == "slow"), on_click=lambda: self.change_speed("slow")),
+            ui.chip("Нормально", selected=(self.speed == "normal"), on_click=lambda: self.change_speed("normal")),
+            ui.chip("Быстро", selected=(self.speed == "fast"), on_click=lambda: self.change_speed("fast")),
+        ], spacing=8)
+
+        return ui.scaffold(
+            title="Dolphy Snake",
+            content=ui.column([
+                ui.card([
+                    ui.text("Скорость змейки", "labelSmall", color="secondary"),
+                    speed_row,
+                ], padding=10),
+                ui.card([
+                    ui.webview(html=self.build_page(), height=530, fill_max_size=False),
+                ], padding=4),
+            ], padding=10, spacing=8, fill_max_size=False),
+        )
+
