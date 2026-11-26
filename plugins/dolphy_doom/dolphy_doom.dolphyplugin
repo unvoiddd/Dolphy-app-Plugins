@@ -1,0 +1,913 @@
+__id__ = "dolphy_doom"
+__name__ = "Dolphy DOOM"
+__version__ = "1.1.1"
+__author__ = "@CMEPTOHOCTNbIY"
+__description__ = "Бесконечный 3D-шутер в стиле DOOM с генерацией уровней и этажами сложности"
+__icon__ = "rounded:sports_esports"
+__permissions__ = []
+
+DOOM_PAGE = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<style>
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+html, body {
+  width: 100%;
+  height: 100%;
+  background: #09090b;
+  color: #e6e6e6;
+  font-family: monospace;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 6px;
+}
+.hud {
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #171414;
+  border: 1px solid #471d1d;
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: bold;
+}
+.hp { color: #ff5252; }
+.ammo { color: #ffd740; }
+.lvl { color: #80d8ff; }
+.stage { color: #ff8a65; }
+
+.screen-box {
+  position: relative;
+  width: 336px;
+  height: 268px;
+  margin: 3px 0;
+  border: 2px solid #3c1d1d;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #000;
+  touch-action: none;
+}
+canvas {
+  width: 336px;
+  height: 268px;
+  display: block;
+  touch-action: none;
+}
+
+.menu-overlay {
+  position: absolute;
+  left: 0; top: 0; right: 0; bottom: 0;
+  background: rgba(10, 6, 6, 0.9);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 14px;
+  z-index: 20;
+}
+.hidden { display: none !important; }
+.menu-overlay h2 {
+  font-size: 20px;
+  color: #ff3d00;
+  margin-bottom: 6px;
+}
+.menu-overlay p {
+  font-size: 11px;
+  color: #bdbdbd;
+  line-height: 1.45;
+  margin-bottom: 12px;
+}
+.start-btn {
+  background: #b71c1c;
+  color: #fff;
+  border: 1px solid #ff5252;
+  border-radius: 8px;
+  padding: 10px 24px;
+  font-size: 14px;
+  font-weight: bold;
+  font-family: monospace;
+  touch-action: manipulation;
+}
+
+.pad-area {
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  touch-action: none;
+}
+.pad-row-split {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.group-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.btn {
+  background: #1b1818;
+  border: 1px solid #3d2727;
+  border-radius: 10px;
+  color: #f5f5f5;
+  font-family: monospace;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+}
+.btn.active-press {
+  background: #332323;
+  border-color: #ff6e40;
+}
+.walk-btn {
+  width: 68px;
+  height: 44px;
+  font-size: 14px;
+}
+.turn-btn {
+  width: 68px;
+  height: 44px;
+  font-size: 17px;
+}
+.door-btn {
+  width: 98px;
+  height: 40px;
+  font-size: 12px;
+  background: #222d33;
+  border-color: #4f6b7a;
+}
+.fire-btn {
+  width: 124px;
+  height: 44px;
+  font-size: 14px;
+  background: #8e0000;
+  border-color: #ff5252;
+  color: #fff;
+}
+.binds-bar {
+  width: 100%;
+  max-width: 360px;
+  background: #131112;
+  border: 1px solid #2b2222;
+  border-radius: 7px;
+  padding: 5px 8px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: #a8a8a8;
+  text-align: center;
+}
+.binds-bar b {
+  color: #e0e0e0;
+}
+</style>
+</head>
+<body>
+  <div class="hud">
+    <span class="hp">HP: <span id="hp">100</span></span>
+    <span class="stage">ЭТАЖ <span id="stage">1</span></span>
+    <span class="lvl">УР <span id="lvl">1</span>/3 · <span id="kills">0</span></span>
+    <span class="ammo">ПАТР: <span id="ammo">24</span></span>
+  </div>
+
+  <div class="screen-box" id="view-box">
+    <canvas id="scr" width="336" height="268"></canvas>
+    <div id="overlay" class="menu-overlay">
+      <h2 id="ov-h">DOLPHY DOOM</h2>
+      <p id="ov-p">Зачищай секторы и иди к зелёному выходу.<br>После 3 уровня — новый этаж, другой цвет и злее враги.</p>
+      <button type="button" class="start-btn" id="start-btn" onclick="window.__doomStart && window.__doomStart()">ИГРАТЬ</button>
+    </div>
+  </div>
+
+  <div class="pad-area">
+    <div class="pad-row-split">
+      <div class="group-box">
+        <button type="button" class="btn walk-btn" id="b-fwd">ВПЕРЁД</button>
+        <button type="button" class="btn walk-btn" id="b-back">НАЗАД</button>
+      </div>
+      <button type="button" class="btn door-btn" id="b-door">ДВЕРЬ / ЛИФТ</button>
+    </div>
+
+    <div class="pad-row-split">
+      <div class="group-box">
+        <button type="button" class="btn turn-btn" id="b-left">◀</button>
+        <button type="button" class="btn turn-btn" id="b-right">▶</button>
+      </div>
+      <button type="button" class="btn fire-btn" id="b-fire">ОГОНЬ</button>
+    </div>
+  </div>
+
+  <div class="binds-bar">
+    <b>ВПЕРЁД / НАЗАД</b> — шаг · <b>◀ / ▶</b> или <b>свайп по 3D</b> — поворот · <b>ДВЕРЬ / ЛИФТ</b> — открыть/выйти · <b>ОГОНЬ</b> — выстрел · свайп по экрану поворот
+  </div>
+
+<script>
+(function() {
+  var SFX = __SFX_ON__;
+  var c = document.getElementById("scr");
+  var ctx = c.getContext("2d");
+  var W = c.width;
+  var H = c.height;
+
+  var hpEl = document.getElementById("hp");
+  var stageEl = document.getElementById("stage");
+  var lvlEl = document.getElementById("lvl");
+  var killsEl = document.getElementById("kills");
+  var ammoEl = document.getElementById("ammo");
+  var overlay = document.getElementById("overlay");
+  var ovH = document.getElementById("ov-h");
+  var ovP = document.getElementById("ov-p");
+  var startBtn = document.getElementById("start-btn");
+
+  var THEMES = [
+    { ceil: "#151214", floor: "#241f1e", w1: [152, 46, 40], w2: [92, 104, 116] },
+    { ceil: "#0e181a", floor: "#172629", w1: [38, 128, 122], w2: [78, 92, 130] },
+    { ceil: "#19101c", floor: "#27192b", w1: [148, 52, 126], w2: [122, 88, 54] },
+    { ceil: "#19170e", floor: "#282416", w1: [168, 112, 36], w2: [86, 108, 72] }
+  ];
+
+  var ac = null;
+  function playTone(f1, f2, dur, wave, gainVal) {
+    if (!SFX) return;
+    try {
+      if (!ac) {
+        var AudioCtor = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtor) ac = new AudioCtor();
+      }
+      if (!ac) return;
+      if (ac.state === "suspended") ac.resume();
+      var osc = ac.createOscillator();
+      var g = ac.createGain();
+      osc.type = wave || "sawtooth";
+      osc.frequency.setValueAtTime(f1, ac.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(Math.max(22, f2), ac.currentTime + dur);
+      g.gain.setValueAtTime(gainVal || 0.1, ac.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + dur);
+      osc.connect(g);
+      g.connect(ac.destination);
+      osc.start();
+      osc.stop(ac.currentTime + dur);
+    } catch (err) {}
+  }
+
+  function genLevel(stageNum, lvlNum) {
+    var rows = 11;
+    var cols = 13;
+    var g = [];
+    for (var r = 0; r < rows; r++) {
+      var line = [];
+      for (var col = 0; col < cols; col++) {
+        if (r === 0 || r === rows - 1 || col === 0 || col === cols - 1) {
+          line.push((stageNum + lvlNum) % 2 === 0 ? 1 : 2);
+        } else {
+          line.push(0);
+        }
+      }
+      g.push(line);
+    }
+
+    var pillars = 4 + lvlNum * 2 + (stageNum % 3);
+    for (var p = 0; p < pillars; p++) {
+      var pr = 2 + Math.floor(Math.random() * (rows - 4));
+      var pc = 2 + Math.floor(Math.random() * (cols - 4));
+      if ((pr === 1 && pc === 1) || (pr === rows - 2 && pc === cols - 2)) continue;
+      g[pr][pc] = (p % 3 === 0) ? 2 : 1;
+      if (p % 2 === 0 && pr + 1 < rows - 1) {
+        g[pr + 1][pc] = 1;
+      }
+    }
+
+    var doorCount = 2 + lvlNum;
+    for (var d = 0; d < doorCount; d++) {
+      var dr = 2 + Math.floor(Math.random() * (rows - 4));
+      var dc = 3 + Math.floor(Math.random() * (cols - 5));
+      if ((dr === 1 && dc === 1) || (dr === rows - 2 && dc === cols - 2)) continue;
+      g[dr][dc] = 3;
+    }
+
+    var wx = 1;
+    var wy = 1;
+    var tx = cols - 2;
+    var ty = rows - 2;
+    while (wx < tx) {
+      g[wy][wx] = 0;
+      wx++;
+    }
+    while (wy < ty) {
+      g[wy][wx] = 0;
+      wy++;
+    }
+    g[ty][tx] = 4;
+
+    var hpMult = 1 + (stageNum - 1) * 0.45 + (lvlNum - 1) * 0.15;
+    var dmgMult = 1 + (stageNum - 1) * 0.35;
+
+    var eList = [];
+    var totalEnemies = 3 + lvlNum + Math.min(4, stageNum);
+    for (var i = 0; i < totalEnemies; i++) {
+      var ex = 3 + Math.floor(Math.random() * (cols - 4)) + 0.5;
+      var ey = 2 + Math.floor(Math.random() * (rows - 3)) + 0.5;
+      if (g[Math.floor(ey)][Math.floor(ex)] !== 0) {
+        ex = 4.5;
+        ey = 1.5;
+        g[1][4] = 0;
+      }
+      var kind = (i % 3 === 2 && stageNum >= 2) ? 2 : (i % 2 === 1 ? 1 : 0);
+      var baseHp = kind === 2 ? 95 : (kind === 1 ? 55 : 30);
+      var mhp = Math.round(baseHp * hpMult);
+      eList.push({
+        x: ex,
+        y: ey,
+        kind: kind,
+        hp: mhp,
+        maxHp: mhp,
+        dmg: Math.round((kind === 2 ? 18 : (kind === 1 ? 12 : 8)) * dmgMult),
+        cd: 0.5 + Math.random() * 0.7,
+        flash: 0,
+        alive: true
+      });
+    }
+
+    var pickList = [
+      { x: 2.5, y: 1.5, kind: "ammo", taken: false },
+      { x: cols - 2.5, y: 2.5, kind: "hp", taken: false },
+      { x: Math.floor(cols / 2) + 0.5, y: Math.floor(rows / 2) + 0.5, kind: "ammo", taken: false },
+      { x: 2.5, y: rows - 2.5, kind: "hp", taken: false }
+    ];
+
+    return {
+      start: { x: 1.5, y: 1.5, a: 0 },
+      grid: g,
+      enemies: eList,
+      items: pickList
+    };
+  }
+
+  var stage = 1;
+  var level = 1;
+  var map = [];
+  var enemies = [];
+  var items = [];
+  var player = { x: 1.5, y: 1.5, a: 0, hp: 100, ammo: 24, kills: 0 };
+  var input = { fwd: false, back: false, left: false, right: false };
+  var active = false;
+  var recoil = 0;
+  var flashGun = 0;
+  var flashHurt = 0;
+  var zDepth = new Array(W);
+  var prevTs = 0;
+  var lastStartTs = 0;
+
+  function setupSector(st, lv, resetPlayer) {
+    stage = st;
+    level = lv;
+    var data = genLevel(stage, level);
+    map = data.grid;
+    enemies = data.enemies;
+    items = data.items;
+    player.x = data.start.x;
+    player.y = data.start.y;
+    player.a = data.start.a;
+    if (resetPlayer) {
+      player.hp = 100;
+      player.ammo = 24;
+      player.kills = 0;
+    } else {
+      player.hp = Math.min(100, player.hp + 20);
+      player.ammo += 8;
+    }
+    updateHud();
+  }
+
+  function updateHud() {
+    hpEl.textContent = String(Math.max(0, Math.round(player.hp)));
+    stageEl.textContent = String(stage);
+    lvlEl.textContent = String(level);
+    killsEl.textContent = String(player.kills);
+    ammoEl.textContent = String(player.ammo);
+  }
+
+  function cellAt(x, y) {
+    var gx = Math.floor(x);
+    var gy = Math.floor(y);
+    if (gy < 0 || gy >= map.length || gx < 0 || gx >= map[0].length) return 1;
+    return map[gy][gx];
+  }
+
+  function freeSpot(x, y) {
+    var pad = 0.22;
+    return cellAt(x - pad, y - pad) === 0 &&
+           cellAt(x + pad, y - pad) === 0 &&
+           cellAt(x - pad, y + pad) === 0 &&
+           cellAt(x + pad, y + pad) === 0;
+  }
+
+  function interact() {
+    if (!active) return;
+    var dists = [0.75, 1.25];
+    for (var i = 0; i < dists.length; i++) {
+      var tx = Math.floor(player.x + Math.cos(player.a) * dists[i]);
+      var ty = Math.floor(player.y + Math.sin(player.a) * dists[i]);
+      if (ty >= 0 && ty < map.length && tx >= 0 && tx < map[0].length) {
+        var tile = map[ty][tx];
+        if (tile === 3) {
+          map[ty][tx] = 0;
+          playTone(150, 280, 0.14, "square", 0.09);
+          return;
+        }
+        if (tile === 4) {
+          playTone(300, 620, 0.22, "triangle", 0.12);
+          if (level < 3) {
+            setupSector(stage, level + 1, false);
+          } else {
+            setupSector(stage + 1, 1, false);
+          }
+          return;
+        }
+      }
+    }
+  }
+
+  function fireGun() {
+    if (!active || recoil > 0.14) return;
+    if (player.ammo <= 0) {
+      playTone(95, 65, 0.05, "square", 0.07);
+      return;
+    }
+    player.ammo--;
+    recoil = 1.0;
+    flashGun = 1.0;
+    playTone(230, 50, 0.13, "sawtooth", 0.14);
+    updateHud();
+
+    var hitIdx = -1;
+    var bestD = 99;
+    var ca = Math.cos(player.a);
+    var sa = Math.sin(player.a);
+
+    for (var i = 0; i < enemies.length; i++) {
+      var e = enemies[i];
+      if (!e.alive) continue;
+      var dx = e.x - player.x;
+      var dy = e.y - player.y;
+      var d = Math.sqrt(dx * dx + dy * dy);
+      if (d > 11.5 || d < 0.2) continue;
+
+      var fwdDot = dx * ca + dy * sa;
+      if (fwdDot <= 0) continue;
+      var lat = Math.abs(-dx * sa + dy * ca);
+      if (lat > 0.44) continue;
+
+      if (!wallBlocks(player.x, player.y, e.x, e.y) && d < bestD) {
+        bestD = d;
+        hitIdx = i;
+      }
+    }
+
+    if (hitIdx >= 0) {
+      var target = enemies[hitIdx];
+      var dmg = bestD < 2.2 ? 44 : 29;
+      target.hp -= dmg;
+      target.flash = 0.22;
+      if (target.hp <= 0) {
+        target.alive = false;
+        player.kills++;
+        playTone(130, 38, 0.2, "sawtooth", 0.12);
+        updateHud();
+      }
+    }
+  }
+
+  function wallBlocks(x1, y1, x2, y2) {
+    var dx = x2 - x1;
+    var dy = y2 - y1;
+    var steps = Math.ceil(Math.sqrt(dx * dx + dy * dy) * 6);
+    for (var s = 1; s < steps; s++) {
+      var t = s / steps;
+      if (cellAt(x1 + dx * t, y1 + dy * t) > 0) return true;
+    }
+    return false;
+  }
+
+  function showGameOver() {
+    active = false;
+    ovH.textContent = "ТЫ ПОГИБ";
+    ovP.innerHTML = "Этаж: <b>" + stage + "</b> · Уровень: <b>" + level + "</b><br>Фрагов: <b>" + player.kills + "</b>";
+    startBtn.textContent = "ЗАНОВО";
+    overlay.className = "menu-overlay";
+  }
+
+  function stepSim(dt) {
+    var walkSpeed = 3.2 * dt;
+    var turnSpeed = 2.45 * dt;
+
+    if (input.left) player.a -= turnSpeed;
+    if (input.right) player.a += turnSpeed;
+
+    var moveDelta = 0;
+    if (input.fwd) moveDelta += walkSpeed;
+    if (input.back) moveDelta -= walkSpeed * 0.82;
+
+    if (moveDelta !== 0) {
+      var nextX = player.x + Math.cos(player.a) * moveDelta;
+      var nextY = player.y + Math.sin(player.a) * moveDelta;
+      if (freeSpot(nextX, player.y)) player.x = nextX;
+      if (freeSpot(player.x, nextY)) player.y = nextY;
+    }
+
+    if (recoil > 0) recoil = Math.max(0, recoil - dt * 3.4);
+    if (flashGun > 0) flashGun = Math.max(0, flashGun - dt * 9.5);
+    if (flashHurt > 0) flashHurt = Math.max(0, flashHurt - dt * 2.8);
+
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (it.taken) continue;
+      var dx = it.x - player.x;
+      var dy = it.y - player.y;
+      if (dx * dx + dy * dy < 0.34) {
+        if (it.kind === "hp" && player.hp < 100) {
+          it.taken = true;
+          player.hp = Math.min(100, player.hp + 30);
+          playTone(440, 660, 0.11, "sine", 0.09);
+          updateHud();
+        } else if (it.kind === "ammo") {
+          it.taken = true;
+          player.ammo += 12;
+          playTone(330, 520, 0.1, "triangle", 0.09);
+          updateHud();
+        }
+      }
+    }
+
+    var enemySpdMult = 1 + Math.min(0.65, (stage - 1) * 0.12);
+    for (var j = 0; j < enemies.length; j++) {
+      var e = enemies[j];
+      if (!e.alive) continue;
+      if (e.flash > 0) e.flash = Math.max(0, e.flash - dt);
+
+      var ex = player.x - e.x;
+      var ey = player.y - e.y;
+      var dist = Math.sqrt(ex * ex + ey * ey);
+
+      if (dist < 9.0 && !wallBlocks(e.x, e.y, player.x, player.y)) {
+        if (dist > 1.15) {
+          var spd = (e.kind === 2 ? 1.2 : 1.5) * enemySpdMult * dt;
+          var vx = (ex / dist) * spd;
+          var vy = (ey / dist) * spd;
+          if (cellAt(e.x + vx, e.y) === 0) e.x += vx;
+          if (cellAt(e.x, e.y + vy) === 0) e.y += vy;
+        }
+        e.cd -= dt;
+        if (dist < 1.55 && e.cd <= 0) {
+          e.cd = Math.max(0.65, (e.kind === 2 ? 1.1 : 1.35) - (stage - 1) * 0.08);
+          player.hp -= e.dmg;
+          flashHurt = 0.85;
+          playTone(110, 45, 0.14, "sawtooth", 0.13);
+          updateHud();
+          if (player.hp <= 0) {
+            showGameOver();
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  function drawScene() {
+    var theme = THEMES[(stage - 1) % THEMES.length];
+    ctx.fillStyle = theme.ceil;
+    ctx.fillRect(0, 0, W, H / 2);
+    ctx.fillStyle = theme.floor;
+    ctx.fillRect(0, H / 2, W, H / 2);
+
+    var fov = 1.06;
+    var halfFov = fov / 2;
+
+    for (var col = 0; col < W; col++) {
+      var ang = player.a - halfFov + (col / W) * fov;
+      var sinA = Math.sin(ang);
+      var cosA = Math.cos(ang);
+
+      var d = 0.05;
+      var hitType = 0;
+      var hx = 0;
+      var hy = 0;
+
+      while (d < 16) {
+        d += 0.03;
+        hx = player.x + cosA * d;
+        hy = player.y + sinA * d;
+        hitType = cellAt(hx, hy);
+        if (hitType > 0) break;
+      }
+
+      var corr = d * Math.cos(ang - player.a);
+      zDepth[col] = corr;
+
+      var wallH = Math.min(H * 1.6, H / Math.max(0.12, corr));
+      var yTop = (H - wallH) / 2;
+
+      var light = Math.max(0.2, 1 - corr / 13.5);
+      var texPhase = ((hx + hy) * 4) % 1;
+      var band = texPhase < 0.12 ? 0.78 : 1.0;
+      var k = light * band;
+
+      var rgb = hitType === 2 ? theme.w2 : theme.w1;
+      var r = rgb[0], g = rgb[1], b = rgb[2];
+      if (hitType === 3) { r = 205; g = 145; b = 45; }
+      else if (hitType === 4) { r = 45; g = 205; b = 95; }
+
+      ctx.fillStyle = "rgb(" + Math.round(r * k) + "," + Math.round(g * k) + "," + Math.round(b * k) + ")";
+      ctx.fillRect(col, yTop, 1, wallH);
+    }
+
+    var drawList = [];
+    for (var i = 0; i < items.length; i++) {
+      if (!items[i].taken) {
+        drawList.push({ x: items[i].x, y: items[i].y, kind: items[i].kind, isItem: true });
+      }
+    }
+    for (var j = 0; j < enemies.length; j++) {
+      if (enemies[j].alive) {
+        drawList.push({
+          x: enemies[j].x,
+          y: enemies[j].y,
+          kind: enemies[j].kind,
+          hp: enemies[j].hp,
+          maxHp: enemies[j].maxHp,
+          flash: enemies[j].flash,
+          isItem: false
+        });
+      }
+    }
+
+    for (var s = 0; s < drawList.length; s++) {
+      var dx = drawList[s].x - player.x;
+      var dy = drawList[s].y - player.y;
+      drawList[s].dist = Math.sqrt(dx * dx + dy * dy);
+    }
+    drawList.sort(function(a, b) { return b.dist - a.dist; });
+
+    for (var idx = 0; idx < drawList.length; idx++) {
+      var sp = drawList[idx];
+      if (sp.dist < 0.25) continue;
+      var relAng = Math.atan2(sp.y - player.y, sp.x - player.x) - player.a;
+      while (relAng > Math.PI) relAng -= Math.PI * 2;
+      while (relAng < -Math.PI) relAng += Math.PI * 2;
+      if (Math.abs(relAng) > halfFov + 0.3) continue;
+
+      var sx = (0.5 + relAng / fov) * W;
+      var size = Math.min(H * 1.1, H / sp.dist);
+      var mid = Math.max(0, Math.min(W - 1, Math.floor(sx)));
+      if (sp.dist >= zDepth[mid]) continue;
+
+      if (sp.isItem) {
+        var ih = size * 0.32;
+        var iy = H / 2 + size * 0.16;
+        ctx.fillStyle = sp.kind === "hp" ? "#00e676" : "#ffca28";
+        ctx.fillRect(sx - ih / 2, iy, ih, ih);
+        if (sp.kind === "hp") {
+          ctx.fillStyle = "#111";
+          ctx.fillRect(sx - ih * 0.12, iy + ih * 0.2, ih * 0.24, ih * 0.6);
+          ctx.fillRect(sx - ih * 0.3, iy + ih * 0.38, ih * 0.6, ih * 0.24);
+        }
+      } else {
+        var eh = size * 0.85;
+        var ew = size * 0.56;
+        var ey = H / 2 - eh * 0.42;
+        var ex = sx - ew / 2;
+
+        if (sp.flash > 0) ctx.fillStyle = "#ffffff";
+        else if (sp.kind === 2) ctx.fillStyle = "#9c27b0";
+        else if (sp.kind === 1) ctx.fillStyle = "#e64a19";
+        else ctx.fillStyle = "#a86434";
+        ctx.fillRect(ex, ey, ew, eh);
+
+        ctx.fillStyle = "#ffeb3b";
+        ctx.fillRect(sx - ew * 0.24, ey + eh * 0.18, ew * 0.14, eh * 0.08);
+        ctx.fillRect(sx + ew * 0.10, ey + eh * 0.18, ew * 0.14, eh * 0.08);
+
+        ctx.fillStyle = "#222";
+        ctx.fillRect(ex, ey - 6, ew, 3);
+        ctx.fillStyle = "#ff1744";
+        ctx.fillRect(ex, ey - 6, ew * Math.max(0, sp.hp / sp.maxHp), 3);
+      }
+    }
+
+    var sway = (input.fwd || input.back) ? Math.sin(Date.now() / 110) * 4 : 0;
+    var kick = recoil * 16;
+    var gx = W / 2;
+    var gy = H - 48 + sway + kick;
+
+    if (flashGun > 0.1) {
+      ctx.fillStyle = "rgba(255, 220, 90," + (flashGun * 0.75) + ")";
+      ctx.beginPath();
+      ctx.arc(gx, gy - 14, 22, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.fillStyle = "#37474f";
+    ctx.fillRect(gx - 12, gy - 12, 24, 34);
+    ctx.fillStyle = "#263238";
+    ctx.fillRect(gx - 18, gy + 14, 36, 36);
+    ctx.fillStyle = "#78909c";
+    ctx.fillRect(gx - 4, gy - 16, 8, 22);
+
+    ctx.strokeStyle = "rgba(255,255,255,0.65)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(W / 2 - 6, H / 2);
+    ctx.lineTo(W / 2 + 6, H / 2);
+    ctx.moveTo(W / 2, H / 2 - 6);
+    ctx.lineTo(W / 2, H / 2 + 6);
+    ctx.stroke();
+
+    var mScale = 4;
+    for (var mr = 0; mr < map.length; mr++) {
+      for (var mc = 0; mc < map[0].length; mc++) {
+        var v = map[mr][mc];
+        ctx.fillStyle = v === 0 ? "rgba(0,0,0,0.45)" : (v === 4 ? "#00e676" : (v === 3 ? "#ffb300" : "#757575"));
+        ctx.fillRect(6 + mc * mScale, 6 + mr * mScale, mScale, mScale);
+      }
+    }
+    ctx.fillStyle = "#ff1744";
+    ctx.fillRect(6 + player.x * mScale - 1, 6 + player.y * mScale - 1, 3, 3);
+
+    if (flashHurt > 0) {
+      ctx.fillStyle = "rgba(220, 20, 20," + (flashHurt * 0.4) + ")";
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
+
+  function loop(ts) {
+    if (!prevTs) prevTs = ts;
+    var dt = Math.min(0.05, (ts - prevTs) / 1000);
+    prevTs = ts;
+    if (active) {
+      stepSim(dt);
+      drawScene();
+    }
+    requestAnimationFrame(loop);
+  }
+
+  function bindHold(btnId, keyName) {
+    var el = document.getElementById(btnId);
+    if (!el) return;
+    el.addEventListener("pointerdown", function(e) {
+      e.preventDefault();
+      try { el.setPointerCapture(e.pointerId); } catch (err) {}
+      input[keyName] = true;
+      el.classList.add("active-press");
+    });
+    function release() {
+      input[keyName] = false;
+      el.classList.remove("active-press");
+    }
+    el.addEventListener("pointerup", release);
+    el.addEventListener("pointercancel", release);
+    el.addEventListener("lostpointercapture", release);
+  }
+
+  bindHold("b-fwd", "fwd");
+  bindHold("b-back", "back");
+  bindHold("b-left", "left");
+  bindHold("b-right", "right");
+
+  var fireEl = document.getElementById("b-fire");
+  fireEl.addEventListener("pointerdown", function(e) {
+    e.preventDefault();
+    fireEl.classList.add("active-press");
+    fireGun();
+  });
+  fireEl.addEventListener("pointerup", function() { fireEl.classList.remove("active-press"); });
+  fireEl.addEventListener("pointercancel", function() { fireEl.classList.remove("active-press"); });
+
+  var doorEl = document.getElementById("b-door");
+  doorEl.addEventListener("pointerdown", function(e) {
+    e.preventDefault();
+    doorEl.classList.add("active-press");
+    interact();
+  });
+  doorEl.addEventListener("pointerup", function() { doorEl.classList.remove("active-press"); });
+  doorEl.addEventListener("pointercancel", function() { doorEl.classList.remove("active-press"); });
+
+  var viewEl = document.getElementById("view-box");
+  var dragPointerId = null;
+  var dragLastX = 0;
+
+  viewEl.addEventListener("pointerdown", function(e) {
+    if (!active) return;
+    if (dragPointerId !== null) return;
+    dragPointerId = e.pointerId;
+    dragLastX = e.clientX;
+    try { viewEl.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+
+  viewEl.addEventListener("pointermove", function(e) {
+    if (!active || e.pointerId !== dragPointerId) return;
+    var dx = e.clientX - dragLastX;
+    dragLastX = e.clientX;
+    player.a += dx * 0.0095;
+  });
+
+  function stopDrag(e) {
+    if (e.pointerId === dragPointerId) {
+      dragPointerId = null;
+    }
+  }
+  viewEl.addEventListener("pointerup", stopDrag);
+  viewEl.addEventListener("pointercancel", stopDrag);
+
+  function startDoom() {
+    var now = Date.now();
+    if (now - lastStartTs < 200) return;
+    lastStartTs = now;
+    input.fwd = false;
+    input.back = false;
+    input.left = false;
+    input.right = false;
+    setupSector(1, 1, true);
+    active = true;
+    prevTs = 0;
+    overlay.className = "menu-overlay hidden";
+    drawScene();
+  }
+
+  window.__doomStart = startDoom;
+  startBtn.addEventListener("click", function(e) {
+    e.preventDefault();
+    startDoom();
+  });
+
+  setupSector(1, 1, true);
+  drawScene();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
+"""
+
+
+class DolphyDoom(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        self.sound_on = True
+
+    def on_plugin_load(self):
+        self.sound_on = bool(self.get_setting("sound_on", True))
+        self.add_module(
+            title="Dolphy DOOM",
+            description="Бесконечный 3D-шутер от @CMEPTOHOCTNbIY",
+            icon="sports_esports",
+            screen="main",
+            section="PLUGINS",
+            order=6,
+        )
+
+    def toggle_sound(self, val):
+        self.sound_on = bool(val)
+        self.set_setting("sound_on", self.sound_on)
+        self.refresh()
+
+    def render_html(self):
+        return DOOM_PAGE.replace("__SFX_ON__", "true" if self.sound_on else "false")
+
+    def screen_main(self, ui, api, state):
+        return ui.scaffold(
+            title="Dolphy DOOM",
+            content=ui.column([
+                ui.card([
+                    ui.switch(
+                        checked=self.sound_on,
+                        on_change=self.toggle_sound,
+                        title="Звуковые эффекты",
+                        subtitle="Синтез выстрелов и шагов",
+                    ),
+                ], padding=10),
+                ui.card([
+                    ui.webview(html=self.render_html(), height=508, fill_max_size=False),
+                ], padding=4),
+            ], padding=10, spacing=8, fill_max_size=False),
+        )
