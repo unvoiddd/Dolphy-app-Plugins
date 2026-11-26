@@ -3,7 +3,7 @@ import time
 
 __id__ = "new_year_winter"
 __name__ = "Новогодний плагин"
-__version__ = "1.0.1"
+__version__ = "1.0.7"
 __author__ = "Dolphy"
 __description__ = "Глобальный снегопад на всех экранах"
 __icon__ = "rounded:ac_unit"
@@ -82,7 +82,7 @@ size();sync();
 SETTINGS = [
     {"type": "header", "title": "Новогодний плагин"},
     {"type": "switch", "key": "snow", "title": "Снегопад", "subtitle": "Снег на всех экранах, касания не перехватывает", "default": True},
-    {"type": "slider", "key": "density", "title": "Количество снежинок", "min": 10, "max": 120, "default": 45, "steps": 109},
+    {"type": "slider", "key": "snow_mult", "title": "Количество снежинок (× базовое 45)", "subtitle": "От 1× (самый редкий снег) до 1250×", "min": 1, "max": 1250, "default": 1250, "steps": 1249},
     {"type": "switch", "key": "eco", "title": "Экономный режим", "subtitle": "30 кадров/с и меньше снежинок", "default": False},
 ]
 
@@ -113,6 +113,17 @@ class NewYearWinter(BasePlugin):
             pass
 
     def on_plugin_load(self):
+        # пульс в фоне: метка свежая, пока плагин включён, независимо от открытого экрана
+        import threading
+        self._beat_run = True
+        def _beat():
+            while getattr(self, "_beat_run", False):
+                try:
+                    self._bridge(True)
+                except Exception:
+                    pass
+                time.sleep(2.0)
+        threading.Thread(target=_beat, daemon=True).start()
         self._bridge(True)
         self.api.registerSettings("Новогодний плагин", json.dumps(SETTINGS), 0)
         act = self.api.getActivity()
@@ -120,6 +131,7 @@ class NewYearWinter(BasePlugin):
             self._attach(act)
 
     def on_plugin_unload(self):
+        self._beat_run = False  # остановить пульс, иначе флаг снова поднимется после выключения
         self._bridge(False)
         self._detach()
 
@@ -407,7 +419,7 @@ class NewYearWinter(BasePlugin):
             return
         cfg = {
             "snow": bool(self.get_setting("snow", True)),
-            "count": int(self.get_setting("density", 45)),
+            "count": 45 * max(1, int(self.get_setting("snow_mult", 1250))),  # база 45 × множитель
             "tree": False,
             "ts": int(self.get_setting("tree_size", 100)),
             "tx": int(self.get_setting("tree_x", 0)),
