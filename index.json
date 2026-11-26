@@ -1,6 +1,6 @@
 {
   "format": "dolphy-plugins-v1",
-  "count": 41,
+  "count": 42,
   "plugins": [
     {
       "id": 16,
@@ -183,6 +183,20 @@
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/dolphy_performance_booster/dolphy_performance_booster.dolphyplugin",
       "post_url": "https://t.me/c/3966541757/27000",
       "updated_at": "2026-09-27 06:03:04"
+    },
+    {
+      "id": 42,
+      "name": "Dolphy Snake",
+      "version": "1.0.2",
+      "author": "@CMEPTOHOCTNbIY",
+      "description": {
+        "ru": "классическая змейка в Dolphy",
+        "en": "the classic snake in Dolphy"
+      },
+      "file": "plugins/dolphy_snake/dolphy_snake.dolphyplugin",
+      "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/dolphy_snake/dolphy_snake.dolphyplugin",
+      "post_url": "https://t.me/c/3966541757/48791",
+      "updated_at": "2026-11-26 08:04:01"
     },
     {
       "id": 25,
