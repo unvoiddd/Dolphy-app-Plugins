@@ -1,6 +1,6 @@
 {
   "format": "dolphy-plugins-v1",
-  "count": 40,
+  "count": 41,
   "plugins": [
     {
       "id": 16,
@@ -141,6 +141,20 @@
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/dolphy_ai_assistant/dolphy_ai_assistant.dolphyplugin",
       "post_url": "https://t.me/c/3966541757/46035",
       "updated_at": "2026-11-14 17:36:37"
+    },
+    {
+      "id": 41,
+      "name": "Dolphy DOOM",
+      "version": "1.1.1",
+      "author": "@CMEPTOHOCTNbIY",
+      "description": {
+        "ru": "Самодельный DOOM. Игра бесконечна. после окончания трех уровней следует следующий этаж, с каждым этажом играть все сложнее.",
+        "en": "Homemade DOOM. The game is endless. After completing three levels, the next floor follows, and it gets more difficult to play with each floor."
+      },
+      "file": "plugins/dolphy_doom/dolphy_doom.dolphyplugin",
+      "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/dolphy_doom/dolphy_doom.dolphyplugin",
+      "post_url": "https://t.me/c/3966541757/48790",
+      "updated_at": "2026-11-26 08:03:55"
     },
     {
       "id": 39,
