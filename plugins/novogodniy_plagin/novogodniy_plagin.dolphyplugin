@@ -3,7 +3,7 @@ import time
 
 __id__ = "new_year_winter"
 __name__ = "Новогодний плагин"
-__version__ = "1.0.7"
+__version__ = "1.1.3"
 __author__ = "Dolphy"
 __description__ = "Глобальный снегопад на всех экранах"
 __icon__ = "rounded:ac_unit"
@@ -82,7 +82,7 @@ size();sync();
 SETTINGS = [
     {"type": "header", "title": "Новогодний плагин"},
     {"type": "switch", "key": "snow", "title": "Снегопад", "subtitle": "Снег на всех экранах, касания не перехватывает", "default": True},
-    {"type": "slider", "key": "snow_mult", "title": "Количество снежинок (× базовое 45)", "subtitle": "От 1× (самый редкий снег) до 1250×", "min": 1, "max": 1250, "default": 1250, "steps": 1249},
+    {"type": "slider", "key": "snow_count", "title": "Количество снежинок", "subtitle": "От 1 до 200", "min": 1, "max": 200, "default": 95, "steps": 199},
     {"type": "switch", "key": "eco", "title": "Экономный режим", "subtitle": "30 кадров/с и меньше снежинок", "default": False},
 ]
 
@@ -419,7 +419,7 @@ class NewYearWinter(BasePlugin):
             return
         cfg = {
             "snow": bool(self.get_setting("snow", True)),
-            "count": 45 * max(1, int(self.get_setting("snow_mult", 1250))),  # база 45 × множитель
+            "count": max(1, min(200, int(self.get_setting("snow_count", 95)))),  # прямое количество снежинок
             "tree": False,
             "ts": int(self.get_setting("tree_size", 100)),
             "tx": int(self.get_setting("tree_x", 0)),
