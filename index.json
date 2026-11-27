@@ -1,6 +1,6 @@
 {
   "format": "dolphy-plugins-v1",
-  "count": 42,
+  "count": 43,
   "plugins": [
     {
       "id": 16,
@@ -197,6 +197,20 @@
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/dolphy_snake/dolphy_snake.dolphyplugin",
       "post_url": "https://t.me/c/3966541757/48791",
       "updated_at": "2026-11-26 08:04:01"
+    },
+    {
+      "id": 43,
+      "name": "Dolphy Türkçe",
+      "version": "1.2.1",
+      "author": "dotch1r",
+      "description": {
+        "ru": "Плагин, переводящий приложение Dolphy на турецкий язык.",
+        "en": "A plugin that translates the Dolphy app into Turkish."
+      },
+      "file": "plugins/dolphy_t_rk_e/dolphy_t_rk_e.dolphyplugin",
+      "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/dolphy_t_rk_e/dolphy_t_rk_e.dolphyplugin",
+      "post_url": "https://t.me/c/3966541757/48887",
+      "updated_at": "2026-11-27 05:36:39"
     },
     {
       "id": 25,
