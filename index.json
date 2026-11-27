@@ -565,7 +565,7 @@
     {
       "id": 40,
       "name": "Новогодний плагин",
-      "version": "1.0.7",
+      "version": "1.1.3",
       "author": "@Da_koroche",
       "description": {
         "ru": "Что?.. СНЕГ?! Да, теперь даже Dolphy готовится к Новому году!\n\n❄️ Новогодний плагин с анимированным снегопадом на фоне всего приложения.\n\n🎄 Погрузитесь в зимнюю атмосферу прямо во время использования Dolphy!\n\nА Dolphy... похоже, зима уже здесь!",
@@ -573,8 +573,8 @@
       },
       "file": "plugins/novogodniy_plagin/novogodniy_plagin.dolphyplugin",
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/novogodniy_plagin/novogodniy_plagin.dolphyplugin",
-      "post_url": "https://t.me/c/3966541757/48776",
-      "updated_at": "2026-11-26 05:21:11"
+      "post_url": "https://t.me/c/3966541757/49140",
+      "updated_at": "2026-11-27 13:49:48"
     },
     {
       "id": 26,
