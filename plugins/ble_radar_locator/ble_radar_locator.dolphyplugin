@@ -1,254 +1,909 @@
 __id__ = "ble_radar_locator"
 __name__ = "BLE Radar Locator"
-__version__ = "1.5.3"
+__version__ = "3.0.4"
 __author__ = "Security Researcher"
-__description__ = "Радар BLE-устройств с компасом и плавным отображением"
+__description__ = "BLE-радар: RSSI + GPS-замеры + гироскоп, оценка положения цели на карте"
 __icon__ = "rounded:radar"
-__permissions__ = ["ble_spam", "files"]
+__permissions__ = ["bluetooth", "files"]
 
 import json
 import math
 import time
 import threading
 
+SECTORS = 24
+SECTOR_DEG = 15.0
+PAGES = ["radar", "map", "list", "logs"]
+ENVS = [("open", "Открыто", 2.0), ("room", "Помещение", 2.6), ("walls", "Стены", 3.3)]
+RANGES = [10, 30, 60]
+SORTS = [("rssi", "Сигнал"), ("recent", "Свежие"), ("name", "Имя"), ("seen", "Частота")]
+MIN_RSSIS = [-100, -90, -80, -70]
+
+# ───────── геометрия, фильтры и оценка положения по GPS-замерам ─────────
+
+M_LAT = 110574.0
+
+
+def ll_to_xy(lat, lon, lat0, lon0):
+    return ((lon - lon0) * 111320.0 * math.cos(math.radians(lat0)), (lat - lat0) * M_LAT)
+
+
+def xy_to_ll(x, y, lat0, lon0):
+    return (lat0 + y / M_LAT, lon0 + x / (111320.0 * max(0.2, math.cos(math.radians(lat0)))))
+
+
+def _solve3(a, b):
+    """Решение 3x3 методом Гаусса. None, если матрица вырождена."""
+    m = [list(a[0]) + [b[0]], list(a[1]) + [b[1]], list(a[2]) + [b[2]]]
+    for c in range(3):
+        p = max(range(c, 3), key=lambda r: abs(m[r][c]))
+        if abs(m[p][c]) < 1e-12:
+            return None
+        m[c], m[p] = m[p], m[c]
+        for r in range(3):
+            if r != c:
+                f = m[r][c] / m[c][c]
+                for k in range(c, 4):
+                    m[r][k] -= f * m[c][k]
+    return [m[i][3] / m[i][i] for i in range(3)]
+
+
+def _hub(e):
+    e = abs(e)
+    return e * e * 0.5 if e <= 6.0 else 6.0 * (e - 3.0)
+
+
+def _cost(pts, x, y, a, n):
+    t = 0.0
+    for px, py, r, w in pts:
+        s = (x - px) ** 2 + (y - py) ** 2 + 1.0
+        t += w * _hub(r - (a - 5.0 * n * math.log10(s)))
+    return t
+
+
+def _lm(pts, x, y, a, n, fit_a, iters=40):
+    k = 10.0 * n / math.log(10.0)
+    lam = 0.5
+    cur = _cost(pts, x, y, a, n)
+    for _ in range(iters):
+        h = [[0.0] * 3 for _ in range(3)]
+        g = [0.0] * 3
+        for px, py, r, w in pts:
+            dx, dy = x - px, y - py
+            s = dx * dx + dy * dy + 1.0
+            e = r - (a - 5.0 * n * math.log10(s))
+            ww = w * (1.0 if abs(e) <= 6.0 else 6.0 / abs(e))
+            j = (k * dx / s, k * dy / s, -1.0 if fit_a else 0.0)
+            for i in range(3):
+                g[i] += ww * j[i] * e
+                for q in range(3):
+                    h[i][q] += ww * j[i] * j[q]
+        if not fit_a:
+            h[2][2], g[2] = 1.0, 0.0
+        hl = [[h[i][q] + (lam * (h[i][i] + 1e-6) if i == q else 0.0) for q in range(3)] for i in range(3)]
+        d = _solve3(hl, [-v for v in g])
+        if d is None:
+            break
+        nx, ny_, na = x + d[0], y + d[1], min(-35.0, max(-85.0, a + d[2]))
+        c2 = _cost(pts, nx, ny_, na, n)
+        if c2 < cur:
+            x, y, a, cur = nx, ny_, na, c2
+            lam = max(1e-4, lam * 0.4)
+            if abs(d[0]) + abs(d[1]) < 0.02:
+                break
+        else:
+            lam *= 4.0
+            if lam > 1e6:
+                break
+    return x, y, a, cur
+
+
+def fit_position(pts, a0, n):
+    """pts: [(x, y, rssi, вес)] в метрах. Модель RSSI = A - 10 n log10(d).
+    Возвращает dict(x, y, a, rms, radius, npts, spread, ok) или None."""
+    if len(pts) < 5:
+        return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    spread = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+    fit_a = len(pts) >= 12 and spread >= 10.0
+    top = sorted(pts, key=lambda p: -p[2])[: max(3, len(pts) // 4)]
+    sw = sum(p[3] for p in top) or 1.0
+    cands = [(sum(p[0] * p[3] for p in top) / sw, sum(p[1] * p[3] for p in top) / sw)]
+    cands += [(p[0], p[1]) for p in sorted(pts, key=lambda p: -p[2])[:5]]
+    cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+    for dx, dy in ((20, 0), (-20, 0), (0, 20), (0, -20), (35, 35), (-35, 35), (35, -35), (-35, -35)):
+        cands.append((cx + dx, cy + dy))
+    cands.sort(key=lambda c: _cost(pts, c[0], c[1], a0, n))
+    best = None
+    for c in cands[:5]:
+        r = _lm(pts, c[0], c[1], a0, n, fit_a)
+        if best is None or r[3] < best[3]:
+            best = r
+    x, y, a, _ = best
+    k = 10.0 * n / math.log(10.0)
+    h = [[0.0] * 3 for _ in range(3)]
+    sq = sw2 = 0.0
+    for px, py, r, w in pts:
+        dx, dy = x - px, y - py
+        s = dx * dx + dy * dy + 1.0
+        e = r - (a - 5.0 * n * math.log10(s))
+        sq += w * e * e
+        sw2 += w
+        j = (k * dx / s, k * dy / s, -1.0 if fit_a else 0.0)
+        for i in range(3):
+            for q in range(3):
+                h[i][q] += w * j[i] * j[q]
+    rms = math.sqrt(sq / max(sw2, 1e-9))
+    sig = max(rms, 4.0)
+    det = h[0][0] * h[1][1] - h[0][1] * h[1][0]
+    if det < 1e-9:
+        radius = 99.0
+    else:
+        cxx, cyy, cxy = h[1][1] / det * sig * sig, h[0][0] / det * sig * sig, -h[0][1] / det * sig * sig
+        lam = (cxx + cyy) / 2.0 + math.sqrt(((cxx - cyy) / 2.0) ** 2 + cxy * cxy)
+        radius = min(99.0, max(2.0, 2.0 * math.sqrt(max(lam, 0.0))))
+    ok = len(pts) >= 6 and spread >= 5.0 and radius <= 25.0
+    return {"x": x, "y": y, "a": a, "rms": rms, "radius": radius, "npts": len(pts),
+            "spread": spread, "ok": ok}
+
+
+def kalman_rssi(dev, z):
+    """Скаляр Калмана с отсевом выбросов: >14 дБ от оценки принимается только после двух подряд."""
+    if "kx" not in dev:
+        dev["kx"], dev["kp"], dev["kout"] = float(z), 12.0, 0
+        return float(z)
+    dev["kp"] += 0.6
+    if abs(z - dev["kx"]) > 14.0 and dev["kout"] < 2:
+        dev["kout"] += 1
+        return dev["kx"]
+    dev["kout"] = 0
+    kg = dev["kp"] / (dev["kp"] + 12.0)
+    dev["kx"] += kg * (z - dev["kx"])
+    dev["kp"] *= (1.0 - kg)
+    return dev["kx"]
+
+
+
+
+RADAR_HTML_HEAD = (
+    '<!doctype html><html><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">'
+    '<style>*{box-sizing:border-box;margin:0;padding:0}'
+    'html,body{width:100%;height:100%;overflow:hidden;background:#05070d;border-radius:24px}'
+    'canvas{display:block;width:100%;height:100%;border-radius:24px}</style></head>'
+    '<body><canvas id="c"></canvas><script>'
+)
+RADAR_HTML_TAIL = '</script></body></html>'
+
+RADAR_JS = r"""(function(){
+'use strict';
+var D = __DATA__;
+var EPOCH = __EPOCH__, ANIM = __ANIM__, SPEED = 1.5;
+var T0 = Date.now();
+var cv = document.getElementById('c');
+var ctx = cv.getContext('2d');
+var W = 360, H = 440, CX = 180, CY = 224, R = 136, DPR = 1;
+var DIRS = ['С','СВ','В','ЮВ','Ю','ЮЗ','З','СЗ'];
+var TAU = Math.PI * 2;
+var HIT = [];
+window.__hit = function(x, y){
+  var best = null, bd = 1e9, i;
+  for (i = 0; i < HIT.length; i++) {
+    var dx = HIT[i].x - x, dy = HIT[i].y - y, dd = Math.sqrt(dx * dx + dy * dy);
+    if (dd < bd) { bd = dd; best = HIT[i]; }
+  }
+  return (best && bd <= 30) ? best.a : null;
+};
+
+window.__setRange = function(v){ D.range = v; };
+function clamp(v, a, b){ return v < a ? a : (v > b ? b : v); }
+function ease(t){ t = clamp(t, 0, 1); return 1 - Math.pow(1 - t, 3); }
+function rad(d){ return d * Math.PI / 180; }
+function rgba(c, a){ return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+function colFor(r){
+  if (r >= -55) return [94, 255, 176];
+  if (r >= -67) return [76, 215, 255];
+  if (r >= -80) return [140, 150, 255];
+  if (r >= -92) return [214, 120, 255];
+  return [255, 111, 174];
+}
+function ratio(d){ return Math.min(1, Math.sqrt(Math.max(d, 0) / D.range)); }
+function fmtD(d){
+  if (d < 1) return Math.round(d * 100) + ' см';
+  if (d < 10) return d.toFixed(1) + ' м';
+  return Math.round(d) + ' м';
+}
+function polar(deg, r){ var a = rad(deg); return [CX + Math.sin(a) * r, CY - Math.cos(a) * r]; }
+function rrect(x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function pill(txt, x, y, fs, tint){
+  ctx.font = fs + 'px sans-serif';
+  var w = ctx.measureText(txt).width + 18, hh = fs + 10;
+  rrect(x - w / 2, y - hh / 2, w, hh, hh / 2);
+  ctx.fillStyle = 'rgba(12,22,44,0.62)'; ctx.fill();
+  ctx.lineWidth = 1; ctx.strokeStyle = tint || 'rgba(170,215,255,0.24)'; ctx.stroke();
+  ctx.fillStyle = 'rgba(228,241,255,0.95)';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(txt, x, y + 0.5);
+}
+function resize(){
+  DPR = window.devicePixelRatio || 1;
+  W = window.innerWidth || 360; H = window.innerHeight || 440;
+  if (W < 10 || H < 10) { W = 360; H = 440; }
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  CX = W / 2; CY = H / 2 + 2;
+  R = Math.max(60, Math.min(W * 0.5 - 44, H * 0.5 - 58));
+}
+function heading(){
+  if (!D.compass) return 0;
+  var t = ease((Date.now() - T0) / ANIM);
+  var d = D.h1 - D.h0;
+  if (d > 180) d -= 360; else if (d < -180) d += 360;
+  return (D.h0 + d * t + 360) % 360;
+}
+
+function drawBase(){
+  ctx.clearRect(0, 0, W, H);
+  var bg = ctx.createRadialGradient(CX, CY, R * 0.1, CX, CY, R * 1.9);
+  bg.addColorStop(0, '#0e1c38'); bg.addColorStop(0.55, '#081022'); bg.addColorStop(1, '#04060d');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  var g = ctx.createRadialGradient(CX - R * 0.3, CY - R * 0.4, R * 0.1, CX, CY, R);
+  g.addColorStop(0, 'rgba(140,200,255,0.17)'); g.addColorStop(1, 'rgba(60,110,200,0.04)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(CX, CY, R, 0, TAU); ctx.fill();
+  ctx.lineWidth = 1.2; ctx.strokeStyle = 'rgba(170,215,255,0.30)'; ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,0.30)'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.arc(CX, CY, R - 3, Math.PI * 1.12, Math.PI * 1.48); ctx.stroke();
+  ctx.lineCap = 'butt';
+}
+function drawRings(){
+  var ks = [0.25, 0.5, 0.75, 1], i, p;
+  ctx.lineWidth = 1;
+  for (i = 0; i < 3; i++) {
+    ctx.strokeStyle = 'rgba(150,205,255,0.14)';
+    ctx.beginPath(); ctx.arc(CX, CY, R * ks[i], 0, TAU); ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(150,205,255,0.07)';
+  for (i = 0; i < 4; i++) {
+    p = polar(i * 45, R);
+    ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(2 * CX - p[0], 2 * CY - p[1]); ctx.stroke();
+  }
+  ctx.font = '10px sans-serif'; ctx.fillStyle = 'rgba(180,220,255,0.58)';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  for (i = 0; i < 4; i++) {
+    p = polar(45, R * ks[i]);
+    ctx.fillText(fmtD(D.range * ks[i] * ks[i]), p[0] + 3, p[1] - 2);
+  }
+}
+function drawCompass(h){
+  var RO = R + 9, a, i, p1, p2, ang, lg;
+  ctx.lineWidth = 1;
+  for (a = 0; a < 360; a += 10) {
+    ang = D.compass ? a - h : a; lg = (a % 30 === 0);
+    p1 = polar(ang, RO); p2 = polar(ang, RO + (lg ? 9 : 5));
+    ctx.strokeStyle = lg ? 'rgba(190,225,255,0.55)' : 'rgba(190,225,255,0.22)';
+    ctx.beginPath(); ctx.moveTo(p1[0], p1[1]); ctx.lineTo(p2[0], p2[1]); ctx.stroke();
+  }
+  if (!D.compass) return;
+  var L = [['N', 0], ['E', 90], ['S', 180], ['W', 270]];
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (i = 0; i < 4; i++) {
+    var p = polar(L[i][1] - h, RO + 23);
+    ctx.font = 'bold 13px sans-serif';
+    if (i === 0) { ctx.fillStyle = '#ff7a9c'; ctx.shadowColor = 'rgba(255,90,140,0.9)'; ctx.shadowBlur = 8; }
+    else { ctx.fillStyle = 'rgba(205,232,255,0.82)'; }
+    ctx.fillText(L[i][0], p[0], p[1]);
+    ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)';
+  }
+}
+function drawFov(){
+  var g = ctx.createRadialGradient(CX, CY, 0, CX, CY, R);
+  g.addColorStop(0, 'rgba(120,220,255,0.20)'); g.addColorStop(1, 'rgba(120,220,255,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(CX, CY);
+  ctx.arc(CX, CY, R, rad(-108), rad(-72)); ctx.closePath(); ctx.fill();
+}
+function drawPetals(h){
+  if (!D.sect) return;
+  for (var i = 0; i < D.sect.length; i++) {
+    var v = D.sect[i]; if (v === null) continue;
+    var n = clamp((v + 100) / 55, 0.06, 1), c = colFor(v);
+    var a0 = (i * 15 - h) - 90, a1 = a0 + 15;
+    var r0 = R * 0.5, r1 = R * (0.5 + 0.46 * n);
+    ctx.fillStyle = rgba(c, 0.30);
+    ctx.beginPath();
+    ctx.arc(CX, CY, r1, rad(a0 + 1), rad(a1 - 1));
+    ctx.arc(CX, CY, r0, rad(a1 - 1), rad(a0 + 1), true);
+    ctx.closePath(); ctx.fill();
+  }
+}
+function drawSweep(){
+  var s = ((Date.now() - EPOCH) / 1000 * SPEED) % TAU;
+  var ca = s - Math.PI / 2, k;
+  ctx.save(); ctx.beginPath(); ctx.arc(CX, CY, R, 0, TAU); ctx.clip();
+  if (ctx.createConicGradient) {
+    var g = ctx.createConicGradient(ca, CX, CY);
+    g.addColorStop(0, 'rgba(110,210,255,0)'); g.addColorStop(0.8, 'rgba(110,210,255,0)');
+    g.addColorStop(1, 'rgba(110,210,255,0.34)');
+    ctx.fillStyle = g; ctx.fillRect(CX - R, CY - R, R * 2, R * 2);
+  } else {
+    for (k = 0; k < 18; k++) {
+      ctx.fillStyle = 'rgba(110,210,255,' + (0.30 * (1 - k / 18)) + ')';
+      ctx.beginPath(); ctx.moveTo(CX, CY);
+      ctx.arc(CX, CY, R, ca - (k + 1) * 0.05, ca - k * 0.05); ctx.closePath(); ctx.fill();
+    }
+  }
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(175,238,255,0.9)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(CX, CY); ctx.lineTo(CX + Math.cos(ca) * R, CY + Math.sin(ca) * R); ctx.stroke();
+  return s;
+}
+function drawTargetArrow(h){
+  for (var i = 0; i < D.dev.length; i++) {
+    var v = D.dev[i];
+    if (!v.t || v.b === null) continue;
+    var a = v.b - h, p0 = polar(a, 16), p1 = polar(a, R * 0.93);
+    var pl = polar(a - 5, R * 0.80), pr = polar(a + 5, R * 0.80);
+    var g = ctx.createLinearGradient(p0[0], p0[1], p1[0], p1[1]);
+    g.addColorStop(0, 'rgba(255,211,107,0.05)'); g.addColorStop(1, 'rgba(255,211,107,0.95)');
+    ctx.strokeStyle = g; ctx.lineWidth = 2.2;
+    ctx.beginPath(); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,211,107,0.95)';
+    ctx.beginPath(); ctx.moveTo(p1[0], p1[1]); ctx.lineTo(pl[0], pl[1]); ctx.lineTo(pr[0], pr[1]); ctx.closePath(); ctx.fill();
+  }
+}
+function drawDevices(h, s, e){
+  var labels = [], i;
+  HIT = [];
+  for (i = 0; i < D.dev.length; i++) {
+    var v = D.dev[i], known = (v.b !== null);
+    var a = known ? (v.b - h) : v.pa;
+    var d = (v.d0 === null) ? v.d : v.d0 + (v.d - v.d0) * e;
+    var al = (v.d0 === null) ? e : 1; if (v.st) al *= 0.35;
+    var p = polar(a, ratio(d) * R), c = colFor(v.r);
+    HIT.push({a: v.a, x: p[0], y: p[1]});
+    var sa = ((s - rad(a)) % TAU + TAU) % TAU;
+    var ping = Math.exp(-sa * 1.25);
+    var gr = 9 + 13 * ping + (v.t ? 6 : 0);
+    var g = ctx.createRadialGradient(p[0], p[1], 0, p[0], p[1], gr * 2.2);
+    g.addColorStop(0, rgba(c, (0.55 + 0.4 * ping) * al)); g.addColorStop(1, rgba(c, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p[0], p[1], gr * 2.2, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(p[0], p[1], 4.2, 0, TAU);
+    if (known) { ctx.fillStyle = rgba(c, al); ctx.fill(); }
+    else { ctx.lineWidth = 1.6; ctx.strokeStyle = rgba(c, 0.95 * al); ctx.stroke(); }
+    if (v.t) {
+      var t = (((Date.now() - EPOCH) / 1000) % 1.4) / 1.4;
+      ctx.beginPath(); ctx.arc(p[0], p[1], 8 + 16 * t, 0, TAU);
+      ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(255,211,107,' + (0.9 * (1 - t) * al) + ')'; ctx.stroke();
+    }
+    if (D.sel && v.a === D.sel) {
+      ctx.beginPath(); ctx.arc(p[0], p[1], 13, 0, TAU);
+      ctx.lineWidth = 2.2; ctx.strokeStyle = 'rgba(120,230,255,0.95)'; ctx.stroke();
+    }
+    if (v.L) labels.push([p, v, d]);
+  }
+  ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  for (i = 0; i < labels.length; i++) {
+    var q = labels[i][0], dv = labels[i][1];
+    var txt = dv.n + '  ' + fmtD(labels[i][2]);
+    ctx.font = '10px sans-serif';
+    var w = ctx.measureText(txt).width + 14;
+    var x = q[0] + 10, y = q[1] - 14;
+    if (x + w > W - 4) x = q[0] - 10 - w;
+    y = clamp(y, 10, H - 10);
+    rrect(x, y - 9, w, 18, 9);
+    ctx.fillStyle = 'rgba(10,18,36,0.66)'; ctx.fill();
+    ctx.lineWidth = 1; ctx.strokeStyle = dv.t ? 'rgba(255,211,107,0.6)' : 'rgba(170,215,255,0.2)'; ctx.stroke();
+    ctx.fillStyle = 'rgba(232,244,255,0.95)'; ctx.fillText(txt, x + 7, y + 0.5);
+  }
+}
+function drawCenter(){
+  var t = (((Date.now() - EPOCH) / 1000) % 1.8) / 1.8;
+  ctx.beginPath(); ctx.arc(CX, CY, 7 + 16 * t, 0, TAU);
+  ctx.lineWidth = 1.2; ctx.strokeStyle = 'rgba(130,225,255,' + (0.5 * (1 - t)) + ')'; ctx.stroke();
+  var g = ctx.createRadialGradient(CX, CY, 0, CX, CY, 14);
+  g.addColorStop(0, 'rgba(160,235,255,0.9)'); g.addColorStop(1, 'rgba(160,235,255,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(CX, CY, 14, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#e8fbff'; ctx.beginPath(); ctx.arc(CX, CY, 3.6, 0, TAU); ctx.fill();
+}
+function drawChevron(){
+  var y = CY - R - 48;
+  ctx.fillStyle = 'rgba(210,235,255,0.88)';
+  ctx.shadowColor = 'rgba(120,200,255,0.8)'; ctx.shadowBlur = 8;
+  ctx.beginPath(); ctx.moveTo(CX, y + 9); ctx.lineTo(CX - 7, y - 3); ctx.lineTo(CX + 7, y - 3); ctx.closePath(); ctx.fill();
+  ctx.shadowBlur = 0; ctx.shadowColor = 'rgba(0,0,0,0)';
+}
+function pad3(n){ n = Math.round(n) % 360; return (n < 10 ? '00' : (n < 100 ? '0' : '')) + n; }
+function drawHud(h){
+  var txt = D.compass ? (DIRS[Math.floor(((h + 22.5) % 360) / 45)] + '  ' + pad3(h) + '°') : 'компас выкл';
+  pill(txt, CX, H - 16, 12);
+  pill('до ' + (Math.round(D.range * 10) / 10) + ' м', 38, 16, 11);
+  if (D.dev.length === 0) {
+    pill(D.scan ? 'Ищу устройства…' : 'Нажми «Старт»', CX, CY + R * 0.42, 13, 'rgba(120,220,255,0.35)');
+  }
+}
+function drawCover(h){
+  if (!D.compass || !D.cov) return;
+  var i, n = 0;
+  ctx.lineWidth = 3; ctx.lineCap = 'butt';
+  for (i = 0; i < D.cov.length; i++) {
+    var a0 = rad(i * 15 - h) - Math.PI / 2, a1 = a0 + rad(15);
+    ctx.beginPath(); ctx.arc(CX, CY, R + 24, a0 + 0.03, a1 - 0.03);
+    if (D.cov[i]) { n++; ctx.strokeStyle = 'rgba(110,240,200,0.9)'; }
+    else ctx.strokeStyle = 'rgba(150,190,255,0.16)';
+    ctx.stroke();
+  }
+  pill((n >= 22 ? '✓ ' : '↻ ') + Math.round(n * 100 / D.cov.length) + '%', W - 44, 16, 11, n >= 22 ? 'rgba(110,240,200,0.5)' : null);
+}
+function frame(){
+  var e = ease((Date.now() - T0) / ANIM);
+  var h = heading();
+  drawBase(); drawRings(); drawFov(); drawPetals(h);
+  var s = drawSweep();
+  drawCover(h); drawCompass(h); drawTargetArrow(h); drawDevices(h, s, e); drawCenter(); drawChevron(); drawHud(h);
+  requestAnimationFrame(frame);
+}
+window.addEventListener('resize', resize);
+resize();
+frame();
+})();"""
+
+
+MAP_JS = r"""(function(){
+'use strict';
+var D = __DATA__;
+var cv = document.getElementById('c'), ctx = cv.getContext('2d');
+var W = 360, H = 440, DPR = 1, TAU = Math.PI * 2;
+var cache = {}, dirty = false;
+var HAS_F = ('filter' in ctx);
+function tx(lon, z){ return (lon + 180) / 360 * Math.pow(2, z); }
+function ty(lat, z){ var r = lat * Math.PI / 180; return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * Math.pow(2, z); }
+function resize(){
+  DPR = window.devicePixelRatio || 1;
+  W = window.innerWidth || 360; H = window.innerHeight || 440;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+function tile(z, x, y){
+  var n = Math.pow(2, z); x = ((x % n) + n) % n;
+  if (y < 0 || y >= n) return null;
+  var k = z + '/' + x + '/' + y, t = cache[k];
+  if (t) return t.ok ? t.img : null;
+  var img = new Image();
+  t = cache[k] = {img: img, ok: false};
+  img.onload = function(){ t.ok = true; dirty = true; };
+  img.onerror = function(){ t.ok = false; };
+  img.src = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/' + z + '/' + y + '/' + x;
+  return null;
+}
+var S = {zf: null, cla: null, clo: null, follow: true, st: 0};
+try { var sv = JSON.parse(localStorage.getItem('blemap') || '{}'); if (sv.zf) S.zf = sv.zf; if (sv.st) S.st = sv.st; if (sv.follow === false) { S.follow = false; S.cla = sv.cla; S.clo = sv.clo; } } catch (e) {}
+function save(){ try { localStorage.setItem('blemap', JSON.stringify({zf: S.zf, st: S.st, follow: S.follow, cla: S.cla, clo: S.clo})); } catch (e) {} }
+var FILTERS = [
+  'grayscale(1) brightness(0.54) contrast(6) brightness(0.55)',
+  'grayscale(1) invert(1) brightness(0.9) contrast(1.3)',
+  'grayscale(1) brightness(0.8) contrast(1.1)'
+];
+function wx(lon, z){ return (lon + 180) / 360 * 256 * Math.pow(2, z); }
+function wy(lat, z){ var r = lat * Math.PI / 180; return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * 256 * Math.pow(2, z); }
+function ilon(x, z){ return x / (256 * Math.pow(2, z)) * 360 - 180; }
+function ilat(y, z){ var n = Math.PI - 2 * Math.PI * y / (256 * Math.pow(2, z)); return Math.atan(Math.sinh(n)) * 180 / Math.PI; }
+var BTN = [];
+function autoZ(){
+  var pts = [], i;
+  if (D.me) pts.push(D.me);
+  for (i = 0; i < D.dv.length; i++) pts.push([D.dv[i][0], D.dv[i][1]]);
+  for (i = 0; i < D.s.length; i++) pts.push([D.s[i][0], D.s[i][1]]);
+  var c0 = D.me || (pts.length ? pts[0] : [55.75, 37.62]), mla = 0, mlo = 0, maxR = 0;
+  for (i = 0; i < pts.length; i++) { mla = Math.max(mla, Math.abs(pts[i][0] - c0[0])); mlo = Math.max(mlo, Math.abs(pts[i][1] - c0[1])); }
+  for (i = 0; i < D.rg.length; i++) maxR = Math.max(maxR, D.rg[i][0]);
+  var span = Math.max(mla * 110574 * 2, mlo * 111320 * Math.cos(c0[0] * Math.PI / 180) * 2, maxR * 2, 40) * 1.4;
+  var mpp = 156543.03 * Math.cos(c0[0] * Math.PI / 180), z = 19, px = Math.min(W, H) * 0.9;
+  while (z > 3 && span / (mpp / Math.pow(2, z)) > px) z--;
+  return z;
+}
+function center(){
+  if (S.follow || S.cla === null) {
+    if (D.me) return [D.me[0], D.me[1]];
+    if (D.est) return [D.est[0], D.est[1]];
+    if (D.dv.length) return [D.dv[0][0], D.dv[0][1]];
+    return S.cla === null ? [55.75, 37.62] : [S.cla, S.clo];
+  }
+  return [S.cla, S.clo];
+}
+var Z = 18, CC = [55.75, 37.62], MPP = 1;
+function proj(lat, lon){ return [W / 2 + wx(lon, Z) - wx(CC[1], Z), H / 2 + wy(lat, Z) - wy(CC[0], Z)]; }
+function mpx(m){ return m / (MPP / Math.pow(2, Z)); }
+function label(txt, x, y, strong){
+  ctx.font = '600 10px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  var w = ctx.measureText(txt).width + 12;
+  ctx.fillStyle = strong ? 'rgba(255,255,255,0.94)' : 'rgba(0,0,0,0.72)';
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y - 8, w, 16, 8); else ctx.rect(x, y - 8, w, 16);
+  ctx.fill();
+  ctx.fillStyle = strong ? '#000' : 'rgba(255,255,255,0.92)'; ctx.fillText(txt, x + 6, y + 0.5);
+}
+function draw(){
+  dirty = false;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.globalAlpha = 1; ctx.setLineDash([]);
+  ctx.fillStyle = '#0b0b0d'; ctx.fillRect(0, 0, W, H);
+  if (S.zf === null) S.zf = autoZ();
+  Z = Math.max(3, Math.min(21, S.zf));
+  CC = center();
+  MPP = 156543.03 * Math.cos(CC[0] * Math.PI / 180);
+  var zi = Math.max(3, Math.min(19, Math.round(Z))), sc = Math.pow(2, Z - zi), ts = 256 * sc;
+  var cx = wx(CC[1], zi) / 256, cy = wy(CC[0], zi) / 256;
+  var x0 = Math.floor(cx - W / 2 / ts), x1 = Math.floor(cx + W / 2 / ts), y0 = Math.floor(cy - H / 2 / ts), y1 = Math.floor(cy + H / 2 / ts);
+  var x, y;
+  for (x = x0; x <= x1; x++) for (y = y0; y <= y1; y++) {
+    var px = W / 2 + (x - cx) * ts, py = H / 2 + (y - cy) * ts;
+    var im = tile(zi, x, y);
+    if (!im) continue;
+    if (HAS_F) { ctx.filter = FILTERS[S.st]; ctx.drawImage(im, px, py, ts + 0.5, ts + 0.5); ctx.filter = 'none'; }
+    else ctx.drawImage(im, px, py, ts + 0.5, ts + 0.5);
+  }
+  // лёгкое затемнение, чтобы маркеры читались
+  ctx.fillStyle = 'rgba(0,0,0,0.06)'; ctx.fillRect(0, 0, W, H);
+  var p, k;
+  // кольца дальности устройств без оценки: направление неизвестно, но расстояние по RSSI есть
+  if (D.me) {
+    p = proj(D.me[0], D.me[1]);
+    ctx.lineWidth = 1; ctx.setLineDash([3, 5]);
+    for (k = 0; k < D.rg.length; k++) {
+      var rr0 = mpx(D.rg[k][0]);
+      ctx.strokeStyle = 'rgba(255,255,255,' + (0.50 - k * 0.07) + ')';
+      ctx.beginPath(); ctx.arc(p[0], p[1], rr0, 0, TAU); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    for (k = 0; k < D.rg.length; k++) {
+      var rr1 = mpx(D.rg[k][0]), an = (-0.9 + k * 0.55);
+      label(D.rg[k][1] + ' · ' + D.rg[k][0] + ' м', p[0] + Math.cos(an) * rr1 - 4, p[1] + Math.sin(an) * rr1, false);
+    }
+  }
+  if (D.track.length > 1) {
+    ctx.beginPath(); ctx.lineWidth = 1.6; ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineJoin = 'round';
+    for (k = 0; k < D.track.length; k++) { p = proj(D.track[k][0], D.track[k][1]); if (k) ctx.lineTo(p[0], p[1]); else ctx.moveTo(p[0], p[1]); }
+    ctx.stroke();
+  }
+  for (k = 0; k < D.s.length; k++) {
+    p = proj(D.s[k][0], D.s[k][1]);
+    var a = Math.max(0.18, Math.min(1, (D.s[k][2] + 100) / 50));
+    ctx.beginPath(); ctx.arc(p[0], p[1], 2 + 2.5 * a, 0, TAU);
+    ctx.fillStyle = 'rgba(255,255,255,' + a + ')'; ctx.fill();
+  }
+  // найденные устройства (оценка по замерам)
+  for (k = 0; k < D.dv.length; k++) {
+    p = proj(D.dv[k][0], D.dv[k][1]);
+    var r2 = Math.max(7, mpx(D.dv[k][2])), t = D.dv[k][4];
+    ctx.fillStyle = 'rgba(255,255,255,' + (t ? 0.14 : 0.07) + ')'; ctx.beginPath(); ctx.arc(p[0], p[1], r2, 0, TAU); ctx.fill();
+    ctx.lineWidth = 1.2; ctx.strokeStyle = 'rgba(255,255,255,' + (t ? 0.9 : 0.5) + ')'; ctx.setLineDash([4, 4]); ctx.stroke(); ctx.setLineDash([]);
+    var s = t ? 8 : 5.5;
+    ctx.beginPath(); ctx.moveTo(p[0], p[1] - s); ctx.lineTo(p[0] + s, p[1]); ctx.lineTo(p[0], p[1] + s); ctx.lineTo(p[0] - s, p[1]); ctx.closePath();
+    ctx.fillStyle = t ? '#fff' : 'rgba(255,255,255,0.8)'; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = '#000'; ctx.stroke();
+    label(D.dv[k][3], p[0] + s + 4, p[1], !!t);
+    if (t && D.me) {
+      var q = proj(D.me[0], D.me[1]);
+      ctx.beginPath(); ctx.moveTo(q[0], q[1]); ctx.lineTo(p[0], p[1]);
+      ctx.lineWidth = 1.2; ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.setLineDash([2, 5]); ctx.stroke(); ctx.setLineDash([]);
+    }
+  }
+  if (D.me) {
+    p = proj(D.me[0], D.me[1]);
+    var ar = Math.max(6, mpx(D.me[2]));
+    ctx.fillStyle = 'rgba(255,255,255,0.09)'; ctx.beginPath(); ctx.arc(p[0], p[1], ar, 0, TAU); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1; ctx.stroke();
+    if (D.hd !== null) {
+      var an2 = (D.hd - 90) * Math.PI / 180, L = 50;
+      var g2 = ctx.createRadialGradient(p[0], p[1], 0, p[0], p[1], L);
+      g2.addColorStop(0, 'rgba(255,255,255,0.55)'); g2.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = g2; ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.arc(p[0], p[1], L, an2 - 0.42, an2 + 0.42); ctx.closePath(); ctx.fill();
+    }
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(p[0], p[1], 6.5, 0, TAU); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = '#000'; ctx.stroke();
+  }
+  ctx.font = '10px sans-serif'; ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = 'rgba(255,255,255,0.42)'; ctx.textAlign = 'right';
+  ctx.fillText('© Esri, OpenStreetMap', W - 6, H - 6);
+  var m = 10;
+  while (mpx(m) < 50) m *= (String(m).charAt(0) === '2' ? 2.5 : 2);
+  var bar = mpx(m); ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(10, H - 14); ctx.lineTo(10 + bar, H - 14); ctx.moveTo(10, H - 18); ctx.lineTo(10, H - 10); ctx.moveTo(10 + bar, H - 18); ctx.lineTo(10 + bar, H - 10); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.textAlign = 'left'; ctx.fillText(m + ' м', 14, H - 20);
+  if (!D.me) {
+    ctx.fillStyle = 'rgba(0,0,0,0.78)'; ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(16, H / 2 - 22, W - 32, 44, 22); else ctx.rect(16, H / 2 - 22, W - 32, 44); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = '13px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(D.msg, W / 2, H / 2 + 4);
+  } else if (D.note) {
+    ctx.fillStyle = 'rgba(0,0,0,0.62)'; ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(8, 8, W - 64, 26, 13); else ctx.rect(8, 8, W - 64, 26); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(D.note, W / 2 - 24, 21);
+  }
+  drawBtns();
+}
+
+function drawBtns(){
+  BTN = [];
+  var names = ['+', '\u2212', '\u25CE', 'Aa'], k, bx = W - 40, by = 40;
+  for (k = 0; k < 4; k++) {
+    var y = by + k * 42;
+    if (k === 2 && S.follow) { continue; }
+    BTN.push([bx, y, 32, 32, k]);
+    ctx.fillStyle = 'rgba(0,0,0,0.72)'; ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(bx, y, 32, 32, 10); else ctx.rect(bx, y, 32, 32);
+    ctx.fill(); ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.font = (k === 3 ? '600 12px' : '600 18px') + ' sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(names[k], bx + 16, y + 17);
+  }
+}
+var ptr = {}, last = null, moved = false, tapT = 0;
+function dist2(){ var k = Object.keys(ptr); if (k.length < 2) return 0; var a = ptr[k[0]], b = ptr[k[1]]; return Math.hypot(a.x - b.x, a.y - b.y); }
+function setZ(z){ S.zf = Math.max(3, Math.min(21, z)); save(); dirty = true; }
+function panBy(dx, dy){
+  var c = center(), z = Z;
+  var nx = wx(c[1], z) - dx, ny = wy(c[0], z) - dy;
+  S.cla = ilat(ny, z); S.clo = ilon(nx, z); S.follow = false; save(); dirty = true;
+}
+cv.style.touchAction = 'none';
+cv.addEventListener('pointerdown', function(e){
+  cv.setPointerCapture(e.pointerId);
+  ptr[e.pointerId] = {x: e.clientX, y: e.clientY};
+  moved = false;
+  if (Object.keys(ptr).length === 1) {
+    for (var k = 0; k < BTN.length; k++) {
+      var b = BTN[k];
+      if (e.clientX >= b[0] && e.clientX <= b[0] + b[2] && e.clientY >= b[1] && e.clientY <= b[1] + b[3]) {
+        if (b[4] === 0) setZ(Z + 1); else if (b[4] === 1) setZ(Z - 1);
+        else if (b[4] === 2) { S.follow = true; S.zf = null; save(); dirty = true; }
+        else { S.st = (S.st + 1) % FILTERS.length; save(); dirty = true; }
+        delete ptr[e.pointerId]; return;
+      }
+    }
+  }
+  last = dist2();
+});
+cv.addEventListener('pointermove', function(e){
+  var p = ptr[e.pointerId]; if (!p) return;
+  var n = Object.keys(ptr).length;
+  if (n === 1) {
+    var dx = e.clientX - p.x, dy = e.clientY - p.y;
+    if (Math.abs(dx) + Math.abs(dy) > 1) { moved = true; panBy(dx, dy); }
+    p.x = e.clientX; p.y = e.clientY;
+  } else if (n === 2) {
+    p.x = e.clientX; p.y = e.clientY;
+    var d = dist2();
+    if (last > 10 && d > 10) { setZ(Z + Math.log(d / last) / Math.LN2); }
+    last = d; moved = true;
+  }
+  e.preventDefault();
+});
+function up(e){
+  delete ptr[e.pointerId];
+  if (!moved && Object.keys(ptr).length === 0) {
+    var t = Date.now();
+    if (t - tapT < 320) setZ(Z + 1);
+    tapT = t;
+  }
+  last = dist2();
+}
+cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+cv.addEventListener('wheel', function(e){ setZ(Z - e.deltaY * 0.002); e.preventDefault(); }, {passive: false});
+window.__upd = function(d){ D = d; dirty = true; };
+function loop(){ if (dirty) draw(); requestAnimationFrame(loop); }
+window.addEventListener('resize', function(){ resize(); dirty = true; });
+resize(); draw(); loop();
+})();"""
+
+
 
 class BleRadarLocator(BasePlugin):
-    MAX_DEVICES = 60
-    MAX_LOGS = 500
-    LOG_UI_LINES = 50
-    LOG_MSG_LIMIT = 400
+    MAX_DEVICES = 80
+    MAX_RADAR = 40
+    MAX_LOGS = 400
+    LOG_UI_LINES = 60
     PRUNE_AFTER_SEC = 30
-    WEBVIEW_HEIGHT = 420
-
-    REFRESH_RADAR_MS = 200
-    REFRESH_OTHER_MS = 500
-
+    STALE_AFTER_SEC = 6
+    WEBVIEW_HEIGHT = 440
+    REF_RSSI_1M = -59          # RSSI на 1 м при передатчике 0 dBm
     RSSI_ALPHA = 0.35
-    TX_POWER = -59
-    N_FACTOR = 2.0
-
     HEADING_LPF = 0.35
-    HEADING_MIN_DELTA = 1.5
-    COMPASS_MAX_ATTEMPTS = 3
-
+    HEADING_REFRESH_DEG = 3.0
     FILE_LOG = "ble_radar_logs.txt"
     FILE_CSV = "ble_radar_devices.csv"
     EXPORT_DIR = "/sdcard/Download"
 
-    SORT_RSSI = "rssi"
-    SORT_RECENT = "recent"
-    SORT_NAME = "name"
-    SORT_SEEN = "seen"
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
+    def __init__(self):
+        super().__init__()
         self._ready = False
-        self._init_error = ""
         self._scanning = False
         self._scan_id = "ble_radar_scan"
-
         self._devices = {}
-        self._devices_lock = threading.Lock()
-
+        self._lock = threading.Lock()
         self._logs = []
         self._log_lock = threading.RLock()
+        self._ble_cb = None
 
-        self._ble_callback = None
-
-        self._compass_sensor_id = None
-        self._compass_callback = None
+        self._compass_enabled = True
+        self._compass_id = None
+        self._compass_listener = None
         self._compass_attempts = 0
         self._compass_failed = False
-        self._heading_deg = 0.0
+        self._heading = 0.0
         self._heading_valid = False
-        self._heading_in_html = 0.0
-        self._compass_enabled = True
-        try:
-            v = self.get_setting("compass_enabled", True)
-            self._compass_enabled = bool(v)
-        except Exception:
-            self._compass_enabled = True
+        self._heading_refreshed = 0.0
 
         self._page = "radar"
-        self._sort_mode = self.SORT_RSSI
+        self._sort = "rssi"
         self._min_rssi = -100
+        self._env = "room"
+        self._range = 30
+        self._zoom = 30.0       # дальность радара (м), ползунок 5..60
+        self._cov = [0] * SECTORS   # сколько пакетов поймано при взгляде телефона в каждый сектор
+        self._hoff = 0.0        # смещение: градусы компаса, принятые за «вперёд»
+        self._pick = None       # адрес точки, выбранной касанием на радаре
+        self._tp_t = 0.0
+        self._tp_h = None
+        self._tp_view = None
+        self._tp_refs = []
+        self._target = None
 
-        self._batches_received = 0
-        self._unique_total = 0
-        self._last_scan_started = 0.0
-
-        self._last_ui_refresh = 0.0
+        self._batches = 0
+        self._unique = 0
+        self._last_refresh = 0.0
         self._ui_lock = threading.Lock()
-
-        # ── ФИКС v1.5.3: единая эпоха для свипа и heading ──
-        # Фиксируется один раз при загрузке плагина. Передаётся в HTML
-        # как константа. JS считает Date.now() - EPOCH_MS, что даёт
-        # непрерывную фазу даже при пересоздании WebView каждые 200 мс.
         self._epoch_ms = int(time.time() * 1000)
+        self._html_sig = None
+        self._html_cache = ""
+        self._sent = {"h": 0.0, "d": {}}
 
-    # ═══════════════ Жизненный цикл ═══════════════
+        self._gps_enabled = True
+        self._gyro_enabled = True
+        self._gps_listener = None
+        self._gps_mgr = None
+        self._gps_on = False
+        self._gps_err = ""
+        self._loc = None            # {"lat","lon","acc","t","spd"}
+        self._org = None            # (lat0, lon0): начало локальной системы в метрах
+        self._track = []            # [(x, y)] мой путь
+        self._decl = 0.0
+        self._decl_t = 0.0
+        self._gyro_id = None
+        self._gyro_listener = None
+        self._gyro_rate = 0.0
+        self._map_sig = None
+        self._map_t = 0.0
+        self._map_cache = ""
+
+    # ───────── жизненный цикл ─────────
 
     def on_plugin_load(self):
-        if self._init_error:
-            raise RuntimeError(self._init_error)
+        # настройки читаем здесь: в __init__ self.api ещё None
+        self._compass_enabled = bool(self._setting("compass_enabled", True))
         try:
-            self.add_module(
-                title="BLE Radar Locator",
-                description="Радар BLE-устройств с компасом",
-                icon="rounded:radar",
-                screen="main",
-                section="PLUGINS",
-            )
-        except Exception as e:
-            self._init_error = "add_module: " + str(e)[:200]
-            raise
+            self._hoff = float(self._setting("heading_offset", 0.0)) % 360.0
+        except Exception:
+            self._hoff = 0.0
+        env = str(self._setting("env", "room"))
+        if env in [e[0] for e in ENVS]:
+            self._env = env
+        rng = self._setting("range", 30)
+        try:
+            rng = int(rng)
+        except Exception:
+            rng = 30
+        self._range = rng if 5 <= rng <= 60 else 30
+        self._zoom = float(self._range)
+        self._gps_enabled = bool(self._setting("gps_enabled", True))
+        self._gyro_enabled = bool(self._setting("gyro_enabled", True))
+        self.add_module(
+            title="BLE Radar Locator",
+            description="Радар BLE-устройств и поиск по компасу",
+            icon="radar",
+            screen="main",
+            section="PLUGINS",
+        )
         self._ready = True
-        self._log("success", "BLE Radar Locator v1.5.3 загружен")
+        self._log("ok", "BLE Radar Locator v3.0.4 загружен")
+
+    def on_plugin_disable(self):
+        self._shutdown()
 
     def on_plugin_unload(self):
-        self._ready = False
-        try:
-            self._stop_scan_internal()
-        except Exception:
-            pass
-        try:
-            self._stop_compass()
-        except Exception:
-            pass
-        try:
-            self._ble_callback = None
-            self._compass_callback = None
-        except Exception:
-            pass
+        self._shutdown()
 
-    # ═══════════════ Логи ═══════════════
+    def _shutdown(self):
+        self._ready = False
+        self._stop_scan_internal()
+        self._stop_compass()
+        self._stop_gps()
+        self._stop_gyro()
+        self._ble_cb = None
+        self._tp_view = None
+        self._tp_refs = []
+
+    def _setting(self, key, default):
+        try:
+            return self.get_setting(key, default)
+        except Exception:
+            return default
+
+    # ───────── логи ─────────
 
     def _log(self, level, msg):
         try:
-            stamp = time.strftime("%H:%M:%S")
-            text = str(msg)[:self.LOG_MSG_LIMIT] if msg is not None else ""
             with self._log_lock:
-                self._logs.append((level, stamp, text))
+                self._logs.append((level, time.strftime("%H:%M:%S"), str(msg)[:300]))
                 if len(self._logs) > self.MAX_LOGS:
-                    del self._logs[:len(self._logs) - self.MAX_LOGS]
+                    del self._logs[: len(self._logs) - self.MAX_LOGS]
         except Exception:
             pass
 
+    def _format_logs(self):
+        with self._log_lock:
+            items = list(self._logs)
+        if not items:
+            return "(логи пусты)"
+        return "\n".join("[{}] {}: {}".format(t, l.upper(), m) for l, t, m in items)
+
     def _clear_logs(self):
-        try:
-            with self._log_lock:
-                self._logs = []
-            self._log("info", "Логи очищены")
-        except Exception:
-            pass
+        with self._log_lock:
+            self._logs = []
+        self._log("info", "Логи очищены")
 
     def _copy_logs(self):
         try:
-            text = self._format_logs(last=self.MAX_LOGS)
-            android = self.api.getAndroid()
-            ok = android.clipboardSet(text)
-            if ok:
-                self.toast("Логи скопированы в буфер")
-                self._log("success", "Логи скопированы в буфер")
-            else:
-                self.toast("Не удалось скопировать")
+            ok = self.api.getAndroid().clipboardSet(self._format_logs())
+            self.toast("Логи скопированы" if ok else "Не удалось скопировать")
         except Exception as e:
-            self._log("error", "copy_logs: " + str(e)[:150])
-            try:
-                self.toast("Ошибка копирования")
-            except Exception:
-                pass
-
-    def _export_logs(self):
-        try:
-            text = self._format_logs(last=self.MAX_LOGS)
-            ok, path = self._write_file(self.FILE_LOG, text)
-            if ok:
-                self._log("success", "Логи сохранены: " + path)
-                self.toast("Сохранено: " + path)
-            else:
-                self._log("error", "Не удалось записать логи")
-                self.toast("Ошибка экспорта логов")
-        except Exception as e:
-            self._log("error", "export_logs: " + str(e)[:150])
-            try:
-                self.toast("Ошибка: " + str(e)[:60])
-            except Exception:
-                pass
-
-    def _export_csv(self):
-        try:
-            devices = self._sorted_devices()
-            if not devices:
-                self.toast("Список пуст")
-                return
-            now = time.time()
-            lines = ["address,name,rssi_smooth,rssi_last,seen,last_seen_ago_s"]
-            for d in devices:
-                name = (d.get("name") or "").replace(",", " ").replace("\n", " ")
-                lines.append("{},{},{:.1f},{},{},{}".format(
-                    d.get("address", ""),
-                    name,
-                    float(d.get("rssi_smooth", d.get("rssi", -100))),
-                    int(d.get("rssi", -100)),
-                    int(d.get("seen", 0)),
-                    int(now - d.get("last_seen", now)),
-                ))
-            ok, path = self._write_file(self.FILE_CSV, "\n".join(lines))
-            if ok:
-                self._log("success", "CSV сохранён: " + path)
-                self.toast("CSV: " + path)
-            else:
-                self.toast("Ошибка записи CSV")
-        except Exception as e:
-            self._log("error", "export_csv: " + str(e)[:150])
-            try:
-                self.toast("Ошибка CSV: " + str(e)[:60])
-            except Exception:
-                pass
+            self._log("err", "copy: " + str(e))
 
     def _write_file(self, filename, text):
-        primary = self.EXPORT_DIR.rstrip("/") + "/" + filename
+        path = self.EXPORT_DIR.rstrip("/") + "/" + filename
         try:
-            with open(primary, "w", encoding="utf-8") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
-            return True, primary
-        except Exception:
-            pass
+            return path
+        except Exception as e:
+            self._log("warn", "Download недоступен: " + str(e)[:100])
         try:
             android = self.api.getAndroid()
-            sandbox = ""
-            try:
-                sandbox = str(android.pluginFilesDir() or "")
-            except Exception:
-                sandbox = ""
-            path = (sandbox.rstrip("/") + "/" + filename) if sandbox else filename
-            ok = False
-            try:
-                ok = bool(android.filesWrite(path, text))
-            except Exception:
-                ok = False
-            if ok:
-                return True, path
-        except Exception:
-            pass
-        return False, primary
+            if android.filesWrite(filename, text):
+                return str(android.pluginFilesDir()) + "/" + filename
+        except Exception as e:
+            self._log("err", "filesWrite: " + str(e)[:100])
+        return None
 
-    def _format_logs(self, last=100):
-        try:
-            with self._log_lock:
-                items = list(self._logs[-last:])
-        except Exception:
-            items = []
-        if not items:
-            return "(логи пусты)"
-        out = []
-        for lvl, stamp, msg in items:
-            out.append("[{}] {}: {}".format(stamp, str(lvl).upper(), msg))
-        return "\n".join(out)
+    def _export_logs(self):
+        path = self._write_file(self.FILE_LOG, self._format_logs())
+        self.toast("Сохранено: " + path if path else "Ошибка экспорта")
 
-    # ═══════════════ UI-хелперы ═══════════════
+    def _export_csv(self):
+        devices = self._sorted_devices()
+        if not devices:
+            self.toast("Список пуст")
+            return
+        now = time.time()
+        lines = ["address,name,rssi_smooth,rssi_last,distance_m,bearing_deg,seen,last_seen_ago_s"]
+        for d in devices:
+            name = (d.get("name") or "").replace(",", " ").replace("\n", " ")
+            brg, _ = self._bearing(d)
+            lines.append("{},{},{:.1f},{},{:.2f},{},{},{}".format(
+                d["address"], name, d["rssi_smooth"], d["rssi"], self._distance(d),
+                "" if brg is None else int(round(brg)), d["seen"], int(now - d["last_seen"])))
+        path = self._write_file(self.FILE_CSV, "\n".join(lines))
+        self.toast("CSV: " + path if path else "Ошибка записи CSV")
+
+    # ───────── обновление UI ─────────
 
     def _refresh(self, force=False):
         if not self._ready:
@@ -256,1027 +911,1319 @@ class BleRadarLocator(BasePlugin):
         try:
             now = time.time()
             with self._ui_lock:
-                if not force:
-                    throttle = (self.REFRESH_RADAR_MS / 1000.0
-                                if self._page == "radar"
-                                else self.REFRESH_OTHER_MS / 1000.0)
-                    if (now - self._last_ui_refresh) < throttle:
-                        return
-                self._last_ui_refresh = now
+                gap = 0.45 if self._page == "radar" else (1.0 if self._page == "map" else 0.8)
+                if not force and now - self._last_refresh < gap:
+                    return
+                self._last_refresh = now
+            if self._page == "map" and not force and self._push_map():
+                return
             self.refresh()
         except Exception:
             pass
 
-    def _bind(self, cb, *args):
-        def handler(*_a, **_kw):
+    def _cb(self, fn, *args):
+        def handler(*_a, **_k):
             if not self._ready:
                 return None
-            result = None
             try:
-                result = cb(*args)
+                return fn(*args)
             except Exception as e:
-                try:
-                    self._log("error", "callback: " + str(e)[:200])
-                    self.toast("Ошибка: " + str(e)[:80])
-                except Exception:
-                    pass
+                self._log("err", "callback: " + str(e)[:200])
             finally:
-                self._refresh(force=True)
-            return result
+                self._refresh(True)
         return handler
 
-    def _bind_evt(self, cb):
-        def handler(*a, **kw):
+    def _cbv(self, fn):
+        def handler(value=None, *_a, **_k):
             if not self._ready:
                 return None
-            result = None
             try:
-                result = cb(*a, **kw)
+                return fn(value)
             except Exception as e:
-                try:
-                    self._log("error", "event: " + str(e)[:200])
-                except Exception:
-                    pass
+                self._log("err", "callback: " + str(e)[:200])
             finally:
-                self._refresh(force=True)
-            return result
+                self._refresh(True)
         return handler
 
-    def _go(self, page):
-        self._page = page
+    # ───────── действия ─────────
 
-    def _set_sort(self, mode):
-        self._sort_mode = mode
+    def _set_page(self, idx):
+        try:
+            self._page = PAGES[int(idx)]
+        except Exception:
+            self._page = "radar"
+
+    def _set_sort(self, value):
+        self._sort = value
 
     def _set_min_rssi(self, value):
-        try:
-            self._min_rssi = int(value)
-        except Exception:
-            pass
+        self._min_rssi = int(value)
 
-    def _set_compass_enabled(self, checked):
+    def _set_env(self, value):
+        value = str(value)
+        if value in [e[0] for e in ENVS]:
+            self._env = value
+            self.set_setting("env", value)
+
+    # ───────── выбор точки касанием ─────────
+
+    def _pick_dialog(self, ui):
+        if not self._pick:
+            return None
+        dev = None
+        for d in self._snapshot():
+            if d["address"] == self._pick:
+                dev = d
+                break
+        if dev is not None:
+            info = "{}\n{}\n~{} · {:.0f} dBm".format(dev.get("name") or "Без имени", dev["address"],
+                                                    self._dist_text(self._distance(dev)), dev["rssi_smooth"])
+        else:
+            info = str(self._pick)
+        return ui.alert_dialog(True, "Это та точка?",
+                               info + "\n\nВыбранная точка подсвечена на радаре голубым кольцом. Скопировать MAC-адрес?",
+                               confirm_text="Копировать", dismiss_text="Отмена",
+                               on_confirm=self._cb(self._copy_pick), on_dismiss=self._cb(self._clear_pick))
+
+    def _copy_pick(self):
+        addr = self._pick
+        self._pick = None
+        if not addr:
+            return
         try:
-            new_val = bool(checked)
-            if new_val == self._compass_enabled:
+            ok = self.api.getAndroid().clipboardSet(str(addr))
+            self.toast("MAC скопирован" if ok else "Не удалось скопировать")
+        except Exception as e:
+            self._log("err", "copy: " + str(e)[:120])
+
+    def _clear_pick(self):
+        self._pick = None
+
+    def _ensure_tap(self):
+        now = time.time()
+        if now - self._tp_t < 1.0:
+            return
+        self._tp_t = now
+        try:
+            from java import jclass, dynamic_proxy
+            if self._tp_h is None:
+                self._tp_h = jclass("android.os.Handler")(jclass("android.os.Looper").getMainLooper())
+            plugin = self
+
+            class _R(dynamic_proxy(jclass("java.lang.Runnable"))):
+                def run(me):
+                    try:
+                        plugin._attach_tap()
+                    except Exception as e:
+                        plugin._log("err", "tap: " + str(e)[:120])
+
+            self._tp_h.postDelayed(_R(), 300)
+        except Exception as e:
+            self._log("err", "tap: " + str(e)[:120])
+
+    def _attach_tap(self):
+        act = self.api.getActivity()
+        if act is None:
+            return
+        v = self._tp_view
+        try:
+            if v is not None and v.isAttachedToWindow() and v.isShown():
                 return
-            self._compass_enabled = new_val
-            self.set_setting("compass_enabled", self._compass_enabled)
-            if self._compass_enabled:
-                self._heading_in_html = float(self._heading_deg or 0.0)
-            else:
-                self._heading_in_html = 0.0
-            self._log("info", "Компас " + ("включён" if self._compass_enabled
-                                           else "выключен"))
         except Exception:
             pass
+        self._tp_view = None
+        from java import jclass, cast
+        VG = jclass("android.view.ViewGroup")
+        WV = jclass("android.webkit.WebView")
+        Cls = jclass("java.lang.Class")
+        VGc = Cls.forName("android.view.ViewGroup")
+        WVc = Cls.forName("android.webkit.WebView")
+        stack = [act.getWindow().getDecorView()]
+        while stack:
+            x = stack.pop()
+            if WVc.isInstance(x):
+                if x.isShown():
+                    self._hook_tap(cast(WV, x))
+                    return
+                continue
+            if VGc.isInstance(x):
+                g = cast(VG, x)
+                for i in range(g.getChildCount()):
+                    stack.append(g.getChildAt(i))
 
-    # ═══════════════ Компас ═══════════════
+    def _hook_tap(self, wv):
+        from java import jclass, dynamic_proxy
+        plugin = self
+        dens = float(wv.getResources().getDisplayMetrics().density)
+        slop = float(jclass("android.view.ViewConfiguration").get(wv.getContext()).getScaledTouchSlop())
+        st = {"x": 0.0, "y": 0.0, "t": 0.0, "bad": True}
 
-    def _make_function1(self, py_fn):
-        try:
-            from java import jclass
-        except Exception as e:
-            self._log("warning", "java.jclass: " + str(e)[:120])
-            return None
-        try:
-            Function1 = jclass("kotlin.jvm.functions.Function1")
-        except Exception as e:
-            self._log("warning", "jclass Function1: " + str(e)[:120])
-            return None
-
-        unit_inst = None
-        try:
-            Unit = jclass("kotlin.Unit")
-            unit_inst = Unit.INSTANCE
-        except Exception:
-            unit_inst = None
-
-        class _F1(Function1):
-            def invoke(self, *args):
+        class _VC(dynamic_proxy(jclass("android.webkit.ValueCallback"))):
+            def onReceiveValue(me, value):
                 try:
-                    arg = args[0] if args else None
-                    py_fn(arg)
+                    plugin._on_hit(value)
+                except Exception as e:
+                    plugin._log("err", "hit: " + str(e)[:120])
+
+        class _T(dynamic_proxy(jclass("android.view.View$OnTouchListener"))):
+            def onTouch(me, v, ev):
+                try:
+                    act = int(ev.getActionMasked())
+                    if act == 0:
+                        st["x"], st["y"], st["t"], st["bad"] = float(ev.getX()), float(ev.getY()), time.time(), False
+                    elif act == 5:
+                        st["bad"] = True
+                    elif act == 2:
+                        if abs(float(ev.getX()) - st["x"]) > slop or abs(float(ev.getY()) - st["y"]) > slop:
+                            st["bad"] = True
+                    elif act == 3:
+                        st["bad"] = True
+                    elif act == 1 and not st["bad"] and time.time() - st["t"] < 0.4:
+                        cb = _VC()
+                        plugin._tp_refs = [cb]
+                        v.evaluateJavascript("window.__hit && window.__hit(%.1f, %.1f)" % (st["x"] / dens, st["y"] / dens), cb)
                 except Exception:
                     pass
-                if unit_inst is not None:
-                    return unit_inst
-                return None
+                return False
 
-        try:
-            return _F1()
-        except Exception as e:
-            self._log("warning", "_F1(): " + str(e)[:150])
-            return None
+        tch = _T()
+        wv.setOnTouchListener(tch)
+        self._tp_view = wv
+        self._tp_keep = tch
 
-    def _dispatch_rotation(self, data):
+    def _on_hit(self, value):
+        if value is None:
+            return
+        v = json.loads(str(value))
+        if isinstance(v, str) and v:
+            self._pick = v
+            self._refresh(True)
+
+    def _set_range(self, value):
         try:
-            self._on_rotation(data)
+            v = int(round(float(value)))
         except Exception:
-            pass
+            return
+        v = max(5, min(60, v))
+        self._range = v
+        self._zoom = float(v)
+        self.set_setting("range", v)
+
+    def _reset_cov(self):
+        self._cov = [0] * SECTORS
+        with self._lock:
+            for d in self._devices.values():
+                d["sect"] = [None] * SECTORS
+                d["samp"] = [[] for _ in range(SECTORS)]
+        self.toast("Оборот начат заново")
+
+    def _set_forward(self):
+        if not (self._compass_enabled and self._heading_valid):
+            self.toast("Включи компас и дождись показаний")
+            return
+        self._hoff = float(self._heading) % 360.0
+        self.set_setting("heading_offset", self._hoff)
+        with self._lock:  # старые сектора были в другой системе координат
+            for d in self._devices.values():
+                d["sect"] = [None] * SECTORS
+                d["samp"] = [[] for _ in range(SECTORS)]
+        self._cov = [0] * SECTORS
+        self._log("info", "«Вперёд» = {:.0f}° компаса".format(self._hoff))
+        self.toast("Текущее направление телефона принято за «вперёд»")
+
+    def _reset_forward(self):
+        self._hoff = 0.0
+        self.set_setting("heading_offset", 0.0)
+        with self._lock:
+            for d in self._devices.values():
+                d["sect"] = [None] * SECTORS
+                d["samp"] = [[] for _ in range(SECTORS)]
+        self._cov = [0] * SECTORS
+        self._log("info", "«Вперёд» сброшено: север сверху по компасу")
+
+    def _set_compass(self, checked):
+        self._compass_enabled = bool(checked)
+        self.set_setting("compass_enabled", self._compass_enabled)
+        if self._compass_enabled:
+            self._compass_failed = False
+            self._compass_attempts = 0
+            self._start_compass()
+        else:
+            self._stop_compass()
+            self._heading_valid = False
+        self._log("info", "Компас " + ("включён" if self._compass_enabled else "выключен"))
+
+    def _set_target(self, address):
+        self._target = address
+        self._page = "radar"
+        self._log("info", "Цель: " + str(address))
+
+    def _clear_target(self):
+        self._target = None
+
+    def _clear_devices(self):
+        with self._lock:
+            self._devices = {}
+            self._target = None
+        self._unique = 0
+        self._log("info", "Список очищен")
+
+    # ───────── компас ─────────
+
+    def _make_listener(self, fn):
+        """Kotlin ожидает (String) -> Unit. Пробуем dynamic_proxy, иначе отдаём callable."""
+        try:
+            from java import dynamic_proxy, jclass
+            Function1 = jclass("kotlin.jvm.functions.Function1")
+            try:
+                unit = jclass("kotlin.Unit").INSTANCE
+            except Exception:
+                unit = None
+
+            class _Listener(dynamic_proxy(Function1)):
+                def __init__(self, callback):
+                    super().__init__()
+                    self._callback = callback
+
+                def invoke(self, arg):
+                    try:
+                        self._callback(arg)
+                    except Exception:
+                        pass
+                    return unit
+
+            return _Listener(fn)
+        except Exception as e:
+            self._log("warn", "dynamic_proxy: " + str(e)[:100])
+            return fn
 
     def _start_compass(self):
-        if self._compass_sensor_id is not None:
+        if not self._compass_enabled or self._compass_id is not None or self._compass_failed:
             return
-        if self._compass_failed:
-            return
-        if self._compass_attempts >= self.COMPASS_MAX_ATTEMPTS:
+        if self._compass_attempts >= 3:
             self._compass_failed = True
-            self._log("warning", "Компас отключён после {} попыток".format(
-                self._compass_attempts))
-            return
-
-        api = getattr(self, "api", None)
-        if api is None:
+            self._log("warn", "Компас отключён после 3 попыток")
             return
         self._compass_attempts += 1
         try:
-            android = api.getAndroid()
-            if not hasattr(android, "sensorStart"):
-                self._log("warning", "sensorStart недоступен")
-                self._compass_failed = True
-                return
-
-            cb = self._make_function1(self._dispatch_rotation)
-            if cb is None:
-                self._log("warning", "Function1 не создан")
-                self._compass_failed = True
-                return
-            self._compass_callback = cb
-
-            sid = android.sensorStart(11, cb)
-            try:
-                sid_int = int(sid) if sid is not None else 0
-            except Exception:
-                sid_int = 0
-
-            if sid_int > 0:
-                self._compass_sensor_id = sid_int
-                self._log("success", "Компас запущен (id={})".format(sid_int))
+            android = self.api.getAndroid()
+            listener = self._make_listener(self._on_sensor)
+            sid = android.sensorStart(11, listener)   # TYPE_ROTATION_VECTOR, id — строка
+            if sid:
+                self._compass_id = str(sid)
+                self._compass_listener = listener
+                self._log("ok", "Компас запущен (" + self._compass_id + ")")
             else:
-                self._log("warning",
-                          "sensorStart(11) вернул: " + str(sid)[:60])
+                self._compass_failed = True
+                self._log("warn", "Нет датчика вектора вращения")
         except Exception as e:
-            self._log("warning", "Компас: " + str(e)[:200])
+            self._log("warn", "Компас: " + str(e)[:160])
 
     def _stop_compass(self):
+        sid = self._compass_id
+        self._compass_id = None
+        self._compass_listener = None
+        if sid is None:
+            return
         try:
-            if self._compass_sensor_id is not None:
-                api = getattr(self, "api", None)
-                if api is not None:
-                    api.getAndroid().sensorStop(self._compass_sensor_id)
-                    self._log("info", "Компас остановлен")
+            self.api.getAndroid().sensorStop(sid)
         except Exception:
             pass
-        self._compass_sensor_id = None
 
-    def _on_rotation(self, data):
+    @staticmethod
+    def _azimuth(x, y, z, w):
+        """Азимут из кватерниона. Лежит плашмя — верхний край, стоит — задняя камера."""
+        r01 = 2.0 * (x * y - w * z)
+        r11 = 1.0 - 2.0 * (x * x + z * z)
+        r02 = 2.0 * (x * z + w * y)
+        r12 = 2.0 * (y * z - w * x)
+        r22 = 1.0 - 2.0 * (x * x + y * y)
+        if abs(r22) >= 0.75:
+            az = math.atan2(r01, r11)
+        else:
+            az = math.atan2(-r02, -r12)
+        return math.degrees(az) % 360.0
+
+    def _on_sensor(self, payload):
         try:
-            x = y = z = 0.0
-            w = 1.0
-            if isinstance(data, dict):
-                if ("values" in data
-                        and isinstance(data["values"], (list, tuple))
-                        and len(data["values"]) >= 4):
-                    v = data["values"]
-                    x, y, z, w = (float(v[0]), float(v[1]),
-                                  float(v[2]), float(v[3]))
-                elif "x" in data and "w" in data:
-                    x = float(data.get("x", 0.0) or 0.0)
-                    y = float(data.get("y", 0.0) or 0.0)
-                    z = float(data.get("z", 0.0) or 0.0)
-                    w = float(data.get("w", 1.0) or 1.0)
-                else:
-                    return
-            elif isinstance(data, (list, tuple)) and len(data) >= 4:
-                x = float(data[0]); y = float(data[1])
-                z = float(data[2]); w = float(data[3])
-            else:
-                try:
-                    if data is not None and len(data) >= 4:
-                        x = float(data[0]); y = float(data[1])
-                        z = float(data[2]); w = float(data[3])
-                    else:
-                        return
-                except Exception:
-                    return
-
-            r10 = 2.0 * (x * y + w * z)
-            r11 = 1.0 - 2.0 * (x * x + z * z)
-            az = math.degrees(math.atan2(r10, r11))
+            data = json.loads(str(payload)) if not isinstance(payload, dict) else payload
+            vals = data.get("values") or []
+            if len(vals) < 3:
+                return
+            x, y, z = float(vals[0]), float(vals[1]), float(vals[2])
+            w = float(vals[3]) if len(vals) >= 4 else math.sqrt(max(0.0, 1.0 - x * x - y * y - z * z))
+            az = self._azimuth(x, y, z, w)
             if not math.isfinite(az):
                 return
-            if az < 0:
-                az += 360.0
-
             if not self._heading_valid:
-                self._heading_deg = az
+                self._heading = az
                 self._heading_valid = True
             else:
-                prev = self._heading_deg
-                diff = az - prev
-                if diff > 180:
-                    diff -= 360
-                elif diff < -180:
-                    diff += 360
-                self._heading_deg = (prev + self.HEADING_LPF * diff) % 360.0
-
+                diff = (az - self._heading + 540.0) % 360.0 - 180.0
+                # при быстром повороте (по гироскопу) сглаживание ослабляем: меньше лага
+                alpha = min(0.85, self.HEADING_LPF + 0.30 * self._gyro_rate) if self._gyro_id else self.HEADING_LPF
+                self._heading = (self._heading + alpha * diff) % 360.0
             if self._compass_enabled and self._page == "radar":
-                d = abs(self._heading_deg - self._heading_in_html)
-                if d > 180:
-                    d = 360 - d
-                if d >= self.HEADING_MIN_DELTA:
-                    self._refresh(force=False)
+                d = abs((self._heading - self._heading_refreshed + 540.0) % 360.0 - 180.0)
+                if d >= self.HEADING_REFRESH_DEG:
+                    self._refresh(False)
         except Exception:
             pass
 
-    # ═══════════════ RSSI-математика ═══════════════
+    # ───────── гироскоп ─────────
+
+    def _start_gyro(self):
+        if not self._gyro_enabled or self._gyro_id is not None:
+            return
+        try:
+            listener = self._make_listener(self._on_gyro)
+            sid = self.api.getAndroid().sensorStart(4, listener)     # TYPE_GYROSCOPE
+            if sid:
+                self._gyro_id = str(sid)
+                self._gyro_listener = listener
+                self._log("ok", "Гироскоп запущен")
+            else:
+                self._log("warn", "Нет гироскопа")
+        except Exception as e:
+            self._log("warn", "Гироскоп: " + str(e)[:120])
+
+    def _stop_gyro(self):
+        sid = self._gyro_id
+        self._gyro_id = None
+        self._gyro_listener = None
+        self._gyro_rate = 0.0
+        if sid is None:
+            return
+        try:
+            self.api.getAndroid().sensorStop(sid)
+        except Exception:
+            pass
+
+    def _on_gyro(self, payload):
+        try:
+            data = json.loads(str(payload)) if not isinstance(payload, dict) else payload
+            v = data.get("values") or []
+            if len(v) < 3:
+                return
+            r = math.sqrt(float(v[0]) ** 2 + float(v[1]) ** 2 + float(v[2]) ** 2)
+            self._gyro_rate = 0.7 * self._gyro_rate + 0.3 * r      # рад/с, сглаженно
+        except Exception:
+            pass
+
+    # ───────── GPS ─────────
+
+    def _start_gps(self):
+        if not self._gps_enabled or self._gps_on:
+            return
+        try:
+            from java import jclass, dynamic_proxy, jlong, jfloat
+            ctx = self.api.getContext()
+            mgr = ctx.getSystemService("location")
+            LL = jclass("android.location.LocationListener")
+            plugin = self
+
+            class _L(dynamic_proxy(LL)):
+                def onLocationChanged(me, loc):
+                    try:
+                        if hasattr(loc, "size"):
+                            loc = loc.get(loc.size() - 1)
+                        plugin._on_location(loc)
+                    except Exception:
+                        pass
+
+                def onProviderEnabled(me, p):
+                    pass
+
+                def onProviderDisabled(me, p):
+                    pass
+
+                def onStatusChanged(me, p, st, ex):
+                    pass
+
+            lis = _L()
+            looper = jclass("android.os.Looper").getMainLooper()
+            started = False
+            for prov in ("gps", "network"):
+                try:
+                    mgr.requestLocationUpdates(prov, jlong(500), jfloat(0.0), lis, looper)
+                    started = True
+                except Exception as e:
+                    self._gps_err = type(e).__name__ + ": " + str(e)[:80]
+                    self._log("warn", "GPS " + prov + ": " + self._gps_err)
+            if started:
+                self._gps_mgr, self._gps_listener, self._gps_on = mgr, lis, True
+                try:
+                    last = mgr.getLastKnownLocation("gps") or mgr.getLastKnownLocation("network")
+                    if last is not None:
+                        self._on_location(last)
+                except Exception:
+                    pass
+                self._log("ok", "GPS запущен")
+            else:
+                self.toast("GPS недоступен: выдай Dolphy доступ к геолокации")
+        except Exception as e:
+            self._gps_err = type(e).__name__ + ": " + str(e)[:100]
+            self._log("err", "GPS: " + self._gps_err)
+
+    def _stop_gps(self):
+        mgr, lis = self._gps_mgr, self._gps_listener
+        self._gps_on = False
+        self._gps_mgr = self._gps_listener = None
+        if mgr is None or lis is None:
+            return
+        try:
+            mgr.removeUpdates(lis)
+        except Exception:
+            pass
+
+    def _on_location(self, loc):
+        lat, lon = float(loc.getLatitude()), float(loc.getLongitude())
+        acc = float(loc.getAccuracy()) if loc.hasAccuracy() else 30.0
+        now = time.time()
+        old = self._loc
+        # более точный старый фикс не заменяем грубым сетевым за последние 4 с
+        if old is not None and now - old["t"] < 4.0 and acc > old["acc"] * 2.0 and acc > 25.0:
+            return
+        self._loc = {"lat": lat, "lon": lon, "acc": acc, "t": now,
+                     "spd": float(loc.getSpeed()) if loc.hasSpeed() else 0.0}
+        if self._org is None:
+            self._org = (lat, lon)
+        x, y = ll_to_xy(lat, lon, self._org[0], self._org[1])
+        if acc <= 25.0 and (not self._track or math.hypot(x - self._track[-1][0], y - self._track[-1][1]) >= 2.0):
+            self._track.append((x, y))
+            if len(self._track) > 400:
+                del self._track[0]
+        if self._page == "map":
+            self._refresh(False)
+        if now - self._decl_t > 300.0:
+            self._decl_t = now
+            try:
+                from java import jclass, jfloat, jlong
+                gf = jclass("android.hardware.GeomagneticField")(jfloat(lat), jfloat(lon), jfloat(float(loc.getAltitude())),
+                                                                 jlong(int(now * 1000)))
+                self._decl = float(gf.getDeclination())
+            except Exception:
+                pass
+
+    def _me_xy(self, max_age=6.0, max_acc=20.0):
+        loc = self._loc
+        if not (self._gps_enabled and loc is not None and self._org is not None):
+            return None
+        if time.time() - loc["t"] > max_age or loc["acc"] > max_acc:
+            return None
+        x, y = ll_to_xy(loc["lat"], loc["lon"], self._org[0], self._org[1])
+        return x, y, loc["acc"]
+
+    def _env_n(self):
+        for key, _label, val in ENVS:
+            if key == self._env:
+                return val
+        return 2.6
+
+    def _estimate(self, dev, ttl=3.0):
+        """Положение устройства по замерам RSSI вдоль моего пути (с кешем)."""
+        pts = dev.get("pts") or []
+        if len(pts) < 5:
+            return None
+        now = time.time()
+        c = dev.get("est_c")
+        if c and len(pts) - c[0] < 2 and now - c[1] < ttl:
+            return c[2]
+        tx = dev.get("tx_power")
+        a0 = max(-80.0, min(-35.0, float(self.REF_RSSI_1M + (tx if tx is not None else 0))))
+        try:
+            res = fit_position(list(pts), a0, self._env_n())
+        except Exception as e:
+            self._log("err", "estimate: " + str(e)[:120])
+            res = None
+        dev["est_c"] = (len(pts), now, res)
+        return res
+
+    def _est_rel(self, dev):
+        """Оценка цели относительно меня: (дистанция м, пеленг в системе компаса, оценка) или None."""
+        est = self._estimate(dev)
+        me = self._me_xy()
+        if est is None or not est["ok"] or me is None:
+            return None
+        dx, dy = est["x"] - me[0], est["y"] - me[1]
+        dist = math.hypot(dx, dy)
+        true_b = math.degrees(math.atan2(dx, dy)) % 360.0
+        frame_b = (true_b - self._decl - self._hoff) % 360.0
+        return dist, frame_b, est
+
+    def _heading_now(self):
+        if self._compass_enabled and self._heading_valid:
+            return (self._heading - self._hoff) % 360.0
+        return None
+
+    # ───────── RSSI → дистанция и пеленг ─────────
+
+    def _distance(self, dev):
+        n = 2.6
+        for key, _label, val in ENVS:
+            if key == self._env:
+                n = val
+        tx = dev.get("tx_power")
+        ref = self.REF_RSSI_1M + (tx if tx is not None else 0)
+        ref = max(-80.0, min(-35.0, float(ref)))
+        e = (ref - float(dev["rssi_smooth"])) / (10.0 * n)
+        return min(99.0, math.pow(10.0, max(-1.0, min(3.5, e))))
 
     @staticmethod
-    def _rssi_to_distance(rssi, tx_power=-59, n=2.0):
-        try:
-            rssi = float(rssi)
-            if rssi >= 0:
-                return 0.0
-            if rssi < -150:
-                rssi = -150
-            exponent = (tx_power - rssi) / (10.0 * n)
-            if exponent > 5:
-                exponent = 5
-            elif exponent < -5:
-                exponent = -5
-            d = math.pow(10, exponent)
-            if d > 50:
-                return 50.0
-            if d < 0:
-                return 0.0
-            return d
-        except (ValueError, OverflowError, TypeError):
-            return -1.0
-        except Exception:
-            return -1.0
+    def _dist_text(d):
+        if d < 1:
+            return "{:d} см".format(int(round(d * 100)))
+        if d < 10:
+            return "{:.1f} м".format(d)
+        if d < 60:
+            return "{:d} м".format(int(round(d)))
+        return ">60 м"
 
     @staticmethod
-    def _distance_text(d):
-        try:
-            if d < 0:
-                return "—"
-            if d < 1:
-                return "{:.1f} см".format(d * 100)
-            if d < 10:
-                return "{:.1f} м".format(d)
-            if d < 30:
-                return "{:.0f} м".format(d)
-            return ">30 м"
-        except Exception:
-            return "—"
+    def _bearing_peak(dev):
+        """Оценка направления по сектору с максимальным сигналом. (азимут, уверенность)."""
+        sect = dev.get("sect") or []
+        vals = [(i, v) for i, v in enumerate(sect) if v is not None]
+        if len(vals) < 4:
+            return None, 0.0
+        hi = max(v for _, v in vals)
+        spread = hi - min(v for _, v in vals)
+        if spread < 4.0:
+            return None, 0.0
+        sx = sy = 0.0
+        for i, v in vals:
+            wgt = math.pow(10.0, (v - hi) / 10.0) ** 2
+            a = math.radians(i * SECTOR_DEG + SECTOR_DEG / 2.0)
+            sx += wgt * math.sin(a)
+            sy += wgt * math.cos(a)
+        ang = math.degrees(math.atan2(sx, sy)) % 360.0
+        conf = min(1.0, spread / 15.0) * min(1.0, len(vals) / 12.0)
+        return ang, conf
+
+    @staticmethod
+    def _bearing(dev):
+        """Пеленг: подгонка косинусоиды v(t)=a+b*cos t+c*sin t по медианам секторов (МНК). (азимут, уверенность)."""
+        sect = dev.get("sect") or []
+        samp = dev.get("samp") or []
+        pts = []
+        for i, v in enumerate(sect):
+            if v is not None:
+                n = len(samp[i]) if i < len(samp) else 1
+                pts.append((math.radians(i * SECTOR_DEG + SECTOR_DEG / 2.0), float(v), float(min(max(n, 1), 8))))
+        if len(pts) < 8:
+            return BleRadarLocator._bearing_peak(dev)
+        vs = [p[1] for p in pts]
+        if max(vs) - min(vs) < 4.0:
+            return None, 0.0
+        # нормальные уравнения 3x3 с весами
+        m = [[0.0] * 4 for _ in range(3)]
+        for t, v, w in pts:
+            row = (1.0, math.cos(t), math.sin(t))
+            for r in range(3):
+                for c in range(3):
+                    m[r][c] += w * row[r] * row[c]
+                m[r][3] += w * row[r] * v
+        for col in range(3):
+            piv = max(range(col, 3), key=lambda r: abs(m[r][col]))
+            if abs(m[piv][col]) < 1e-9:
+                return BleRadarLocator._bearing_peak(dev)
+            m[col], m[piv] = m[piv], m[col]
+            for r in range(3):
+                if r != col:
+                    f = m[r][col] / m[col][col]
+                    for c in range(col, 4):
+                        m[r][c] -= f * m[col][c]
+        a, b, c = m[0][3] / m[0][0], m[1][3] / m[1][1], m[2][3] / m[2][2]
+        amp = math.hypot(b, c)
+        if amp < 1.5:
+            return None, 0.0
+        mean = sum(vs) / len(vs)
+        sst = sum((v - mean) ** 2 for v in vs)
+        sse = sum((v - (a + b * math.cos(t) + c * math.sin(t))) ** 2 for t, v, _w in pts)
+        r2 = 0.0 if sst <= 1e-9 else max(0.0, 1.0 - sse / sst)
+        ang = math.degrees(math.atan2(c, b)) % 360.0
+        conf = min(1.0, amp / 6.0) * min(1.0, len(pts) / 16.0) * math.sqrt(r2)
+        return ang, conf
+
+    @staticmethod
+    def _pseudo_angle(address):
+        h = 0
+        for ch in str(address):
+            h = ((h << 5) - h + ord(ch)) & 0xFFFFFFFF
+        return float(h % 360)
 
     @staticmethod
     def _level_color(rssi):
-        if rssi >= -65:
+        if rssi >= -67:
             return "success"
-        if rssi >= -80:
+        if rssi >= -82:
             return "warning"
         return "error"
 
     @staticmethod
-    def _device_world_angle(address):
-        try:
-            h = 0
-            for ch in str(address):
-                h = ((h << 5) - h + ord(ch)) & 0xFFFFFFFF
-            return float(h % 360)
-        except Exception:
-            return 0.0
+    def _dir_name(h):
+        return ["С", "СВ", "В", "ЮВ", "Ю", "ЮЗ", "З", "СЗ"][int(((h + 22.5) % 360.0) // 45.0)]
 
-    def _get_devices_snapshot(self):
-        try:
-            with self._devices_lock:
-                return list(self._devices.values())
-        except Exception:
-            return []
+    # ───────── списки устройств ─────────
+
+    def _snapshot(self):
+        with self._lock:
+            return list(self._devices.values())
 
     def _sorted_devices(self):
-        devices = self._get_devices_snapshot()
-        try:
-            min_r = int(self._min_rssi)
-        except Exception:
-            min_r = -100
-        devices = [d for d in devices
-                   if int(d.get("rssi_smooth", d.get("rssi", -100))) >= min_r]
+        devs = [d for d in self._snapshot() if d["rssi_smooth"] >= self._min_rssi]
+        if self._sort == "name":
+            devs.sort(key=lambda d: (d.get("name") or "~").lower())
+        elif self._sort == "recent":
+            devs.sort(key=lambda d: d["last_seen"], reverse=True)
+        elif self._sort == "seen":
+            devs.sort(key=lambda d: d["seen"], reverse=True)
+        else:
+            devs.sort(key=lambda d: d["rssi_smooth"], reverse=True)
+        return devs[: self.MAX_DEVICES]
 
-        mode = self._sort_mode
-        try:
-            if mode == self.SORT_NAME:
-                devices.sort(key=lambda x: (x.get("name") or "~").lower())
-            elif mode == self.SORT_RECENT:
-                devices.sort(key=lambda x: x.get("last_seen", 0), reverse=True)
-            elif mode == self.SORT_SEEN:
-                devices.sort(key=lambda x: x.get("seen", 0), reverse=True)
-            else:
-                devices.sort(
-                    key=lambda x: x.get("rssi_smooth", x.get("rssi", -100)),
-                    reverse=True)
-        except Exception:
-            pass
-        if len(devices) > self.MAX_DEVICES:
-            devices = devices[:self.MAX_DEVICES]
-        return devices
+    def _target_dev(self):
+        if not self._target:
+            return None
+        with self._lock:
+            return self._devices.get(self._target)
 
-    # ═══════════════ BLE-сканирование ═══════════════
+    # ───────── BLE-скан ─────────
 
     def _start_scan(self):
         if self._scanning:
-            try:
-                self.toast("Уже сканируется")
-            except Exception:
-                pass
             return
-        api = getattr(self, "api", None)
-        if api is None or not hasattr(api, "bleStartScan"):
-            self._log("error", "api.bleStartScan недоступен")
-            try:
-                self.toast("BLE API недоступен")
-            except Exception:
-                pass
-            return
-
         try:
-            self._log("info", "Останавливаю прошлый скан (если был)…")
             self._stop_scan_internal()
-
-            with self._devices_lock:
+            with self._lock:
                 self._devices = {}
-            self._batches_received = 0
-            self._unique_total = 0
-
-            self._scanning = True
-            self._last_scan_started = time.time()
-            self._log("info", "=== Запуск BLE-скана ===")
-            self._log("info", "scan_id=" + self._scan_id)
-
-            if self._ble_callback is None:
-                def _cb(payload):
-                    self._on_ble_batch(payload)
-                self._ble_callback = _cb
-
-            ok = api.bleStartScan(self._scan_id, self._ble_callback, 350, 128)
-            self._log("success" if ok else "error",
-                      "bleStartScan → " + str(ok))
-            if ok:
-                try:
-                    self.toast("Сканирование запущено")
-                except Exception:
-                    pass
-            else:
-                self._scanning = False
-                try:
-                    self.toast("Не удалось запустить скан")
-                except Exception:
-                    pass
+            self._batches = 0
+            self._unique = 0
+            if self._ble_cb is None:
+                self._ble_cb = lambda payload: self._on_batch(payload)
+            ok = self.api.bleStartScan(self._scan_id, self._ble_cb, 350, 128)
+            self._scanning = bool(ok)
+            self._log("ok" if ok else "err", "bleStartScan → " + str(ok))
+            if not ok:
+                self.toast("Не удалось запустить скан")
         except Exception as e:
             self._scanning = False
-            self._log("error", "start_scan: " + str(e)[:200])
-            try:
-                self.toast("Ошибка: " + str(e)[:80])
-            except Exception:
-                pass
+            self._log("err", "start_scan: " + str(e)[:200])
+            self.toast("Ошибка: " + str(e)[:80])
 
     def _stop_scan_internal(self):
         try:
-            api = getattr(self, "api", None)
-            if api is not None and hasattr(api, "bleStopScan"):
-                api.bleStopScan(self._scan_id)
+            self.api.bleStopScan(self._scan_id)
         except Exception:
             pass
         self._scanning = False
 
     def _stop_scan(self):
-        self._log("info", "=== Остановка скана ===")
-        try:
-            self._stop_scan_internal()
-            self._log("success", "bleStopScan выполнен")
-            try:
-                self.toast("Остановлено")
-            except Exception:
-                pass
-        except Exception as e:
-            self._log("error", "stop_scan: " + str(e)[:200])
+        self._stop_scan_internal()
+        self._log("info", "Скан остановлен")
 
-    def _clear_devices(self):
-        try:
-            with self._devices_lock:
-                self._devices = {}
-            self._unique_total = 0
-            self._log("info", "Список устройств очищен")
-        except Exception:
-            pass
+    def _toggle_scan(self):
+        if self._scanning:
+            self._stop_scan()
+        else:
+            self._start_scan()
 
-    def _on_ble_batch(self, payload_json):
+    def _on_batch(self, payload):
         try:
-            self._batches_received += 1
+            self._batches += 1
             now = time.time()
-
-            data = payload_json
+            data = payload
             if isinstance(data, bytes):
-                try:
-                    data = data.decode("utf-8", errors="replace")
-                except Exception:
-                    return
+                data = data.decode("utf-8", errors="replace")
             if isinstance(data, str):
-                try:
-                    data = json.loads(data)
-                except Exception:
-                    if self._batches_received % 20 == 1:
-                        self._log("warning", "batch: JSON не распарсен")
-                    return
-
-            devices_list = []
+                data = json.loads(data)
+            items = []
             if isinstance(data, list):
-                devices_list = data
+                items = data
             elif isinstance(data, dict):
                 for key in ("devices", "results", "items", "data"):
                     if isinstance(data.get(key), list):
-                        devices_list = data[key]
+                        items = data[key]
                         break
-                if not devices_list and ("address" in data or "mac" in data):
-                    devices_list = [data]
-
-            alpha = self.RSSI_ALPHA
-            new_count = 0
-            updated = 0
-
-            with self._devices_lock:
-                for dev in devices_list:
+                if not items and ("address" in data or "mac" in data):
+                    items = [data]
+            heading = self._heading_now()
+            sector = int(heading // SECTOR_DEG) % SECTORS if heading is not None else None
+            # при быстром повороте (гироскоп) RSSI «размазан» по направлениям: в сектора не пишем
+            if self._gyro_id and self._gyro_rate > 1.6:
+                sector = None
+            if sector is not None:
+                self._cov[sector] = min(self._cov[sector] + 1, 99)
+            me = self._me_xy()
+            new = 0
+            with self._lock:
+                for dev in items:
                     if not isinstance(dev, dict):
                         continue
-                    addr = (dev.get("address") or dev.get("mac")
-                            or dev.get("deviceAddress") or "")
+                    addr = dev.get("address") or dev.get("mac") or dev.get("deviceAddress") or ""
                     if not addr:
                         continue
                     try:
                         rssi = int(dev.get("rssi", -100))
                     except (ValueError, TypeError):
                         rssi = -100
-                    name = str(dev.get("name") or dev.get("deviceName")
-                               or dev.get("localName") or "")
+                    if rssi >= -10 or rssi <= -127:  # 0 / 127 = датчик не дал значения, иначе будет «0 см»
+                        continue
+                    name = str(dev.get("name") or dev.get("deviceName") or dev.get("localName") or "")
                     tx = dev.get("txPower")
                     try:
                         tx = int(tx) if tx is not None else None
                     except (ValueError, TypeError):
                         tx = None
-                    if tx is not None and (tx < -100 or tx > 20):
+                    if tx is not None and (tx < -40 or tx > 20):
                         tx = None
-
-                    existing = self._devices.get(addr)
-                    if existing is None:
-                        self._devices[addr] = {
-                            "address": addr,
-                            "name": name,
-                            "rssi": rssi,
-                            "rssi_smooth": float(rssi),
-                            "tx_power": tx,
-                            "seen": 1,
-                            "first_seen": now,
-                            "last_seen": now,
-                        }
-                        new_count += 1
-                        self._unique_total += 1
+                    cur = self._devices.get(addr)
+                    if cur is None:
+                        cur = {"address": addr, "name": name, "rssi": rssi, "rssi_smooth": float(rssi),
+                               "tx_power": tx, "seen": 0, "first_seen": now, "last_seen": now,
+                               "sect": [None] * SECTORS, "samp": [[] for _ in range(SECTORS)]}
+                        self._devices[addr] = cur
+                        new += 1
+                        self._unique += 1
                     else:
-                        existing["rssi"] = rssi
-                        existing["rssi_smooth"] = (
-                            (1.0 - alpha)
-                            * float(existing.get("rssi_smooth", rssi))
-                            + alpha * float(rssi))
-                        if name and not existing.get("name"):
-                            existing["name"] = name
+                        cur["rssi"] = rssi
+                        cur["rssi_smooth"] = kalman_rssi(cur, rssi)
+                        if name and not cur["name"]:
+                            cur["name"] = name
                         if tx is not None:
-                            existing["tx_power"] = tx
-                        existing["seen"] = int(existing.get("seen", 0)) + 1
-                        existing["last_seen"] = now
-                        updated += 1
-
+                            cur["tx_power"] = tx
+                    cur["seen"] += 1
+                    cur["last_seen"] = now
+                    if me is not None:
+                        buf = cur.setdefault("buf", [])
+                        buf.append(float(rssi))
+                        lp = cur.get("lp")
+                        moved = lp is None or math.hypot(me[0] - lp[0], me[1] - lp[1]) >= 1.5
+                        if len(buf) >= 3 and (moved or now - cur.get("lt", 0.0) > 5.0):
+                            sb = sorted(buf)
+                            med = sb[len(sb) // 2] if len(sb) % 2 else (sb[len(sb) // 2 - 1] + sb[len(sb) // 2]) / 2.0
+                            w = 1.0 / (1.0 + (me[2] / 5.0) ** 2)
+                            pts = cur.setdefault("pts", [])
+                            pts.append((me[0], me[1], med, w))
+                            if len(pts) > 300:
+                                del pts[0]
+                            cur["lp"], cur["lt"] = (me[0], me[1]), now
+                            cur["buf"] = []
+                        elif len(buf) > 40:
+                            del buf[0]
+                    if sector is not None:
+                        sm = cur.setdefault("samp", [[] for _ in range(SECTORS)])[sector]
+                        sm.append(float(rssi))
+                        if len(sm) > 10:
+                            del sm[0]
+                        ss = sorted(sm)
+                        cur["sect"][sector] = ss[len(ss) // 2] if len(ss) % 2 else (ss[len(ss) // 2 - 1] + ss[len(ss) // 2]) / 2.0
                 cutoff = now - self.PRUNE_AFTER_SEC
-                if self._devices:
-                    self._devices = {
-                        a: d for a, d in self._devices.items()
-                        if d.get("last_seen", 0) > cutoff
-                    }
-
-            if new_count > 0:
-                self._log("success", "+{} новых (batch #{}, всего {})".format(
-                    new_count, self._batches_received, self._unique_total))
-            elif updated > 0 and self._batches_received % 20 == 1:
-                self._log("info", "batch #{}: {} устройств".format(
-                    self._batches_received, updated))
-
-            self._refresh(force=False)
+                self._devices = {a: d for a, d in self._devices.items()
+                                 if d["last_seen"] > cutoff or a == self._target}
+            if new:
+                self._log("ok", "+{} новых (пакет {}, всего {})".format(new, self._batches, self._unique))
+            self._refresh(False)
         except Exception as e:
-            try:
-                self._log("error", "batch: " + str(e)[:200])
-            except Exception:
-                pass
+            self._log("err", "batch: " + str(e)[:200])
 
-    # ═══════════════ HTML-радар ═══════════════
+    # ───────── HTML радара ─────────
+
+    def _radar_payload(self):
+        heading = self._heading_now()
+        devs = sorted(self._snapshot(), key=lambda d: d["rssi_smooth"], reverse=True)[: self.MAX_RADAR]
+        tgt = self._target_dev()
+        if tgt is not None and all(d["address"] != tgt["address"] for d in devs):
+            devs.append(tgt)
+        now = time.time()
+        near = sorted(devs, key=self._distance)[:5]
+        near_addr = set(d["address"] for d in near)
+        out = []
+        for d in devs:
+            dist = self._distance(d)
+            dist = round(dist, 1) if dist < 4 else round(dist * 2) / 2.0
+            brg, _conf = self._bearing(d)
+            is_t = bool(tgt is not None and d["address"] == tgt["address"])
+            if is_t and heading is not None:
+                rel = self._est_rel(d)
+                if rel is not None:
+                    dist = round(rel[0], 1) if rel[0] < 4 else round(rel[0] * 2) / 2.0
+                    brg = rel[1]
+            out.append({
+                "n": (d.get("name") or d["address"])[:18],
+                "r": int(round(d["rssi_smooth"])),
+                "d": dist,
+                "b": None if brg is None else int(round(brg)),
+                "pa": int(self._pseudo_angle(d["address"])),
+                "t": is_t,
+                "st": (now - d["last_seen"]) > self.STALE_AFTER_SEC,
+                "L": is_t or d["address"] in near_addr,
+                "a": d["address"],
+            })
+        sect = None
+        if tgt is not None and heading is not None:
+            sect = [None if v is None else int(round(v)) for v in tgt["sect"]]
+        return {
+            "dev": out,
+            "range": round(self._zoom, 1),
+            "sel": self._pick or "",
+            "cov": [1 if c >= 2 else 0 for c in self._cov],
+            "compass": heading is not None,
+            "h1": int(round(heading)) if heading is not None else 0,
+            "sect": sect,
+            "scan": bool(self._scanning),
+        }
+
+    def _map_payload(self):
+        tgt = self._target_dev()
+        org = self._org
+        me = self._me_xy(max_age=15.0, max_acc=60.0)
+        data = {"me": None, "hd": None, "s": [], "track": [], "est": None, "dv": [], "rg": [], "note": "",
+                "msg": "Жду GPS… выйди на открытое место" if self._gps_enabled else "GPS выключен в настройках"}
+        if org is None:
+            return data
+        loc = self._loc
+        if me is not None and loc is not None:
+            data["me"] = [round(loc["lat"], 6), round(loc["lon"], 6), round(loc["acc"], 1)]
+        if self._heading_valid:
+            data["hd"] = int(round((self._heading + self._decl) % 360.0))
+        for x, y in self._track[-200:]:
+            la, lo = xy_to_ll(x, y, org[0], org[1])
+            data["track"].append([round(la, 6), round(lo, 6)])
+        if tgt is not None:
+            for x, y, r, _w in list(tgt.get("pts") or [])[-150:]:
+                la, lo = xy_to_ll(x, y, org[0], org[1])
+                data["s"].append([round(la, 6), round(lo, 6), int(round(r))])
+            est = self._estimate(tgt)
+            if est is not None and est["ok"]:
+                la, lo = xy_to_ll(est["x"], est["y"], org[0], org[1])
+                data["est"] = [round(la, 6), round(lo, 6), round(est["radius"], 1)]
+        # все устройства: с оценкой по замерам - маркер, без неё - кольцо дальности по RSSI
+        devs = sorted(self._snapshot(), key=lambda d: d["rssi_smooth"], reverse=True)[:30]
+        tgt_addr = tgt["address"] if tgt is not None else None
+        heavy = sorted([d for d in devs if len(d.get("pts") or []) >= 8], key=lambda d: -len(d["pts"]))[:4]
+        heavy_addr = set(d["address"] for d in heavy)
+        rings = []
+        for d in devs:
+            est = None
+            if d["address"] == tgt_addr or d["address"] in heavy_addr:
+                est = self._estimate(d, 3.0 if d["address"] == tgt_addr else 8.0)
+            name = (d.get("name") or d["address"][-8:])[:12]
+            if est is not None and est["ok"]:
+                la, lo = xy_to_ll(est["x"], est["y"], org[0], org[1])
+                data["dv"].append([round(la, 6), round(lo, 6), round(est["radius"], 1), name, 1 if d["address"] == tgt_addr else 0])
+            elif len(rings) < 4:
+                rings.append([int(round(self._distance(d))), name])
+        rings.sort(key=lambda r: r[0])
+        data["rg"] = rings
+        if not data["dv"]:
+            data["note"] = "Кольца — расстояние по сигналу. Выбери цель и обойди её: появится точка на карте" if rings else                 "Запусти сканирование на вкладке «Радар»"
+        return data
+
+    def _build_map_html(self):
+        text = json.dumps(self._map_payload(), ensure_ascii=False)
+        text = (text.replace("<", "\u003c").replace(">", "\u003e").replace("&", "\u0026"))
+        return RADAR_HTML_HEAD + MAP_JS.replace("__DATA__", text) + RADAR_HTML_TAIL
+
+    def _push_map(self):
+        # обновляем данные карты без перезагрузки страницы: масштаб и сдвиг пользователя сохраняются
+        v = self._tp_view
+        try:
+            ok = v is not None and v.isAttachedToWindow() and v.isShown()
+        except Exception:
+            ok = False
+        if not ok:
+            self._ensure_tap()
+            return False
+        text = json.dumps(self._map_payload(), ensure_ascii=False)
+        text = (text.replace(" ", "\u2028").replace(" ", "\u2029"))
+        js = "window.__upd && window.__upd(" + text + ")"
+        try:
+            from java import jclass, dynamic_proxy
+            if self._tp_h is None:
+                self._tp_h = jclass("android.os.Handler")(jclass("android.os.Looper").getMainLooper())
+
+            class _R(dynamic_proxy(jclass("java.lang.Runnable"))):
+                def run(me):
+                    try:
+                        v.evaluateJavascript(js, None)
+                    except Exception:
+                        pass
+
+            self._push_ref = _R()
+            self._tp_h.post(self._push_ref)
+            return True
+        except Exception as e:
+            self._log("err", "push map: " + str(e)[:100])
+            return False
+
+    def _open_maps(self):
+        tgt = self._target_dev()
+        est = self._estimate(tgt) if tgt is not None else None
+        if est is None or not est["ok"] or self._org is None:
+            self.toast("Оценки положения пока нет")
+            return
+        la, lo = xy_to_ll(est["x"], est["y"], self._org[0], self._org[1])
+        try:
+            from java import jclass
+            Intent = jclass("android.content.Intent")
+            Uri = jclass("android.net.Uri")
+            it = Intent(Intent.ACTION_VIEW, Uri.parse("geo:{:.6f},{:.6f}?q={:.6f},{:.6f}(BLE)".format(la, lo, la, lo)))
+            it.addFlags(0x10000000)
+            self.api.getActivity().startActivity(it)
+        except Exception as e:
+            self._log("err", "maps: " + str(e)[:120])
+            self.toast("Не удалось открыть карты")
+
+    def _copy_coords(self):
+        tgt = self._target_dev()
+        est = self._estimate(tgt) if tgt is not None else None
+        if est is None or not est["ok"] or self._org is None:
+            self.toast("Оценки положения пока нет")
+            return
+        la, lo = xy_to_ll(est["x"], est["y"], self._org[0], self._org[1])
+        try:
+            ok = self.api.getAndroid().clipboardSet("{:.6f}, {:.6f}".format(la, lo))
+            self.toast("Координаты скопированы" if ok else "Не удалось скопировать")
+        except Exception as e:
+            self._log("err", "copy: " + str(e)[:120])
+
+    def _reset_points(self):
+        with self._lock:
+            for d in self._devices.values():
+                d["pts"], d["buf"], d["lp"], d["est_c"] = [], [], None, None
+        self._track = []
+        self._map_cache = ""
+        self.toast("Точки замеров сброшены")
+
+    def _set_gps(self, checked):
+        self._gps_enabled = bool(checked)
+        self.set_setting("gps_enabled", self._gps_enabled)
+        if self._gps_enabled:
+            self._start_gps()
+        else:
+            self._stop_gps()
+
+    def _set_gyro(self, checked):
+        self._gyro_enabled = bool(checked)
+        self.set_setting("gyro_enabled", self._gyro_enabled)
+        if self._gyro_enabled:
+            self._start_gyro()
+        else:
+            self._stop_gyro()
+
+    def _gps_line(self):
+        if not self._gps_enabled:
+            return "GPS выключен"
+        loc = self._loc
+        if loc is None:
+            return "GPS: ожидание фикса…" + ((" (" + self._gps_err + ")") if self._gps_err else "")
+        age = time.time() - loc["t"]
+        return "GPS · точность ±{:.0f} м · {} · замеров: {}".format(
+            loc["acc"], "обновлён {:.0f} с назад".format(age) if age > 3 else "онлайн",
+            sum(len(d.get("pts") or []) for d in self._target_list()))
+
+    def _target_list(self):
+        t = self._target_dev()
+        return [t] if t is not None else []
+
+    def _est_text(self, tgt):
+        est = self._estimate(tgt)
+        n = len(tgt.get("pts") or [])
+        if self._me_xy() is None:
+            return "Для оценки по карте нужен GPS (точность лучше 20 м).", "muted"
+        if est is None:
+            return "Собираю замеры вдоль пути: {}/6. Ходи вокруг цели, не стой на месте.".format(n), "warning"
+        if not est["ok"]:
+            why = "двигайся шире (сейчас {:.0f} м)".format(est["spread"]) if est["spread"] < 5.0 else \
+                "обойди цель по дуге или зигзагом, а не по прямой"
+            return "Оценка пока неуверенная (±{:.0f} м, замеров {}): {}.".format(est["radius"], n, why), "warning"
+        rel = self._est_rel(tgt)
+        d = rel[0] if rel else 0.0
+        return "По карте: цель в ~{:.0f} м, ±{:.0f} м (замеров {}, невязка {:.1f} дБ)".format(
+            d, est["radius"], n, est["rms"]), "success"
+
+    def _map_page(self, ui):
+        self._ensure_tap()
+        children = []
+        try:
+            children.append(ui.card([ui.webview(html=self._build_map_html(), height=self.WEBVIEW_HEIGHT, fill_max_size=False)],
+                                    padding=2))
+        except Exception as e:
+            self._log("err", "map: " + str(e)[:200])
+            children.append(ui.card([ui.text("Карта недоступна: " + str(e)[:160], "bodyMedium", color="error")]))
+        children.append(ui.text(self._gps_line(), "bodySmall", color="muted"))
+        tgt = self._target_dev()
+        if tgt is None:
+            children.append(ui.card([ui.text("Выбери цель", "titleMedium"),
+                                     ui.text("Открой «Устройства», нажми на устройство, затем ходи вокруг него — "
+                                             "каждый замер RSSI привязывается к точке GPS, и положение уточняется.",
+                                             "bodyMedium", color="muted")], padding=16))
+        else:
+            txt, col = self._est_text(tgt)
+            children.append(ui.card([
+                ui.row([ui.icon("my_location", 22, "warning"), ui.text(tgt.get("name") or tgt["address"], "titleMedium")], spacing=10),
+                ui.text(txt, "bodyMedium", color=col),
+                ui.row([ui.button("Открыть в картах", self._cb(self._open_maps), style="filled"),
+                        ui.button("Копировать", self._cb(self._copy_coords), style="tonal")], spacing=8),
+                ui.button("Сбросить замеры и путь", self._cb(self._reset_points), style="text", fill_max_width=True),
+                ui.text("● — замеры (цвет = сила сигнала) · золотой круг — оценка цели и её погрешность · "
+                        "синяя точка — ты, конус — куда смотрит телефон. Чем шире и разнообразнее путь вокруг цели, "
+                        "тем точнее.", "bodySmall", color="muted"),
+            ], padding=16))
+        return children
 
     def _build_radar_html(self):
-        compass_on = bool(self._compass_enabled)
-        heading_now = float(self._heading_deg or 0.0) if compass_on else 0.0
-        heading_prev = float(self._heading_in_html) if compass_on else 0.0
+        core = self._radar_payload()
+        sig = json.dumps(core, sort_keys=True, ensure_ascii=False)
+        if sig == self._html_sig and self._html_cache:
+            return self._html_cache
+        prev = self._sent
+        data = dict(core)
+        data["h0"] = prev["h"] if core["compass"] else 0
+        devs = []
+        for v in core["dev"]:
+            item = dict(v)
+            item["d0"] = prev["d"].get(v["a"])
+            devs.append(item)
+        data["dev"] = devs
+        self._sent = {"h": core["h1"], "d": dict((v["a"], v["d"]) for v in core["dev"])}
+        text = json.dumps(data, ensure_ascii=False)
+        text = (text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+                .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+        js = RADAR_JS.replace("__EPOCH__", str(self._epoch_ms)).replace("__ANIM__", "420")
+        js = js.replace("__DATA__", text)
+        self._html_sig = sig
+        self._html_cache = RADAR_HTML_HEAD + js + RADAR_HTML_TAIL
+        return self._html_cache
 
-        devices = []
-        for d in self._sorted_devices():
-            rssi_show = d.get("rssi_smooth", d.get("rssi", -100))
-            dist = self._rssi_to_distance(rssi_show, self.TX_POWER, self.N_FACTOR)
-            if dist < 0:
-                continue
-            addr = d.get("address", "") or ""
-            devices.append({
-                "address": addr,
-                "name": (d.get("name") or addr)[:24],
-                "rssi": int(round(rssi_show)),
-                "distance": float(dist),
-                "angle": float(self._device_world_angle(addr)),
-            })
+    # ───────── UI ─────────
 
-        try:
-            devices_json = json.dumps(devices, ensure_ascii=False)
-            devices_json = (devices_json
-                            .replace("<", "\\u003c")
-                            .replace(">", "\\u003e")
-                            .replace("&", "\\u0026"))
-        except Exception:
-            devices_json = "[]"
+    def _stat(self, ui, value, label):
+        # column в Dolphy всегда fillMaxWidth и в row съедает всю ширину -> используем row без растяжения
+        return ui.row([ui.text(value, "titleLarge"), ui.text(label, "labelSmall", color="muted")],
+                      spacing=6, fill_max_width=False)
 
-        try:
-            self._heading_in_html = heading_now
-        except Exception:
-            pass
+    def _compass_line(self):
+        if not self._compass_enabled:
+            return "Компас выключен · направление не определяется"
+        if self._compass_failed:
+            return "Компас недоступен на этом устройстве"
+        if self._heading_valid:
+            h = (self._heading - self._hoff) % 360.0
+            n = sum(1 for c in self._cov if c >= 2)
+            tip = ""
+            if self._scanning and n < 22:
+                tip = " · крутись по часовой медленно: {}%".format(int(round(n * 100.0 / SECTORS)))
+            return "Компас · {:03d}° {}{}{}".format(int(round(h)) % 360, self._dir_name(h),
+                                                    " · «вперёд» задан" if abs(self._hoff) > 0.5 else "", tip)
+        return "Компас · ожидание датчика…"
 
-        # ── ФИКС v1.5.3: передаём epoch из Python ──
-        epoch_ms = int(getattr(self, "_epoch_ms", 0) or 0)
-        if epoch_ms <= 0:
-            epoch_ms = int(time.time() * 1000)
+    def _hero_card(self, ui):
+        devs = self._snapshot()
+        nearest = "—"
+        if devs:
+            nearest = self._dist_text(min(self._distance(d) for d in devs))
+        status = "Сканирование идёт" if self._scanning else "Скан остановлен"
+        return ui.card([
+            ui.row([
+                ui.icon("radar", 22, "success" if self._scanning else "muted"),
+                ui.text(status, "titleMedium", color="success" if self._scanning else "muted"),
+            ], spacing=10),
+            ui.row([
+                self._stat(ui, str(len(devs)), "устройств"),
+                self._stat(ui, nearest, "ближайшее"),
+                self._stat(ui, str(self._batches), "пакетов"),
+            ], spacing=16),
+            ui.button("Остановить" if self._scanning else "Запустить сканирование",
+                      self._cb(self._toggle_scan),
+                      style="tonal" if self._scanning else "filled", fill_max_width=True),
+        ], padding=16)
 
-        p = []
-        p.append('<!doctype html><html><head><meta charset="utf-8">')
-        p.append('<meta name="viewport" content="width=device-width,'
-                 'initial-scale=1,user-scalable=no">')
-        p.append('<style>')
-        p.append('*{box-sizing:border-box;margin:0;padding:0}')
-        p.append('html,body{width:100%;height:100%;background:#050a05;')
-        p.append('overflow:hidden;font-family:monospace;color:#7fff7f}')
-        p.append('canvas{display:block;width:100%;height:100%}')
-        p.append('</style></head><body><canvas id="radar"></canvas><script>')
-
-        # ЕДИНАЯ эпоха — не сбрасывается при пересоздании WebView
-        p.append('var EPOCH_MS = ' + str(epoch_ms) + ';')
-        p.append('function mono_ms(){ return Date.now() - EPOCH_MS; }')
-
-        p.append('var DEVICES = ' + devices_json + ';')
-        p.append('var HEADING_FROM = ' + str(heading_prev) + ';')
-        p.append('var HEADING_TO = ' + str(heading_now) + ';')
-        p.append('var COMPASS_ON = ' + ('true' if compass_on else 'false') + ';')
-        p.append('var ANIM_MS = 200;')
-        p.append('var SWEEP_SPEED = 1.6;')
-        p.append('var c = document.getElementById("radar");')
-        p.append('var ctx = c.getContext("2d");')
-        p.append('var W, H, CX, CY, RAD, RLABEL;')
-        p.append('function resize() {')
-        p.append('  var dpr = window.devicePixelRatio || 1;')
-        p.append('  W = window.innerWidth; H = window.innerHeight;')
-        p.append('  if (W < 10 || H < 10) { W = 360; H = 520; }')
-        p.append('  c.width = W * dpr; c.height = H * dpr;')
-        p.append('  c.style.width = W + "px"; c.style.height = H + "px";')
-        p.append('  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);')
-        p.append('  CX = W / 2; CY = H / 2;')
-        p.append('  RAD = Math.min(W, H) * 0.38;')
-        p.append('  RLABEL = RAD + 20;')
-        p.append('}')
-        p.append('function currentHeading() {')
-        p.append('  if (!COMPASS_ON) return 0;')
-        p.append('  var t = mono_ms() / ANIM_MS;')
-        p.append('  if (t > 1) t = 1; if (t < 0) t = 0;')
-        p.append('  t = t * (2 - t);')
-        p.append('  var d = HEADING_TO - HEADING_FROM;')
-        p.append('  if (d > 180) d -= 360; else if (d < -180) d += 360;')
-        p.append('  return HEADING_FROM + d * t;')
-        p.append('}')
-        p.append('function rssiColor(r) {')
-        p.append('  if (r >= -50) return [80, 255, 80];')
-        p.append('  if (r >= -65) return [160, 255, 80];')
-        p.append('  if (r >= -80) return [255, 220, 60];')
-        p.append('  if (r >= -95) return [255, 140, 40];')
-        p.append('  return [255, 60, 60];')
-        p.append('}')
-        p.append('function drawGrid() {')
-        p.append('  ctx.clearRect(0, 0, W, H);')
-        p.append('  var bg = ctx.createRadialGradient(CX, CY, 10, CX, CY, RAD * 1.3);')
-        p.append('  bg.addColorStop(0, "rgba(0, 40, 0, 0.9)");')
-        p.append('  bg.addColorStop(1, "rgba(0, 0, 0, 0.95)");')
-        p.append('  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);')
-        p.append('  var rings = [')
-        p.append('    {r: 1.0, label: "30 м"},')
-        p.append('    {r: 0.66, label: "10 м"},')
-        p.append('    {r: 0.33, label: "3 м"},')
-        p.append('    {r: 0.11, label: "0.5 м"}')
-        p.append('  ];')
-        p.append('  ctx.strokeStyle = "rgba(0, 255, 0, 0.35)";')
-        p.append('  ctx.lineWidth = 1;')
-        p.append('  for (var i = 0; i < rings.length; i++) {')
-        p.append('    ctx.beginPath();')
-        p.append('    ctx.arc(CX, CY, RAD * rings[i].r, 0, Math.PI * 2);')
-        p.append('    ctx.stroke();')
-        p.append('    ctx.fillStyle = "rgba(0, 255, 0, 0.55)";')
-        p.append('    ctx.font = "10px monospace";')
-        p.append('    ctx.fillText(rings[i].label, CX + 4,')
-        p.append('                 CY - RAD * rings[i].r + 12);')
-        p.append('  }')
-        p.append('  ctx.strokeStyle = "rgba(0, 255, 0, 0.18)";')
-        p.append('  for (var a = 0; a < 8; a++) {')
-        p.append('    var ang = a * Math.PI / 4;')
-        p.append('    ctx.beginPath();')
-        p.append('    ctx.moveTo(CX, CY);')
-        p.append('    ctx.lineTo(CX + Math.cos(ang) * RAD,')
-        p.append('               CY + Math.sin(ang) * RAD);')
-        p.append('    ctx.stroke();')
-        p.append('  }')
-        p.append('  ctx.fillStyle = "#00ff00";')
-        p.append('  ctx.beginPath();')
-        p.append('  ctx.arc(CX, CY, 4, 0, Math.PI * 2);')
-        p.append('  ctx.fill();')
-        p.append('}')
-        p.append('function drawDevices(headingDeg) {')
-        p.append('  var t = Date.now() / 500;')
-        p.append('  var headingRad = headingDeg * Math.PI / 180;')
-        p.append('  for (var i = 0; i < DEVICES.length; i++) {')
-        p.append('    var dev = DEVICES[i];')
-        p.append('    var d = dev.distance;')
-        p.append('    if (d < 0.3) d = 0.3;')
-        p.append('    var ratio = Math.min(1, d / 30);')
-        p.append('    var r = ratio * RAD;')
-        p.append('    var screenRad = dev.angle * Math.PI / 180 - headingRad;')
-        p.append('    var px = CX + Math.sin(screenRad) * r;')
-        p.append('    var py = CY - Math.cos(screenRad) * r;')
-        p.append('    var col = rssiColor(dev.rssi);')
-        p.append('    var pulse = 0.7 + 0.3 * Math.sin(t + i);')
-        p.append('    var size = 6 + 4 * pulse;')
-        p.append('    var halo = ctx.createRadialGradient(')
-        p.append('        px, py, 0, px, py, size * 3);')
-        p.append('    halo.addColorStop(0, "rgba(" + col[0] + ","')
-        p.append('                   + col[1] + "," + col[2] + ",0.6)");')
-        p.append('    halo.addColorStop(1, "rgba(" + col[0] + ","')
-        p.append('                   + col[1] + "," + col[2] + ",0)");')
-        p.append('    ctx.fillStyle = halo;')
-        p.append('    ctx.beginPath();')
-        p.append('    ctx.arc(px, py, size * 3, 0, Math.PI * 2);')
-        p.append('    ctx.fill();')
-        p.append('    ctx.fillStyle = "rgb(" + col[0] + ","')
-        p.append('                  + col[1] + "," + col[2] + ")";')
-        p.append('    ctx.beginPath();')
-        p.append('    ctx.arc(px, py, size * 0.5, 0, Math.PI * 2);')
-        p.append('    ctx.fill();')
-        p.append('    ctx.fillStyle = "rgba(" + col[0] + ","')
-        p.append('                  + col[1] + "," + col[2] + ",0.9)";')
-        p.append('    ctx.font = "bold 10px monospace";')
-        p.append('    var label = dev.name.length > 12')
-        p.append('      ? dev.name.substring(0, 12) + "…" : dev.name;')
-        p.append('    ctx.fillText(label, px + size, py - size);')
-        p.append('  }')
-        p.append('}')
-        p.append('function drawSweep() {')
-        # ── ФИКС: фаза от абсолютного времени эпохи, НЕ от момента парсинга ──
-        p.append('  var elapsed = mono_ms() / 1000;')
-        p.append('  var sweepAngle = (elapsed * SWEEP_SPEED) % (Math.PI * 2);')
-        p.append('  var canvasAngle = sweepAngle - Math.PI / 2;')
-        p.append('  var grad = ctx.createRadialGradient(CX, CY, 0, CX, CY, RAD);')
-        p.append('  grad.addColorStop(0, "rgba(0, 255, 0, 0.55)");')
-        p.append('  grad.addColorStop(1, "rgba(0, 255, 0, 0)");')
-        p.append('  ctx.fillStyle = grad;')
-        p.append('  ctx.beginPath();')
-        p.append('  ctx.moveTo(CX, CY);')
-        p.append('  ctx.arc(CX, CY, RAD, canvasAngle - 0.55, canvasAngle);')
-        p.append('  ctx.closePath();')
-        p.append('  ctx.fill();')
-        p.append('  ctx.strokeStyle = "rgba(140, 255, 140, 0.95)";')
-        p.append('  ctx.lineWidth = 1.5;')
-        p.append('  ctx.beginPath();')
-        p.append('  ctx.moveTo(CX, CY);')
-        p.append('  ctx.lineTo(CX + Math.cos(canvasAngle) * RAD,')
-        p.append('             CY + Math.sin(canvasAngle) * RAD);')
-        p.append('  ctx.stroke();')
-        p.append('}')
-        p.append('function drawCompass(headingDeg) {')
-        p.append('  if (!COMPASS_ON) return;')
-        p.append('  var headingRad = headingDeg * Math.PI / 180;')
-        p.append('  var labels = [')
-        p.append('    {t: "N", a: 0, c: "#ff6a6a"},')
-        p.append('    {t: "E", a: 90, c: "rgba(120,255,120,0.75)"},')
-        p.append('    {t: "S", a: 180, c: "rgba(120,255,120,0.75)"},')
-        p.append('    {t: "W", a: 270, c: "rgba(120,255,120,0.75)"}')
-        p.append('  ];')
-        p.append('  ctx.textAlign = "center";')
-        p.append('  ctx.textBaseline = "middle";')
-        p.append('  for (var i = 0; i < labels.length; i++) {')
-        p.append('    var L = labels[i];')
-        p.append('    var angRad = L.a * Math.PI / 180 - headingRad;')
-        p.append('    var x = CX + Math.sin(angRad) * RLABEL;')
-        p.append('    var y = CY - Math.cos(angRad) * RLABEL;')
-        p.append('    ctx.font = "bold 14px monospace";')
-        p.append('    ctx.fillStyle = L.c;')
-        p.append('    ctx.fillText(L.t, x, y);')
-        p.append('  }')
-        p.append('  ctx.textAlign = "start";')
-        p.append('  ctx.textBaseline = "alphabetic";')
-        p.append('}')
-        p.append('function drawForward() {')
-        p.append('  var yb = CY - RAD - 6;')
-        p.append('  ctx.fillStyle = "rgba(120, 255, 120, 0.9)";')
-        p.append('  ctx.beginPath();')
-        p.append('  ctx.moveTo(CX - 7, yb - 9);')
-        p.append('  ctx.lineTo(CX + 7, yb - 9);')
-        p.append('  ctx.lineTo(CX, yb);')
-        p.append('  ctx.closePath();')
-        p.append('  ctx.fill();')
-        p.append('}')
-        p.append('function drawHeadingText(headingDeg) {')
-        p.append('  if (!COMPASS_ON) return;')
-        p.append('  ctx.fillStyle = "rgba(120, 255, 120, 0.85)";')
-        p.append('  ctx.font = "bold 12px monospace";')
-        p.append('  ctx.textAlign = "center";')
-        p.append('  ctx.fillText(Math.round(headingDeg) + "°", CX, CY + RAD + 22);')
-        p.append('  ctx.textAlign = "start";')
-        p.append('}')
-        p.append('function drawEmpty() {')
-        p.append('  if (DEVICES.length > 0) return;')
-        p.append('  ctx.fillStyle = "rgba(0, 255, 0, 0.6)";')
-        p.append('  ctx.font = "13px monospace";')
-        p.append('  ctx.textAlign = "center";')
-        p.append('  ctx.fillText("ОЖИДАНИЕ УСТРОЙСТВ", CX, CY + RAD + 52);')
-        p.append('  ctx.font = "11px monospace";')
-        p.append('  ctx.fillStyle = "rgba(0, 255, 0, 0.4)";')
-        p.append('  ctx.fillText("запустите сканирование", CX, CY + RAD + 72);')
-        p.append('  ctx.textAlign = "start";')
-        p.append('}')
-        p.append('function loop() {')
-        p.append('  var h = currentHeading();')
-        p.append('  drawGrid();')
-        p.append('  drawDevices(h);')
-        p.append('  drawSweep();')
-        p.append('  drawCompass(h);')
-        p.append('  drawForward();')
-        p.append('  drawHeadingText(h);')
-        p.append('  drawEmpty();')
-        p.append('  requestAnimationFrame(loop);')
-        p.append('}')
-        p.append('window.addEventListener("resize", resize);')
-        p.append('resize();')
-        p.append('loop();')
-        p.append('</script></body></html>')
-        return ''.join(p)
-
-    # ═══════════════ UI-секции ═══════════════
-
-    def _button(self, ui, title, cb, *args, enabled=True, style="tonal"):
-        return ui.button(title, self._bind(cb, *args),
-                         enabled=bool(enabled), style=style)
-
-    def _navigation(self, ui):
-        labels = [("radar", "📡 Радар"),
-                  ("list", "📋 Список"),
-                  ("logs", "📝 Логи")]
-        buttons = []
-        for page, title in labels:
-            selected = self._page == page
-            buttons.append(ui.button(
-                title,
-                self._bind(self._go, page),
-                style="filled" if selected else "tonal"))
-        return ui.row(buttons)
-
-    def _radar_ui(self, ui):
-        if self._scanning:
-            status_text = "🟢 Сканирование активно"
-            status_color = "success"
+    def _target_card(self, ui):
+        tgt = self._target_dev()
+        if not self._target:
+            return None
+        if tgt is None:
+            return ui.card([
+                ui.text("Цель потеряна", "titleMedium", color="warning"),
+                ui.text(str(self._target), "bodySmall", color="muted"),
+                ui.button("Сбросить цель", self._cb(self._clear_target), style="tonal", fill_max_width=True),
+            ], padding=16)
+        dist = self._distance(tgt)
+        brg, conf = self._bearing(tgt)
+        heading = self._heading_now()
+        rel = self._est_rel(tgt) if heading is not None else None
+        if rel is not None:
+            dist, brg = rel[0], rel[1]
+            conf = max(0.0, min(1.0, 1.0 - rel[2]["radius"] / 25.0))
+        if heading is None:
+            hint = "Включи компас, чтобы искать по направлению."
+            hint_color = "muted"
+        elif brg is None:
+            got = len([v for v in tgt["sect"] if v is not None])
+            if got >= 12:
+                hint = "Сигнал почти не меняется при повороте — направление определить не удаётся. Подойди ближе или отойди от стен."
+            else:
+                hint = "Медленно повернись на месте с телефоном в руке — собираю пеленг ({}/{} секторов).".format(got, SECTORS)
+            hint_color = "warning"
         else:
-            status_text = "⚪ Сканирование остановлено"
-            status_color = "secondary"
+            delta = (brg - heading + 540.0) % 360.0 - 180.0
+            if abs(delta) < 12:
+                hint, hint_color = "Цель прямо по курсу — иди вперёд.", "success"
+            else:
+                side = "справа" if delta > 0 else "слева"
+                hint = "Цель {} на {}° · направление {:03d}° {}".format(
+                    side, int(round(abs(delta))), int(round(brg)), self._dir_name(brg))
+                hint_color = "primary"
+            hint += "  (точность {}%)".format(int(round(conf * 100)))
+            if conf < 0.4:
+                hint += "\nТочность низкая: покрутись медленнее и дольше (20–30 с), телефон держи у груди."
+        return ui.card([
+            ui.row([ui.icon("my_location", 22, "warning"),
+                    ui.text(tgt.get("name") or tgt["address"], "titleMedium")], spacing=10),
+            ui.text("~{} · {:.0f} dBm · {}".format(self._dist_text(dist), tgt["rssi_smooth"], tgt["address"]),
+                    "bodyMedium", color=self._level_color(int(round(tgt["rssi_smooth"])))),
+            ui.text(hint, "bodyMedium", color=hint_color),
+            ui.text(self._est_text(tgt)[0], "bodySmall", color=self._est_text(tgt)[1]),
+            ui.linear_progress(min(1.0, len([v for v in tgt["sect"] if v is not None]) / float(SECTORS))),
+            ui.text("Оборот выполнен на {}%. Если стрелка плывёт, покачай телефон «восьмёркой» — это калибрует компас."
+                    .format(int(round(len([v for v in tgt["sect"] if v is not None]) * 100.0 / SECTORS))), "bodySmall", color="muted"),
+            ui.button("Сбросить цель", self._cb(self._clear_target), style="tonal", fill_max_width=True),
+        ], padding=16)
 
-        if self._compass_sensor_id is not None and self._heading_valid:
-            compass_line = "🧭 {}".format(int(round(self._heading_deg)))
-        elif self._compass_sensor_id is not None:
-            compass_line = "🧭 ожидание данных сенсора"
-        elif self._compass_failed:
-            compass_line = "🧭 недоступен на этом устройстве"
-        else:
-            compass_line = "🧭 запуск…"
+    def _settings_card(self, ui):
+        return ui.card([
+            ui.switch(checked=self._compass_enabled, on_change=self._cbv(self._set_compass),
+                      title="Компас", subtitle="Вращает радар и собирает пеленг"),
+            ui.switch(checked=self._gps_enabled, on_change=self._cbv(self._set_gps),
+                      title="GPS и карта", subtitle="Замеры привязываются к твоему пути, цель ищется по карте"),
+            ui.switch(checked=self._gyro_enabled, on_change=self._cbv(self._set_gyro),
+                      title="Гироскоп", subtitle="Отсекает размытые замеры при повороте, ускоряет компас"),
+            ui.button("Считать направление телефона «вперёд»", self._cb(self._set_forward),
+                      style="tonal", fill_max_width=True),
+            ui.button("Сбросить «вперёд» (север по компасу)", self._cb(self._reset_forward),
+                      style="text", fill_max_width=True) if abs(self._hoff) > 0.5 else ui.empty(),
+            ui.button("Начать оборот заново (сбросить сектора)", self._cb(self._reset_cov),
+                      style="text", fill_max_width=True),
+            ui.text("Среда (влияет на дистанцию)", "labelMedium", color="muted"),
+            ui.button_group([(k, l) for k, l, _ in ENVS], self._env, self._cbv(self._set_env)),
+            ui.text("Дальность радара", "labelMedium", color="muted"),
+            ui.slider(self._range, self._cbv(self._set_range), minimum=5, maximum=60,
+                      title="{} м".format(self._range), steps=54),
+            ui.text("○ — направление ещё неизвестно · ● — пеленг определён. "
+                    "Дистанция по RSSI приблизительна: ±50% и хуже рядом со стенами и людьми.",
+                    "bodySmall", color="muted"),
+        ], padding=16)
 
-        devices = self._get_devices_snapshot()
-        count = len(devices)
-
-        children = [
-            ui.card([
-                ui.text("📡  BLE RADAR", "labelSmall", color="secondary"),
-                ui.text(status_text, "titleMedium", color=status_color),
-                ui.text("Устройств: {}  ·  всего: {}  ·  пакетов: {}".format(
-                    count, self._unique_total, self._batches_received),
-                    "bodyMedium"),
-                ui.text(compass_line, "bodySmall", color="muted"),
-                ui.row([
-                    self._button(ui, "▶️  Старт", self._start_scan,
-                                 enabled=not self._scanning, style="filled"),
-                    self._button(ui, "⏹  Стоп", self._stop_scan,
-                                 enabled=self._scanning),
-                ]),
-                ui.switch(
-                    checked=bool(self._compass_enabled),
-                    on_change=self._bind_evt(self._set_compass_enabled),
-                    title="Компас",
-                    subtitle="Поворот точек по ориентации телефона",
-                ),
-            ]),
-        ]
-
+    def _radar_page(self, ui):
+        self._ensure_tap()
+        children = [self._hero_card(ui)]
         try:
             html = self._build_radar_html()
-            children.append(ui.card([
-                ui.webview(html=html, height=self.WEBVIEW_HEIGHT,
-                           fill_max_size=False),
-            ], padding=4))
+            children.append(ui.card([ui.webview(html=html, height=self.WEBVIEW_HEIGHT, fill_max_size=False)],
+                                    padding=2))
         except Exception as e:
-            self._log("error", "webview: " + str(e)[:200])
-            children.append(ui.card([
-                ui.text("WebView недоступен", "bodyMedium", color="error"),
-                ui.text(str(e)[:200], "bodySmall", color="muted"),
-            ]))
-
+            self._log("err", "html: " + str(e)[:200])
+            children.append(ui.card([ui.text("Радар недоступен: " + str(e)[:160], "bodyMedium", color="error")]))
+        children.append(ui.text(self._compass_line(), "bodySmall", color="muted"))
+        tcard = self._target_card(ui)
+        if tcard is not None:
+            children.append(tcard)
+        children.append(self._settings_card(ui))
+        dlg = self._pick_dialog(ui)
+        if dlg is not None:
+            children.append(dlg)
         return children
 
-    def _sort_chips(self, ui):
-        chips = []
-        options = [(self.SORT_RSSI, "RSSI"),
-                   (self.SORT_RECENT, "Свежие"),
-                   (self.SORT_NAME, "Имя"),
-                   (self.SORT_SEEN, "Частота")]
-        for value, label in options:
-            chips.append(ui.chip(
-                label,
-                selected=(self._sort_mode == value),
-                on_click=self._bind(self._set_sort, value)))
-        return ui.row(chips)
-
-    def _min_rssi_chips(self, ui):
-        values = (-100, -90, -80, -70, -60)
-        row1 = []
-        row2 = []
-        for i, value in enumerate(values):
-            chip = ui.chip(
-                "{} dBm".format(value),
-                selected=(int(self._min_rssi) == value),
-                on_click=self._bind(self._set_min_rssi, value))
-            if i < 3:
-                row1.append(chip)
-            else:
-                row2.append(chip)
-        return ui.column([ui.row(row1), ui.row(row2)], spacing=4)
-
-    def _list_ui(self, ui):
-        devices = self._sorted_devices()
-
+    def _list_page(self, ui):
+        devs = self._sorted_devices()
+        total = len(self._snapshot())
+        sorts = ui.lazy_row([ui.chip(l, selected=(self._sort == k), on_click=self._cb(self._set_sort, k))
+                             for k, l in SORTS], spacing=8)
+        mins = ui.lazy_row([ui.chip("≥ {}".format(v), selected=(self._min_rssi == v),
+                                    on_click=self._cb(self._set_min_rssi, v)) for v in MIN_RSSIS], spacing=8)
         children = [ui.card([
-            ui.text("📋  УСТРОЙСТВА", "labelSmall", color="secondary"),
-            ui.text("Показано: {} из {}".format(
-                len(devices), len(self._get_devices_snapshot())),
-                "titleMedium"),
-            ui.text("Сортировка", "labelSmall", color="secondary"),
-            self._sort_chips(ui),
-            ui.text("Мин. RSSI", "labelSmall", color="secondary"),
-            self._min_rssi_chips(ui),
-            ui.row([
-                self._button(ui, "📄  CSV", self._export_csv, style="filled"),
-                self._button(ui, "🗑  Очистить", self._clear_devices),
-            ]),
-        ])]
-
-        if not devices:
-            children.append(ui.card([
-                ui.text("Пока пусто", "bodyMedium", color="secondary"),
-                ui.text("Запусти скан на вкладке «Радар» или снизь мин. RSSI",
-                        "bodySmall", color="muted"),
-            ]))
+            ui.text("Показано {} из {}".format(len(devs), total), "titleMedium"),
+            ui.text("Сортировка", "labelMedium", color="muted"), sorts,
+            ui.text("Мин. сигнал, dBm", "labelMedium", color="muted"), mins,
+            ui.row([ui.button("CSV", self._cb(self._export_csv), style="filled"),
+                    ui.button("Очистить", self._cb(self._clear_devices), style="tonal")], spacing=8),
+        ], padding=16)]
+        if not devs:
+            children.append(ui.card([ui.text("Пока пусто", "titleMedium"),
+                                     ui.text("Запусти скан на вкладке «Радар» или снизь порог сигнала.",
+                                             "bodyMedium", color="muted")], padding=16))
             return children
-
         now = time.time()
-        for i, d in enumerate(devices):
-            rssi_show = d.get("rssi_smooth", d.get("rssi", -100))
-            dist = self._rssi_to_distance(rssi_show, self.TX_POWER, self.N_FACTOR)
-            dist_str = self._distance_text(dist)
-            col = self._level_color(int(round(rssi_show)))
-            name = d.get("name") or "Без имени"
-            ago = int(now - d.get("last_seen", now))
+        for d in devs:
+            rssi = int(round(d["rssi_smooth"]))
+            dist = self._dist_text(self._distance(d))
+            brg, _ = self._bearing(d)
+            strength = max(0.03, min(1.0, (rssi + 100.0) / 60.0))
+            is_t = (d["address"] == self._target)
+            extra = "" if brg is None else "  ·  {:03d}° {}".format(int(round(brg)), self._dir_name(brg))
             children.append(ui.card([
-                ui.text("{}. {}".format(i + 1, name), "titleMedium"),
-                ui.text(d.get("address", ""), "bodySmall", color="muted"),
-                ui.text("RSSI: {:.0f} dBm  ·  ~{}".format(rssi_show, dist_str),
-                        "bodyMedium", color=col),
-                ui.text("виден {} раз  ·  {} сек назад".format(
-                    d.get("seen", 0), ago), "bodySmall", color="muted"),
-            ]))
-
+                ui.row([
+                    ui.icon("my_location" if is_t else "bluetooth", 22, "warning" if is_t else self._level_color(rssi)),
+                    ui.column([ui.text(d.get("name") or "Без имени", "titleMedium", max_lines=1),
+                               ui.text(d["address"], "bodySmall", color="muted")], spacing=0),
+                ], spacing=12),
+                ui.text("{} dBm  ·  ~{}{}".format(rssi, dist, extra), "bodyMedium", color=self._level_color(rssi)),
+                ui.linear_progress(strength),
+                ui.text("виден {} раз  ·  {} с назад  ·  нажми, чтобы искать".format(
+                    d["seen"], int(now - d["last_seen"])), "labelSmall", color="muted"),
+            ], padding=14, on_click=self._cb(self._set_target, d["address"])))
         return children
 
-    def _logs_ui(self, ui):
+    def _logs_page(self, ui):
         with self._log_lock:
             total = len(self._logs)
             items = list(self._logs[-self.LOG_UI_LINES:])
-
         children = [ui.card([
-            ui.text("📝  ЛОГИ", "labelSmall", color="secondary"),
             ui.text("Записей: {}".format(total), "titleMedium"),
-            ui.row([
-                self._button(ui, "💾  Экспорт", self._export_logs, style="filled"),
-                self._button(ui, "📄  Копировать", self._copy_logs),
-            ]),
-            self._button(ui, "🗑  Очистить логи", self._clear_logs, style="text"),
-            ui.text("Файл: {}/{}".format(self.EXPORT_DIR, self.FILE_LOG),
-                    "bodySmall", color="muted"),
-        ])]
-
-        if total == 0:
-            children.append(ui.card([
-                ui.text("Логи пусты", "bodyMedium", color="secondary"),
-                ui.text("Запусти скан на вкладке «Радар»",
-                        "bodySmall", color="muted"),
-            ]))
+            ui.row([ui.button("Экспорт", self._cb(self._export_logs), style="filled"),
+                    ui.button("Копировать", self._cb(self._copy_logs), style="tonal"),
+                    ui.button("Очистить", self._cb(self._clear_logs), style="text")], spacing=8),
+        ], padding=16)]
+        if not items:
+            children.append(ui.card([ui.text("Логи пусты", "bodyMedium", color="muted")], padding=16))
             return children
-
-        colors = {"error": "error", "warning": "warning",
-                  "success": "success", "info": "secondary"}
-        marks = {"error": "✖", "warning": "⚠",
-                 "success": "✔", "info": "•"}
-        lines = []
-        for lvl, stamp, msg in reversed(items):
-            lines.append(ui.text(
-                "{} {}  {}".format(marks.get(lvl, "•"), stamp, msg),
-                "labelSmall", color=colors.get(lvl, "secondary")))
-        children.append(ui.card(lines))
+        colors = {"err": "error", "warn": "warning", "ok": "success", "info": "secondary"}
+        marks = {"err": "✖", "warn": "⚠", "ok": "✔", "info": "•"}
+        lines = [ui.text("{} {}  {}".format(marks.get(l, "•"), t, m), "labelSmall", color=colors.get(l, "secondary"))
+                 for l, t, m in reversed(items)]
+        children.append(ui.card(lines, padding=14))
         return children
-
-    # ═══════════════ Точка входа ═══════════════
 
     def screen_main(self, ui, api, state):
         try:
             self.api = api
-
             if not self._ready:
-                return ui.scaffold(
-                    title="BLE Radar Locator",
-                    content=ui.column([
-                        ui.text("Плагин не готов",
-                                "titleMedium", color="warning"),
-                        ui.text(self._init_error or "неизвестная причина",
-                                "bodySmall", color="muted"),
-                    ], padding=16, spacing=8, fill_max_size=False))
-
-            if (self._compass_sensor_id is None
-                    and not self._compass_failed
-                    and self._compass_attempts < self.COMPASS_MAX_ATTEMPTS):
-                try:
-                    self._start_compass()
-                except Exception:
-                    pass
-
-            nav = self._navigation(ui)
-
+                return ui.scaffold(title="BLE Radar Locator", content=ui.column([
+                    ui.text("Плагин не готов", "titleMedium", color="warning")], padding=16))
+            if self._compass_enabled and self._compass_id is None and not self._compass_failed:
+                self._start_compass()
+            if self._gps_enabled and not self._gps_on:
+                self._start_gps()
+            if self._gyro_enabled and self._gyro_id is None:
+                self._start_gyro()
+            tabs = ui.tabs(["Радар", "Бета", "Устройства", "Логи"], selected=PAGES.index(self._page),
+                           on_select=self._cbv(self._set_page))
             if self._page == "radar":
-                body = self._radar_ui(ui)
-                content = ui.column([nav] + body, padding=12, spacing=8,
-                                    fill_max_size=False)
+                body = self._radar_page(ui)
+            elif self._page == "map":
+                body = self._map_page(ui)
             elif self._page == "list":
-                body = self._list_ui(ui)
-                content = ui.lazy_column([nav] + body, padding=12, spacing=8,
-                                         fill_max_size=True)
+                body = self._list_page(ui)
             else:
-                body = self._logs_ui(ui)
-                content = ui.lazy_column([nav] + body, padding=12, spacing=8,
-                                         fill_max_size=True)
-
-            return ui.scaffold(title="BLE Radar Locator", content=content)
-
+                body = self._logs_page(ui)
+            return ui.scaffold(title="BLE Radar Locator",
+                               content=ui.lazy_column([tabs] + body, padding=12, spacing=10, fill_max_size=True))
         except Exception as exc:
-            try:
-                self._log("error", "UI: " + str(exc)[:240])
-            except Exception:
-                pass
-            try:
-                return ui.scaffold(
-                    title="BLE Radar Locator",
-                    content=ui.column([
-                        ui.text("Ошибка UI", "titleLarge", color="error"),
-                        ui.text(str(exc)[:300], "bodySmall", color="warning"),
-                        ui.button("На радар",
-                                  self._bind(self._go, "radar"),
-                                  style="tonal"),
-                    ], padding=16, spacing=10, fill_max_size=False))
-            except Exception:
-                return ui.scaffold(title="Ошибка",
-                                   content=ui.text("UI сломан"))
+            self._log("err", "UI: " + str(exc)[:240])
+            return ui.scaffold(title="BLE Radar Locator", content=ui.column([
+                ui.text("Ошибка интерфейса", "titleLarge", color="error"),
+                ui.text(str(exc)[:300], "bodySmall", color="muted"),
+                ui.button("На радар", self._cb(self._set_page, 0), style="tonal"),
+            ], padding=16, spacing=10))
