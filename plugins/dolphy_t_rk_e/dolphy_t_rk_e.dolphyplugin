@@ -1,0 +1,3138 @@
+__id__ = "dolphy_tr"
+__name__ = "Dolphy Türkçe"
+__version__ = "1.2.1"
+__author__ = "Claude"
+__description__ = "Dolphy 2.7 arayüzünü ve diğer eklentilerin metinlerini Türkçeleştirir"
+__icon__ = "rounded:translate"
+__permissions__ = []
+__library__ = True
+
+import collections
+import json
+import os
+import re
+import struct
+import sys
+import threading
+import time
+import traceback
+
+# Dolphy Türkçe
+# -----------------
+# Dolphy 2.7 solo trae inglés y ruso. Este plugin crea en tiempo de ejecución una
+# "tabla de recursos" (resources.arsc) con la traducción al español de las cadenas de la
+# app y la superpone con ResourcesLoader (Android 11+). No modifica el APK.
+#   * Las cadenas se buscan por NOMBRE (getIdentifier), así que sigue funcionando
+#     aunque cambien los ID entre versiones; las que no existan se omiten.
+#   * El texto escrito directamente en el código de la app (no en recursos) no se puede
+#     traducir de esta forma.
+#   * Los textos de OTROS plugins se traducen aparte (ver más abajo).
+#   * Para volver al original basta con apagar los interruptores en los ajustes del plugin.
+
+TEXTS = {
+    "action_info": "Bilgi",
+    "action_pin": "Sabitle",
+    "action_unpin": "Sabitlemeyi kaldır",
+    "advertise_empty_presets": "Henüz cihaz eklemedin.",
+    "audio_bypass_1": "1.",
+    "audio_bypass_2": "2.",
+    "audio_bypass_3": "Bypass 3",
+    "audio_close": "Kapat",
+    "audio_connect": "Bağlan",
+    "audio_connected_success": "Bağlandı!",
+    "audio_connected_successfully": "Bağlantı başarılı",
+    "audio_connecting": "Bağlanıyor...",
+    "audio_error_hfp_generic": "Ses bağlantısı hatası: %s",
+    "audio_error_hfp_manual": "Bluetooth ayarlarından elle bağlanman gerekiyor",
+    "audio_error_hfp_permission": "İzin hatası. Elle bağlanmayı dene",
+    "audio_error_hfp_timeout": "Ses profiline bağlanma zaman aşımına uğradı",
+    "audio_error_label": "Hata",
+    "audio_failed": "Hata",
+    "audio_file_label": "Dosya: %s",
+    "audio_hacking": "Hacking...",
+    "audio_hijack_fail": "Kaçan kaçırılmış: %1$s",
+    "audio_hijack_ok": "BWang TWS Listesi %1$s",
+    "audio_hijack_starting": "Kaçmak için ...",
+    "audio_listen": "Dinle",
+    "audio_listening_title": "Dinlemeyi dinlemek",
+    "audio_no_recordings": "BLE Smart Home",
+    "audio_quiet_connect_text": "Bu işlev, horn'a bağlanmaya ve onaysız işitme yardımlarına bağlanmaya olanak sağlar",
+    "audio_quiet_connect_title": "Sessiz Connect Hakkında",
+    "audio_record": "Kaydet",
+    "audio_recording_title": "Kayıt...",
+    "audio_run_again": "Tekrar Run Run",
+    "audio_scanner_desc": "Arama ve Bluetooth ses cihazları test edin. horn ve işitme yardımlarına bağlanın.",
+    "audio_scanner_tab_recordings": "Kayıtlar",
+    "audio_scanner_tab_scanner": "Tarayıcı",
+    "audio_scanner_title": "BT-Seso Hijack",
+    "audio_scanning_devices": "Ses cihazları için bakmak...",
+    "audio_searching": "Aranıyor...",
+    "audio_send_logs": "Kayıtları gönder",
+    "audio_spoof_info_text": "fazlasına yerel Dolphy sayfasını açan bir cihazda ses yeniden üretir. Her iki cihaz da aynı Wi-Fi veya yerel ağda olmalıdır. Konaklama hizmetleri veya dış tünelleri kullanmaz.",
+    "audio_spoof_info_title": "←",
+    "audio_start_scan": "Taramayı başlat",
+    "audio_starting_success": "Başlayın...",
+    "audio_stop": "Durdur",
+    "audio_waiting": "Bekleniyor...",
+    "back": "Geri",
+    "bad_usb_card_desc": "Ducky senaryosu · Gadget USB HID (root)",
+    "bad_usb_connected": "Bağlı",
+    "bad_usb_disconnected": "Bağlantı kesildi",
+    "bad_usb_done": "Senaryo bitmişti",
+    "bad_usb_empty": "Bir Ducky senaryosu girin",
+    "bad_usb_fail": "Senaryo başarısız oldu",
+    "bad_usb_hint": "Ağa ve USB faresi, HID gadget ile kök ve çekirdek uyumluluk gerektirir. Telefonunuzu bilgisayara bağlayın, bir Ducky senaryosu girin ve Run oynayın.",
+    "bad_usb_root_denied": "Kök erişim inkar edildi",
+    "bad_usb_run": "Çalıştır",
+    "bad_usb_running": "Bluetooth Engelli",
+    "bad_usb_script_hint": "DuckyScript'a girin...",
+    "bad_usb_script_label": "Ducky senaryo",
+    "bad_usb_status": "Devlet: %s",
+    "bad_usb_status_connected": "USB üzerinden bağlantı kurdu",
+    "bad_usb_status_disconnected": "Bağlantı kesildi",
+    "bad_usb_status_root": "Gerekli Kök erişim gerekli",
+    "bad_usb_status_setup": "HID gadget'ı yapılandırın...",
+    "bad_usb_title": "BT kontrol",
+    "ble_add_device": "Google Cast",
+    "ble_allow": "İzin ver",
+    "ble_audio_test": "Test et",
+    "ble_brightness": "Katal",
+    "ble_company_code_line": "Şirket kodu: 0x%1$04X • %2$s",
+    "ble_connecting": "Bağlanma...",
+    "ble_delete": "Sil",
+    "ble_device_actions": "Cihaz Eylemleri",
+    "ble_edit": "Düzenle",
+    "ble_edit_device": "Cilt Down Down",
+    "ble_label_company_code": "Volume Up Up",
+    "ble_label_hex_payload": "Hex, yükleri öder",
+    "ble_label_name": "Ad",
+    "ble_label_spam_interval": "Spam aralığı (ms)",
+    "ble_list_airtag": "Müdahaleye hazır olun...",
+    "ble_list_apple": "SEÇİM",
+    "ble_list_apple_action": "Apple Action Modal Listesi",
+    "ble_list_buds": "TV algılaması başarısız oldu:",
+    "ble_list_fast_pair": "Videoyu hazırlamak...",
+    "ble_list_headphones": "Kulaklıklar Listesi",
+    "ble_list_ios_crash": "iOS Crash Listesi",
+    "ble_list_normal": "Chat name Adı",
+    "ble_list_not_your_device": "Videoyu kabul et Videoyu kabul et",
+    "ble_list_vivo_gamepad": "PH Gamepad Listesi",
+    "ble_list_vivo_tws": "PH TWS Listesi",
+    "ble_list_watch": "Yeniden deneme",
+    "ble_list_xiaomi": "Xiaomi Quick Connect",
+    "ble_off": "OFF OFF",
+    "ble_on": "(Gerekli)",
+    "ble_permission_advertising_required": "Reklamlar için gerekli olan Bluetooth İzinleri",
+    "ble_placeholder_company_code": "e.g. 0x004C Apple için",
+    "ble_placeholder_hex_payload": "Hex zincirini, uzaylar olmadan yapıştırın, e.g. 071907022075aa300100004512120000000000000000",
+    "ble_placeholder_name": "E.g. AirPods Fake 2026",
+    "ble_plugin_modes": "Eklentiler",
+    "ble_randomize_mac": "Randomize MAC",
+    "ble_rescan": "Offline",
+    "ble_scan": "Tara",
+    "ble_smart_home": "BLE Smart Home",
+    "ble_smart_light": "Got it",
+    "ble_smarthome_connect_failed": "Bağlanamadı",
+    "ble_smarthome_device_not_found": "bulamadık",
+    "ble_smarthome_need_perms": "Bluetooth Bluetooth Tabletleri için gerekli olan.You Bluetooth permissions are required for.",
+    "ble_spam_screen_title": "←",
+    "bluetooth_disabled": "Bluetooth Disabledd",
+    "bluetooth_disabled_message": "Lütfen Bluetooth'un spam özelliklerini kullanmasına izin verin",
+    "bluetooth_enable": "Aç",
+    "bluetooth_enable_first": "Bluetooth'a dön ve tekrar deneyin.",
+    "bluetooth_not_supported": "Bluetooth desteklenmedi",
+    "bluetooth_permission_explanation": "Bu bölüm, Bluetooth'a cihaz keşfine ve erişime ihtiyaç duyar. Android, BLE keşif için yer izni gerektirir. Bunu sağlamadan başka bölümler kullanabilirsiniz.",
+    "bluetooth_permission_grant": "Grant access access",
+    "bluetooth_permission_required": "Bu bölüm için Bluetooth erişimine izin verin.",
+    "bluetooth_permission_settings": "Açık uygulama ayarları",
+    "bluetooth_permission_title": "Bluetooth Access",
+    "bluetooth_scan_failed": "Keşif başarısız oldu. Bluetooth, izinler ve konum hizmetleri kontrol ediliyor.",
+    "bond_spam_devices": "Keşfetli Cihazlar",
+    "bond_spam_no_devices": "cihazlara bakmak...",
+    "bond_spam_select_device": "spam için bir cihaz seçin",
+    "bond_spam_target": "Hedef: Hedef:",
+    "bond_spam_title": "Bond Spam",
+    "brand_unknown": "Bilinmiyor",
+    "bt_jammer_activity_log": "ACTITY LOG",
+    "bt_jammer_found": "Bululdu: %1$d",
+    "bt_jammer_jamming": "Interfieing...",
+    "bt_jammer_no_devices": "No devices yakındakileri buldu",
+    "bt_jammer_ready": "müdahale etmeye hazır...",
+    "bt_jammer_scanning": "cihazlara bakmak...",
+    "bt_jammer_select_device": "SEBICE",
+    "bt_jammer_starting": "Su saldırısının başlatılması %s…",
+    "bt_jammer_stopped": "Durdu.",
+    "bt_jammer_tap_hint": "Saldırıya saldırmak için bir aygıt dokunun",
+    "bt_jammer_target": "TARGET",
+    "bt_jammer_title": "BT kontrol",
+    "btn_cancel": "İptal",
+    "cancel": "İptal",
+    "cast_browser_hint": "Diğer TV: TV tarayıcıdaki yerel siteyi açar.",
+    "cast_discovery_failed": "TV algılaması başarısız oldu: %s",
+    "cast_failed": "Video bulaya aktarılamadı: %s",
+    "cast_file_too_large": "Bu video için yeterli ücretsiz yer değil",
+    "cast_google": "Google Cast",
+    "cast_google_hint": "Doğru düğme ile bir Google Cast cihazı seçin ve sonra Play oynayın.",
+    "cast_import_failed": "Videoyu okuyamayabilir",
+    "cast_importing": "Videoyu hazırlamak...",
+    "cast_loaded": "Cihaz videoyu kabul etti",
+    "cast_loading": "Cihazın üzerine yükleniyor...",
+    "cast_network_missing": "Bir ağ için bir ağ açın.",
+    "cast_no_session": "İlk önce bir Google Cast cihazına bağlanın.",
+    "cast_ready": "Video hazır. Bir cihazı seçin.",
+    "catalog_ble_desc": "Apple, Android, Windows ve Samsung için BLUE reklamlar",
+    "catalog_bond_desc": "Bluetooth Classic çifting istek testi testi",
+    "cd_add": "Ekle",
+    "cd_back": "Geri",
+    "cd_close": "Kapat",
+    "cd_delete": "Sil",
+    "cd_menu": "Menü",
+    "cd_nfc_success": "Başarılı",
+    "cd_power": "Güç gücü",
+    "cd_refresh": "Güncelle",
+    "cd_screenshot": "Ekran görüntüsü",
+    "cd_search": "Ara",
+    "cd_volume_down": "Sesi kıs",
+    "cd_volume_up": "Volume Up Up",
+    "chat_advertising_failed": "Bu sohbetin keşfedilemez hale getirilemez hale gelmeyebilir.",
+    "chat_change_name": "Chat name Adı",
+    "chat_delivery_failed": "Teslimat bir veya daha fazla kullanıcı için başarısız oldu",
+    "chat_delivery_pending": "Gönderiliyor…",
+    "chat_delivery_sent": "Tüm keşfedilen kullanıcılara teslim edildi",
+    "chat_empty_hint": "Yakın bir Dolphy kullanıcısına merhaba deyin; yeni mesajlar burada görünecek.",
+    "chat_empty_title": "Henüz mesaj yok",
+    "chat_message_hint": "Bir mesaj yazın",
+    "chat_message_too_long": "Mesaj çok uzun.",
+    "chat_no_recipients": "Yakındaki Dolphy kullanıcıları yok. Diğer cihazdaki sohbeti açın.",
+    "chat_peers": "Yakındaki kullanıcılar: %d",
+    "chat_privacy_notice": "Yakın bir grup sohbet accusations. mesajlar şifrelenmez; tarih uygulama kapalı olana kadar sürer.",
+    "chat_retry": "Tekrar dene",
+    "chat_save_name": "Kaydet",
+    "chat_send_message": "Gönder",
+    "chat_send_not_ready": "Sohbet henüz hazır değil: Bluetooth'ı ve adınızı kontrol edin ve tekrar deneyin",
+    "chat_start_failed": "Chat başlamadı. Bluetooth'ı kontrol edin ve BLE reklam ile uyumluluk.",
+    "chat_status_connected": "Bağlı",
+    "chat_status_offline": "Offline",
+    "chat_status_scanning": "Taranıyor…",
+    "close": "Kapat",
+    "color_picker_select": "Seç",
+    "confirm": "Onayla",
+    "customize_animations_dialog_no": "Hayır",
+    "customize_animations_dialog_title": "Ev ekranında kalıcı olarak animasyon mu ayarlayın?",
+    "customize_animations_dialog_yes": "Evet",
+    "customize_animations_permanent_badge": "Kalıcı",
+    "customize_animations_reset": "Sıfırla",
+    "customize_animations_reset_success": "Animation standart moda sıfır",
+    "customize_animations_set_success": "Animasyon, evde ekranda kalıcı olarak ayarlanıyor",
+    "customize_animations_title": "Özelleştirme animasyonları",
+    "dont_show_again": "Tekrar göstermeyin",
+    "error": "Hata",
+    "error_advertiser_unavailable": "BluetoothLeAdvertiser mevcut değil",
+    "error_advertising_already_running": "Reklam zaten çalışıyor",
+    "error_advertising_start": "Reklama başladığında hata: %s",
+    "error_ble_advertising_unsupported": "Bu cihaz BLE reklamını desteklemiyor",
+    "error_enable_bluetooth_first": "İlk önce Bluetooth'ta dön",
+    "error_invalid_hex_payload": "Invalid hex maaş",
+    "error_no_ble_advertise_permission": "BLE reklam için izin yok",
+    "error_payload_too_long_legacy": "Payload çok uzun süre mirası için",
+    "error_preset_not_found": "Preset bulunamadı",
+    "got_it": "Got it",
+    "hid_android_ios_mode": "Android / iOS Mode",
+    "hid_attack_in_progress": "ATTACK IN PROGRESS",
+    "hid_back_spam": "Back/ESC Spam",
+    "hid_bad_hid": "BH BAD HID",
+    "hid_bad_hid_mode": "Bad HID Mode",
+    "hid_blueducky_info_body": "aksine, Blue Ducky kırılganlığı (CVE-2023-45866): PIN veya uyumlu onay diyalogları olmadan HID.\n\nHassas hedeflere karşı çalışır:\n• Android 4.2.2 - Android 13 ( 2023 / 2024)\nBlue Linux'ı Yapmaksızın\n• Bazı erken iOS / Mac yorumları\n\nsesli 14 + ve yeni bölünmüş bir OEM üzerinde, ev sahibi hala doğrulama olmadan onay veya reddetme gerektirir. \"Connect\", diyaloglarla normal yoldur; \"Quiet bağlantısı\" sadece sessiz + otomatik onay ile eşleşen çalışır.",
+    "hid_blueducky_info_cd": "BlueDucky Hakkında",
+    "hid_center_cursor": "Merkez Cursoror",
+    "hid_change_name_description": "Bluetooth adı diğer cihazlara gösterilen.",
+    "hid_change_name_hint": "Cihaz adı",
+    "hid_change_name_title": "Bir aygıt adı girin",
+    "hid_clear_selection": "Clear Selection",
+    "hid_connect": "Bağlan",
+    "hid_connected": "Bağlanmış tom %s",
+    "hid_connecting": "Bağlanma...",
+    "hid_connection_lost_reconnecting": "Bağlantı kayboldu, yeniden bağlantı kurmak",
+    "hid_delete_selected": "Delete Seçilmiş",
+    "hid_device_headphones": "Hedef:",
+    "hid_device_lower": "aygıt cihazı",
+    "hid_device_name_label": "Cihaz adı: %s",
+    "hid_device_other": "Cihaz",
+    "hid_device_pc": "PC",
+    "hid_device_phone": "Telefon",
+    "hid_device_tablet": "Tablet",
+    "hid_device_tv": "Bululdu:",
+    "hid_device_wearable": "Giyilebilir",
+    "hid_devices": "Cihazlar",
+    "hid_ducky_empty": "Boş Duckyiff dosyası",
+    "hid_ducky_import_error": "Dosya import hatası",
+    "hid_ducky_parse_fail": "Duckyiff'i parlatamaz",
+    "hid_ducky_scripts": "Ducky scripts",
+    "hid_home_spam": "Home Spam",
+    "hid_import_ducky_hint": "DuckyScript ile bir .txt + düğme ile",
+    "hid_import_duckyscript": "İthalat Duckyiff",
+    "hid_keyboard": "Klavye",
+    "hid_long_connection_message": "Bağlantı 10 saniyeden accusations. Bluetooth yeniden başlar ve HID Klavye bölümünü yeniden açın.",
+    "hid_long_connection_title": "Yavaş Bağlantı",
+    "hid_menu": "Menü",
+    "hid_mouse_button_back": "Geri",
+    "hid_mouse_button_forward": "İleri",
+    "hid_mouse_button_left": "Sol",
+    "hid_mouse_button_middle": "Orta",
+    "hid_mouse_button_right": "Sağ",
+    "hid_mute": "Mute",
+    "hid_no_connection": "Aktif HID bağlantısı yok",
+    "hid_no_devices": "Bululan cihazlar yok. Tap yenilendi.",
+    "hid_not_connected": "Bağlanma",
+    "hid_notepad_label": "Notpad text",
+    "hid_notepad_output": "Notpad",
+    "hid_notepad_send_failed": "Notpad için metin gönderemez",
+    "hid_notepad_text_hint": "Metin girin (Latin harfler, sayılar, semboller)",
+    "hid_open": "Aç",
+    "hid_open_link": "Bağlantıyı aç",
+    "hid_pair_permission_required": "PERMISSION REQUIRED",
+    "hid_paired": "Paired",
+    "hid_payloads": "Payloads",
+    "hid_pc_bad_hid": "BAD HID",
+    "hid_pc_controls": "Kontroller",
+    "hid_pc_keyboard": "Klavye",
+    "hid_pc_modes": "HID modları",
+    "hid_pc_mouse": "Fare",
+    "hid_phantom_clicks": "Phantom Clicks",
+    "hid_power": "Güç gücü",
+    "hid_quick_actions": "Hızlı Eylemler",
+    "hid_quiet_connect": "Sessiz bağlantı",
+    "hid_quiet_connect_toast": "Blue Ducky: PIN / onayı olmadan bağlantı...",
+    "hid_reboot": "Yeniden başlat",
+    "hid_reconnect_message": "%s Çifte, ancak NID bağlantısı tamamlanmamıştır. Bluetooth ayarlarında HID profiline göz atın.",
+    "hid_reconnect_title": "Bağlantı Güncellemesi Gerekli",
+    "hid_reconnecting": "Bağlanma...",
+    "hid_scan": "Tara",
+    "hid_scanning": "Scanning...",
+    "hid_scanning_message": "Cihazları aramak...",
+    "hid_screenshot": "Ekran görüntüsü",
+    "hid_screenshot_spam": "Ekran görüntüsü Spam",
+    "hid_script_flipper_mac_missing": "Flipper Mac senaryosu bulunamadı",
+    "hid_script_flipper_win_missing": "Flipper Win senaryo bulunamadı",
+    "hid_select_device_upper": "SEBICE",
+    "hid_select_scripts": "Senaryoları seçin",
+    "hid_service_channel_name": "HID Klavye Servisi",
+    "hid_service_notification_text": "Bluetooth HID profili aktif",
+    "hid_service_notification_title": "HID Klavye",
+    "hid_shutdown": "Shutdown",
+    "hid_title": "HID Klavye",
+    "hid_touchpad": "Touchpad",
+    "hid_url_to_open": "URL açık",
+    "hid_volume_down": "Cilt -",
+    "hid_volume_down_action": "Sesi kıs",
+    "hid_volume_spam": "Cilt Spam",
+    "hid_volume_up": "Cilt +",
+    "hid_volume_up_action": "Volume Up Up",
+    "ir_add_to_favorites": "Favorilere Ekle",
+    "ir_brands_not_found_category": "Kategori için hiçbir işaret bulunamadı %s",
+    "ir_button_unnamed": "Unnamed",
+    "ir_cat_air_conditioners": "Hava Durumcular",
+    "ir_cat_air_purifiers": "Hava Purifiers",
+    "ir_cat_audio": "Ses Sistemleri",
+    "ir_cat_av_receivers": "AV Alıcılar",
+    "ir_cat_banners": "IR Banners",
+    "ir_cat_bidets": "Bitirenler",
+    "ir_cat_bluray": "Blu-Ray Oyuncular",
+    "ir_cat_cable_stb": "Kablo Set-Top Kutu",
+    "ir_cat_cameras": "Kameralar",
+    "ir_cat_car_multimedia": "Araba",
+    "ir_cat_cctv": "CCTV",
+    "ir_cat_cd_players": "CD Oyuncular",
+    "ir_cat_clocks": "Saatler",
+    "ir_cat_computers": "Bilgisayarlar",
+    "ir_cat_consoles": "Oyun Konsolları",
+    "ir_cat_converters": "Garantili Evler",
+    "ir_cat_digital_signage": "Dijital İşaretaj",
+    "ir_cat_dvb_t": "DVB-T Alıcılar",
+    "ir_cat_dvd_players": "DVD Oyuncular",
+    "ir_cat_fans": "Fans Fans",
+    "ir_cat_fireplaces": "Fireplaces",
+    "ir_cat_head_units": "Arabalar Bölümler",
+    "ir_cat_heaters": "Rezistans",
+    "ir_cat_humidifiers": "Humidifiers",
+    "ir_cat_jammer": "IR spot",
+    "ir_cat_kvm": "KVM anahtarları",
+    "ir_cat_laserdisc": "LazerDisc",
+    "ir_cat_led_lighting": "LED Aydınlatma",
+    "ir_cat_minidisc": "MiniDisc Oyuncular",
+    "ir_cat_miscellaneous": "Miscellaneous",
+    "ir_cat_monitors": "Monitors",
+    "ir_cat_multimedia": "Medya",
+    "ir_cat_photo_frames": "Dijital Fotoğraf Frames",
+    "ir_cat_projectors": "Projektörler",
+    "ir_cat_soundbars": "Sesbarss",
+    "ir_cat_speakers": "Konuşmacılar",
+    "ir_cat_standard": "Standart Flipper Database",
+    "ir_cat_streaming": "Akış Cihazları",
+    "ir_cat_touchscreens": "Touchscreens",
+    "ir_cat_toys": "Oyuncak Oyuncakları Oyuncakları",
+    "ir_cat_tv": "Bululdu:",
+    "ir_cat_tv_tuners": "TV Tuners",
+    "ir_cat_universal": "Evrensel Uzaktanlar",
+    "ir_cat_vacuum_cleaners": "Vakumlu temizleyiciler",
+    "ir_cat_vcr": "VCRs",
+    "ir_cat_video_conferencing": "Video Conferencing",
+    "ir_cat_whiteboards": "Electronic Whiteboards",
+    "ir_cat_window_cleaners": "Pencereyi Temizler",
+    "ir_current_signal": "Current sinyal:",
+    "ir_delete": "Sil",
+    "ir_edit_mode": "Edit Mode",
+    "ir_favorites": "Favoriler Favoriler",
+    "ir_file_not_found": "Dosya %s bulunamadı veya komutlar yok",
+    "ir_flipper_db_not_found": "Flipper veritabanı bulunamadı veya boş",
+    "ir_flipper_remotes": "IR Uzaktans (Flipper)",
+    "ir_import": "İthalat .ir file",
+    "ir_import_failed": "Dosyadan gelen komutları ithal edemez",
+    "ir_import_select_ir": "Bir .ir dosyasını seçin",
+    "ir_jammer": "IR spot",
+    "ir_jammer_description": "Bir TV veya diğer bir cihazda telefonunuzu işaret ederken, uzaktan kontrol komutlarına cevap vermeyecek ve onları görmezden gelecektir.",
+    "ir_jammer_send_done": "Hazırlayın",
+    "ir_jammer_sending_signals": "İşaretler gönderin...",
+    "ir_jammer_storm_cd": "IR fırtınayı durdur",
+    "ir_jammer_storm_start": "IR fırtınasını başlatın",
+    "ir_label_results": "Sonuçlar",
+    "ir_loading": "Yükleniyor...",
+    "ir_loading_remotes": "Uzaklar Yükleniyor...",
+    "ir_meta_brand": "Mark: %s",
+    "ir_meta_category_brand": "Kategori: %1$s\nMark: %2$s",
+    "ir_meta_category_only": "Kategori: %s",
+    "ir_no_commands_for": "Hayır komutları %s",
+    "ir_no_favorites": "Uzaklar bir canlı olarak görünür",
+    "ir_no_user_remotes": "Henüz özel kontrolleri henüz eklemediniz. Touch + ithal etmek için .ir. dosyaları.",
+    "ir_not_found": "Hiçbir şey bulunamadı hiçbir şey bulunamadı",
+    "ir_remote_not_found": "Uzak bulunamadı",
+    "ir_remotes_for_brand_not_found": "Kontroller için kontroller %s Veritabanı veritabanı içinde",
+    "ir_remove_from_favorites": "Favorilerden Çıkarın",
+    "ir_rename": "Rename",
+    "ir_rename_remote": "Rename Uzaktan",
+    "ir_search": "Ara",
+    "ir_search_brand": "Arama Marka",
+    "ir_section_digits": "Digits",
+    "ir_section_media": "Medya",
+    "ir_section_menu": "Menü",
+    "ir_section_other": "Diğer",
+    "ir_section_unknown_cmds": "Bilinmeyen komutlar",
+    "ir_select_category": "Kategori Seç",
+    "ir_send_all": "Tüm jammer sinyalleri gönderin",
+    "ir_sending": "Gönder...",
+    "ir_smart_search": "Smart Search",
+    "ir_storm": "Rebound",
+    "ir_storm_done": "Done!",
+    "ir_storm_error": "IR fırtına hatası: %s",
+    "ir_storm_loading": "Yükleniyor...",
+    "ir_storm_ready": "Hazırla",
+    "ir_storm_sending": "Gönder...",
+    "ir_storm_stopped": "Durduruldu",
+    "ir_tv_db_not_found": "TV veritabanı bulunamadı veya giriş yok",
+    "ir_tv_remotes": "IR Uzaktans (TV)",
+    "ir_tv_short": "Bululdu:",
+    "ir_universal_remotes": "Evrensel Uzaktanlar",
+    "ir_user_remotes": "Uzaklarınız",
+    "ir_user_remotes_title": "Uzaklarınız",
+    "lan_camera_again": "Yeniden tara",
+    "lan_camera_description": "Ağınızı kameralar için kontrol edin.",
+    "lan_camera_found_count": "Bululdu: %d",
+    "lan_camera_mac": "MAC: %s",
+    "lan_camera_mac_unknown": "bilinmiyor",
+    "lan_camera_ports": "Ports: %s",
+    "lan_camera_result_empty": "Ağda bulunan hiçbir kamera bulunamadı",
+    "lan_camera_result_found": "Kameralar bulundu: %d",
+    "lan_camera_results_empty_header": "Kameralar bulunamadı",
+    "lan_camera_results_empty_sub": "Ağınızda IP kameraları bulunamadı",
+    "lan_camera_results_found_header": "Kameralar bulundu: %d",
+    "lan_camera_results_found_sub": "Keşfetli cihazlar aşağıda listelenmiştir",
+    "lan_camera_results_list_title": "Keşfetli kameralar",
+    "lan_camera_results_title": "Sonuçlar",
+    "lan_camera_scanning": "Kameralara bakmak...",
+    "lan_camera_start": "Başlat",
+    "lan_camera_title": "Kamera Arama",
+    "lan_mitm_active": "Etkin",
+    "lan_mitm_all_desc": "Deneysel ağ portalı. Cihazın davranışı ağ ve işletim sistemine bağlıdır.",
+    "lan_mitm_all_start": "Başlat",
+    "lan_mitm_all_stop": "Durdur",
+    "lan_mitm_entry": "LAN MITM",
+    "lan_mitm_entry_desc": "Kök Ağları: ARP ve Trafik Kontrolleri",
+    "lan_mitm_gateway": "Link kapı: %s",
+    "lan_mitm_iface": "Interface: %s",
+    "lan_mitm_ip": "IP: %s",
+    "lan_mitm_log": "Trafik",
+    "lan_mitm_log_auth": "Sonraki elemente kaybolun %s",
+    "lan_mitm_log_empty": "Ağ trafiği için bekleyin...",
+    "lan_mitm_log_sni": "HTTPS (Bu noktaya kadar) %s",
+    "lan_mitm_network": "Ağ",
+    "lan_mitm_root_checking": "Kök kontrol etmek...",
+    "lan_mitm_root_no": "Kök: Yok Kök: Yok",
+    "lan_mitm_root_warn": "Bu ağ araçları kök erişim gerektirir.",
+    "lan_mitm_root_yes": "Root: available",
+    "lan_mitm_ssid": "SSID: %s",
+    "lan_mitm_title": "LAN MITM",
+    "lan_scanner_brand": "Mark: %s",
+    "lan_scanner_btn_audit": "Denetim",
+    "lan_scanner_btn_info": "Bilgi",
+    "lan_scanner_btn_reboot": "Yeniden başlat",
+    "lan_scanner_complete": "Scan Complete",
+    "lan_scanner_desc": "Mevcut Wi-Fi ağında bulunan Discover devices",
+    "lan_scanner_device_actions": "Araçlar",
+    "lan_scanner_found_devices": "Onlarla tanıştılar. %d cihazlar cihazları",
+    "lan_scanner_log_audit_creds": "Varsayılan kimlikleri kontrol edin...",
+    "lan_scanner_log_audit_starting": "Güvenlik denetimine başlayın...",
+    "lan_scanner_log_audit_warn_creds": "WARN: yönetici /admin bulundu!",
+    "lan_scanner_log_audit_warn_wps": "WARN: WPS V1 Enabled",
+    "lan_scanner_log_audit_wps": "WPS statüsünü kontrol edin...",
+    "lan_scanner_log_fetching_info": "Fetching sistemi bilgi...",
+    "lan_scanner_log_reboot_auth": "Anahtarı göz ardı et %s...",
+    "lan_scanner_log_reboot_sending": "Yeniden yeniden başlatma komutunu gönderin...",
+    "lan_scanner_log_reboot_success": "SUCCESS: Reboot sinyali gönderildi!",
+    "lan_scanner_log_vendor": "Üretici: %s",
+    "lan_scanner_log_wifi_scanning": "Wi-Fi modüllerini tarayın...",
+    "lan_scanner_ports": "Ports: %s",
+    "lan_scanner_ready": "komutlar için hazır ...",
+    "lan_scanner_router_actions": "ROUTER ACTIONS",
+    "lan_scanner_scanning": "Tarama ağı...",
+    "lan_scanner_subnet": "Subbred: %s",
+    "lan_scanner_title": "LAN tarayıcı",
+    "lan_scanner_wake_on_lan": "WakeOnLan",
+    "lan_scanner_wol_sent": "Sent",
+    "lan_scanner_you": "SİZİN SİZİN",
+    "lan_tools_item_cameras": "Kamera Arama",
+    "lan_tools_item_cameras_desc": "ONVIF ve IP kamera",
+    "lan_tools_item_scanner": "LAN tarayıcı",
+    "lan_tools_item_scanner_desc": "Mevcut Wi-Fi ağında bulunan Discover devices",
+    "lan_tools_subtitle": "Yerel ağ araçları",
+    "lan_tools_title": "LAN Tools",
+    "language_russian": "Rusça",
+    "mtrl_button_collapsed_content_description": "Colaltd",
+    "mtrl_button_expanded_content_description": "Genişledi",
+    "my_cam_entry_desc": "Ev kameranızdan canlı bes (admin/admin)",
+    "my_cam_error_title": "Hata",
+    "my_cam_live_label": "Canlı",
+    "my_cam_log_no_video": "Kameralardan video alamaz, bulundu",
+    "my_cam_log_title": "Günlük",
+    "my_cam_no_cameras": "Ağda kamera yok",
+    "my_cam_retry": "Tekrar tekrar deneyin",
+    "my_cam_retry_all": "Ağdaki tüm cihazlara deneyin",
+    "my_cam_status_checking": "Başarı, şifreyi kontrol edin...",
+    "my_cam_status_next_device": "Başka bir cihaza taşınmak",
+    "my_cam_status_no_reply": "İstek için cevap yok",
+    "my_cam_status_requesting": "Bir istek %1$s…",
+    "my_cam_status_searching": "Cihazları aramak için",
+    "nav_bluetooth": "Bluetooth",
+    "nav_modules": "İşlevler",
+    "nav_other": "Diğer",
+    "nav_rail_collapsed_a11y_label": "Daraltıldı",
+    "nav_rail_expanded_a11y_label": "Genişletildi",
+    "nav_settings": "Ayarlar",
+    "network_hub_active_pinned": "Bağlı",
+    "network_hub_admin_panel": "Admin Panel",
+    "network_hub_admin_panel_desc": "Yönlendiricinin web panelini aç",
+    "network_hub_card_description": "Network Scanning, DoS Wi-Fi ve Gross Password Force",
+    "network_hub_error_message": "Uygulama, seçilmiş ağla bir bağlantı tespit etmedi.",
+    "network_hub_error_title": "Bağlantı hatası",
+    "network_hub_log_connected": "Ağa Saldırı DoS: %1$s",
+    "network_hub_log_failed": "Başlangıç: %1$s",
+    "network_hub_log_flood": "Parmak- %1$d gönderilen paketler gönderilen paketler",
+    "network_hub_log_prepare": "UDP paketlerini 255.255.255.255'e göndermeye hazır: 8888",
+    "network_hub_log_sent": "Packet başarıyla gönderildi",
+    "network_hub_log_target": "Saldırının amacı: %1$s",
+    "network_hub_logs_title": "Packet log",
+    "network_hub_need_location": "Konum izni Wi-Fi ağı görüntülemek için gereklidir.",
+    "network_hub_next": "İleri",
+    "network_hub_password_message": "\"The Wi-Fi password to validate \"%1$sEmin olmak için",
+    "network_hub_password_title": "Ağa bağlan",
+    "network_hub_requires_android_10": "Android 10 veya daha sonra Wi-Fi özel bağlantılar için gereklidir.",
+    "network_hub_select_network": "Alt unvanı devre dışı bırakmak mümkün%1$s\"ve ona bağlanmak",
+    "network_hub_started_title": "Cihazları arıyor...",
+    "network_hub_test": "DoS",
+    "network_hub_title": "WI-FI Saldırıları",
+    "network_hub_title_en": "Wi-Fi DoS",
+    "network_hub_waiting_message": "Full-time%1$s\" Wi-Fi ayarları ve uygulamaya geri dönün.",
+    "network_hub_waiting_title": "Bağlantı için bekleme",
+    "nfc_add": "Ekle",
+    "nfc_apply_erase": "Verileri silmek için telefonun yakınında etiketi tutun",
+    "nfc_apply_tag": "Telefona etiket uygulayın",
+    "nfc_apply_write": "Verileri yazmak için telefondaki etiketi tut",
+    "nfc_audio_spoofer": "NFC Audio Spoof",
+    "nfc_audio_spoofer_desc": "NFC etiketi uzaktan ses kontrolü için web sitesi ile emulation",
+    "nfc_cannot_emulate": "Bu etiket emated edilemez",
+    "nfc_contact_no_phone": "Bu temasın telefon numarası yok",
+    "nfc_contact_permission_rationale": "Bir sayı seçmeye izin vermek için iletişim erişim izin",
+    "nfc_content": "İçerik",
+    "nfc_copy_for_emulation": "Bağışlama için kopya etiketi",
+    "nfc_copy_tag_default": "Tag kopya",
+    "nfc_copy_tag_name": "Kopyalama %s",
+    "nfc_copy_title": "Tag kopya",
+    "nfc_data_written": "Data written",
+    "nfc_delete_selected": "Seçilmiş etiketler",
+    "nfc_detail_1": "Telefonun yakınında tutun",
+    "nfc_detail_10": "Gizle HEX",
+    "nfc_detail_11": "Show HEX",
+    "nfc_detail_12": "Enabled",
+    "nfc_detail_13": "Engelliler",
+    "nfc_detail_14": "Bilinmiyor",
+    "nfc_detail_15": "Analiz",
+    "nfc_detail_16": "Tür",
+    "nfc_detail_17": "EMV kart",
+    "nfc_detail_18": "Tip 4 emulation için URL'yi kurtarın",
+    "nfc_detail_19": "Bu etiket emated edilemez",
+    "nfc_detail_2": "NFC mevcut değildir",
+    "nfc_detail_20": "Tag kopya",
+    "nfc_detail_21": "Tarih Tarihi Tarihi",
+    "nfc_detail_3": "Telefon ayarlarında NFC’yi aç",
+    "nfc_detail_4": "Teknoloji Teknolojileri",
+    "nfc_detail_5": "Evet",
+    "nfc_detail_6": "Hayır",
+    "nfc_detail_7": "Memory boyut",
+    "nfc_detail_8": "Kayıt türü",
+    "nfc_detail_9": "İçerik",
+    "nfc_disabled": "Engelliler",
+    "nfc_disabled_off": "NFC kapalıdır. Telefon ayarlarında enable NFC.",
+    "nfc_edit_mode": "Düzenle",
+    "nfc_emulate": "NFC Emulation",
+    "nfc_emulate_description": "URL etiketi oluşturun ve NFC Forum Type 4",
+    "nfc_emulating": "Emulating...",
+    "nfc_emulation_title": "NFC Tag Emulation",
+    "nfc_emv_type_card": "EMV kart",
+    "nfc_enable_instruction": "Telefon ayarlarında NFC’yi aç",
+    "nfc_enabled": "Enabled",
+    "nfc_enter_name": "Etiket adını gir",
+    "nfc_error_empty_name": "Etiket adını gir",
+    "nfc_error_invalid_url": "Geçerli URL girin",
+    "nfc_exit_edit_mode": "Çıkış",
+    "nfc_go": "Git",
+    "nfc_hce_not_supported": "HCE bu cihazda desteklenmez.",
+    "nfc_hce_ready": "NFC Forum Type 4 · telefonu bir okuyucuya getiriyor",
+    "nfc_hide_hex": "Gizle HEX",
+    "nfc_history": "Tarih Tarihi Tarihi",
+    "nfc_info_title": "Tag Bilgileri",
+    "nfc_label_email": "E-posta e-posta e-posta e-posta e-posta",
+    "nfc_label_email_subject": "Konu (isteğe)",
+    "nfc_label_name": "Ad",
+    "nfc_label_plain_text": "Metin",
+    "nfc_label_ssid": "SSID (network name)",
+    "nfc_label_wifi_password": "Wi-Fi Şifre",
+    "nfc_loading": "Yükleniyor...",
+    "nfc_memory_size": "Memory boyut",
+    "nfc_new_tag": "Yeni NFC Tag",
+    "nfc_next": "İleri",
+    "nfc_no": "Hayır",
+    "nfc_no_tags": "Henüz NFC etiketleriniz yok",
+    "nfc_open_payment_settings": "Açık NFC ödeme ayarları",
+    "nfc_open_settings": "Ayarlar",
+    "nfc_password": "Şifre koruma koruma",
+    "nfc_present_to_reader": "Okuyucuya mevcut telefon.",
+    "nfc_prompt_enable": "NFC'de Ayarlar",
+    "nfc_read": "Read Tag",
+    "nfc_read_description": "NFC etiketini okuyun ve tam bilgi göster",
+    "nfc_read_title": "Read Tag",
+    "nfc_readonly": "Oku-sadece",
+    "nfc_record_type": "Kayıt türü",
+    "nfc_retry": "Tekrar dene",
+    "nfc_saved_message": "Tag \"NFC Emulation\" bölümüne kaydedildi",
+    "nfc_saved_title": "Tag Kurtarıldı",
+    "nfc_section_analysis": "Tag Analiz",
+    "nfc_section_emv": "Banka Kartı",
+    "nfc_section_link": "Link in Tag",
+    "nfc_section_main": "Ana Bilgi",
+    "nfc_set_default_payment": "Dolphy’yi varsayılan ödeme uygulaması olarak ayarla",
+    "nfc_show_hex": "Show HEX",
+    "nfc_status_disabled": "NFC kapalı",
+    "nfc_tag_label_unknown": "etiket",
+    "nfc_tag_not_found": "Tag bulunamadı",
+    "nfc_technologies": "Teknoloji Teknolojileri",
+    "nfc_tool_erase_desc": "Basit bir kullanıcı NDEF verileri değerli bir etiket",
+    "nfc_tool_erase_title": "Erase NFC etiketi",
+    "nfc_tools": "NFC Tools",
+    "nfc_tools_description": "NFC etiketi araçları",
+    "nfc_troll_description": "Basit NFC etiketlerin Kütüphaneleri",
+    "nfc_trolls": "NFC Tags",
+    "nfc_type": "Tür",
+    "nfc_uid": "UID (hex)",
+    "nfc_unavailable": "NFC mevcut değildi",
+    "nfc_unknown": "Bilinmiyor",
+    "nfc_verdict": "Verdict",
+    "nfc_waiting": "NFC için bekleyin...",
+    "nfc_writable": "Writable",
+    "nfc_write_add_from_contacts": "kontaklardan alın",
+    "nfc_write_add_from_contacts_desc": "Adresiniz kitaplarından seçin",
+    "nfc_write_add_phone": "Telefon numarası ekle",
+    "nfc_write_add_phone_desc": "Sayıyı manuel olarak girin",
+    "nfc_write_contact_title": "etiketle ilgili iletişim",
+    "nfc_write_enter_phone_title": "Telefon numarası girin",
+    "nfc_write_failed": "Operasyon başarısız oldu",
+    "nfc_write_menu_title": "NFC etiketine yaz",
+    "nfc_write_pick_type": "Ne yazacağını seçin",
+    "nfc_write_title": "Etikete yaz",
+    "nfc_write_type_contact": "İletişim İletişim",
+    "nfc_write_type_contact_desc": "Telefon numarası veya vCard",
+    "nfc_write_type_email": "E-posta e-posta e-posta e-posta e-posta",
+    "nfc_write_type_email_desc": "Posta uygulamasında açık form",
+    "nfc_write_type_text": "Düz metin çevirisi",
+    "nfc_write_type_text_desc": "Arbitrary text",
+    "nfc_write_type_url_desc": "Gözden Geçiren bir bağlantı açın",
+    "nfc_write_type_wifi": "Wi-Fi ağ",
+    "nfc_write_type_wifi_desc": "SSID ve şifre (text record)",
+    "nfc_yes": "Evet",
+    "nrf_advertised_count": "Hizmetler ilan etti (%d)",
+    "nrf_audio": "Ses Ses",
+    "nrf_battery": "Battery Battery",
+    "nrf_battery_level": "Battery seviyesi",
+    "nrf_bluetooth_off_message": "Yakındaki cihazları keşfetmek için Bluetooth'a dön",
+    "nrf_bluetooth_off_title": "Bluetooth kapalı",
+    "nrf_capabilities": "Yetenekler",
+    "nrf_characteristics_count": "%d Özellikleri karakteristik özellikler",
+    "nrf_connectable": "Connectable Connectable",
+    "nrf_disconnect": "Bağlantıyı kes",
+    "nrf_filter_known_vendors": "Bilinen satıcılar",
+    "nrf_filter_named_only": "Sadece Add sadece",
+    "nrf_gatt_count": "PH Gamepad Listesi%d)",
+    "nrf_keyboard": "Klavye",
+    "nrf_last_seen": "Son olarak görüldü",
+    "nrf_last_seen_hours": "Yap %1$d {",
+    "nrf_last_seen_minutes": "Yap %1$d PC",
+    "nrf_last_seen_now": "Şimdi sadece şimdi",
+    "nrf_last_seen_seconds": "Yap %1$d s",
+    "nrf_mac": "MAC adresi",
+    "nrf_more_services": "%d Hizmetler artı hizmetler artı",
+    "nrf_profile": "Profil",
+    "nrf_scanner_all": "Tümü",
+    "nrf_scanner_beacon": "Beacon Beacon",
+    "nrf_scanner_brand_name": "Marka Adı",
+    "nrf_scanner_bypass_1": "Hide-in-the-box",
+    "nrf_scanner_bypass_2": "Hayır. Hayır.",
+    "nrf_scanner_bypass_3": "Nefs-i Nefs-i Nefs-i Nefs-i Nefs-i Nef",
+    "nrf_scanner_classic": "Ek",
+    "nrf_scanner_connect": "Bağlan",
+    "nrf_scanner_connecting": "Bağlanma...",
+    "nrf_scanner_description": "Nefsimi organize et, ne de kendini göster, ne de kendini göster, ne de kendini göster, ne de kendini göster,",
+    "nrf_scanner_device_type": "Device Type",
+    "nrf_scanner_error": "Bağlantı hatası",
+    "nrf_scanner_fast_pair": "Hızlı Pair",
+    "nrf_scanner_found": "Bululdu: %d cihazlar cihazları",
+    "nrf_scanner_idle": "Idle",
+    "nrf_scanner_mac_address": "MAC adresi",
+    "nrf_scanner_manufacturer": "Satışcı",
+    "nrf_scanner_no_devices": "Bulamayan cihazlar bulunamadı",
+    "nrf_scanner_scanning": "Scanning...",
+    "nrf_scanner_services": "Hizmetler Hizmetler",
+    "nrf_scanner_signal_strength": "Signal Strength",
+    "nrf_scanner_start": "Taramayı başlat",
+    "nrf_scanner_stop": "Dur taramayı Durdur",
+    "nrf_scanner_success": "Bağlantı başarılı",
+    "nrf_scanner_tap_to_start": "Tap \"Start Scanning\" to start",
+    "nrf_scanner_title": "NRF Browser",
+    "nrf_scanner_vulnerable": "Güvenlik açığı bulunan",
+    "nrf_scans": "Apparitions: %1$d",
+    "nrf_signal": "Signal Strength",
+    "nrf_signal_excellent": "Mükemmel",
+    "nrf_signal_fair": "Orta",
+    "nrf_signal_good": "İyi",
+    "nrf_signal_very_weak": "Çok zayıf",
+    "nrf_signal_weak": "Weak",
+    "nrf_sort_name": "Adına andolsun",
+    "nrf_sort_signal": "sinyale yemin ederim",
+    "nrf_tx_power": "Tx güç gücü",
+    "nrf_type": "Device Type",
+    "nrf_unknown": "Bilinmiyor",
+    "nrf_unknown_device": "Bilinmeyen cihaz",
+    "nrf_vendor": "Satışcı",
+    "ok": "Tamam",
+    "onboarding_in_dolphy": "Dolphy’ye!",
+    "onboarding_next": "İleri",
+    "onboarding_tagline": "Evrensel\nuzaktan kumanda",
+    "onboarding_welcome": "Hoş geldin",
+    "open": "Aç",
+    "other_bad_usb": "USB HID",
+    "other_bad_usb_desc": "Ducky senaryosu · Gadget USB HID (root)",
+    "other_dolphy_chat_desc": "Diğer Dolphy kullanıcıları ile sohbet",
+    "other_hid": "HID Klavye",
+    "other_hid_desc": "Kablosuz Bluetooth klavye /mouse",
+    "other_ir_flipper": "IR Uzaktans (Flipper)",
+    "other_ir_flipper_desc": "IR uzaktan veritabanı Flipper-IRDB-main",
+    "other_ir_jammer": "IR spot",
+    "other_ir_jammer_desc": "Başkalarını, uzak kontrolleriyle engelleyici cihazınızı kontrol etmekten alıkoymasını önler",
+    "other_ir_storm": "Rebound",
+    "other_ir_storm_desc": "Tüm TV'lere güç gönderin",
+    "other_ir_tv": "IR Uzaktans (TV)",
+    "other_ir_tv_desc": "IR kontrol veritabanı TV klasörü (en iyi IR veritabanı)",
+    "other_ir_universal": "Evrensel Uzaktanlar",
+    "other_ir_universal_desc": "TV, klima, sesli, projektörler (dönüşümlü-kanşav)",
+    "other_network_hub": "Network Tanı Hub",
+    "other_network_hub_desc": "Kendi ağ altyapınızın accusations testleri ve bağlantınızın aşırı yük altında stabilitesinin geçerliliği.",
+    "other_nfc": "NFC Tools",
+    "other_nfc_desc": "NFC etiketi araçları",
+    "other_qr_tools": "QR Tools",
+    "other_qr_tools_desc": "QR kodu nesli ve yerel ses kontrolü",
+    "other_scanners": "Tarayıcılar",
+    "other_scanners_desc": "ABD radarı ve BLE/Wi-Fi cihazı dedektörleri",
+    "other_serial": "Seri Terminal Terminal",
+    "other_serial_desc": "USB-OTG veya bütünleşik limanları kullanarak UART köprü (gerçek kök)",
+    "other_title": "Ek Özellikler",
+    "other_whisperpair": "Whisper Pair",
+    "other_whisperpair_desc": "Intercept Bluetooth konuşmacıları ve kulaklıklar",
+    "pabout_body_bluetooth": "meet.get Android () reklam, GATT müşteri / sunucu, RFCOMM, bağlantı ve adaptasyon ayrıntıları sunar. api.getDevice () BLE tarama, donanım yetenekleri ve sistem işlemleri sunar.",
+    "pabout_body_hook_modes": "Ekranı değiştirmek, üstte ücretsiz bir katman aşırı, üst ve alt bir malzeme 3 paneli ekleyin ve fab kompakt bir yüzen eylem ekler.Yol maskeleri desteği *, e.g. go _ * or other / *.",
+    "pabout_body_hooks": "freely _ ekran () bir çakışma, bir FAB veya tamamen orijinal ekranı değiştirir. Hook _ action () veriyi ele alır ve eylemi yönetebilir veya iptal edebilir. _ servisi () öncelikli ve orijinal bir alternatifle bir sistemin yeni bir uygulamasını yükleyin.",
+    "pabout_body_root": "Özde (), api.getContext (), api.getClassLoader (), api.get Android () ve api.getDevice () gerçek Dolphy Java nesneler.shellExec (), api.shizukuExec (), api.shizukuExec () ve api.smartExec ().",
+    "pabout_body_trusted": "Bir Python eklenti Dolphy sürecinde çalışır ve uygulama izinleri, iç veriler, Kök ve Shizuku alabilirsiniz. Sadece okuduğunuz veya tamamen güvendiğiniz kod yükleyin.",
+    "pabout_body_wifi": "Wi-Fi tarama, arayüzler, DHCP, kanallar, NSD, soketler, mevcut. HTTP Android WifiManager. Root ve Shizuku, cihazın ağ araçlarını kilidini açın.",
+    "pabout_section_full_access": "Full access Full access Full",
+    "pabout_section_hooking": "App kancaing",
+    "pabout_section_minimal": "Minimal plugin",
+    "pabout_section_radio": "Radyo arayüzleri",
+    "pabout_section_state": "Devlet ve ayarlar",
+    "pabout_title_bluetooth": "- - -————————————————————————",
+    "pabout_title_hook_modes": "Ekran kanca modları",
+    "pabout_title_hooks": "Ekranlar, eylemler ve hizmetler",
+    "pabout_title_root": "Android, Root and Shizuku",
+    "pabout_title_trusted": "Güvenilen model",
+    "pabout_title_wifi": "Wi-Fi ve ağ",
+    "passport_bad_hid": "BAD HID senaryoları çalışır",
+    "passport_butthurt": "“Nefsli, ne de bir nefse, ne de",
+    "passport_icounter": "XP (icr)",
+    "passport_ir_send": "IR sinyalleri gönderilen",
+    "passport_level": "Seviye",
+    "passport_level_up_pending": "Seviyeye devam etmek için",
+    "passport_max_level": "“Gerekli”, “Gerekli”, “Gerekli”,",
+    "passport_mood": "Mood",
+    "passport_name_label": "Ad",
+    "passport_name_limit_hint": "İnsanlarla birlikte, insanlar için,",
+    "passport_nfc_emulate": "NFC emulations başladı",
+    "passport_nfc_read": "NFC kartları oku",
+    "passport_rename_title": "Rename",
+    "passport_stats": "Pasaport: İstatistikler",
+    "passport_title": "Pasaport",
+    "passport_xp": "İnsanlar, insanlar için,",
+    "plugin_about_guide_body": "Bir eklenti tek bir Python metin dosyasıdır.Dolphy coverin. Ayarlar → General → Plugins → Dosyayı seçin.\n\nNotlar malzeme 3 Extensive ekranları oluşturabilir, modüller ekleyebilir, Bluetooth, Wi-Fi, NFC, IR, USB, dosyalar, ağlar, Root, Shizuku ve Shell, Android Java sınıfları ve erişim Dolphy'in iç kısımlarına erişebilirsiniz.",
+    "plugin_about_guide_title": "Eklenti geliştirme kılavuzu",
+    "plugin_about_title": "Eklentiler hakkında",
+    "plugin_ask_download_body": "Bu seçenek kapalıysa eklenti dosyaları otomatik indirilir",
+    "plugin_ask_download_title": "Eklentiler dosya indirmeden önce sor",
+    "plugin_auto_safe_mode_body": "Eklentiler çalışırken uygulama çökerse sonraki açılışta güvenli mod devreye girer ve hatalı eklenti kapatılır",
+    "plugin_auto_safe_mode_title": "Çökme sonrası güvenli modu otomatik aç",
+    "plugin_auto_update_body": "Kurulu eklentileri katalogdaki son sürümlerine güncelle",
+    "plugin_auto_update_title": "Mağazadan otomatik güncelle",
+    "plugin_capability_ble_spam": "Özel BLE Spam modları",
+    "plugin_capability_bluetooth": "Bluetooth ve BLE",
+    "plugin_capability_dex": "DEX yükleme ve sınıflara erişim",
+    "plugin_capability_download": "Dosya indirme",
+    "plugin_capability_files": "Eklenti dosyaları ve kaynakları",
+    "plugin_capability_hooks": "Ekran ve uygulama mantığını değiştirme",
+    "plugin_capability_infrared": "Kızılötesi verici",
+    "plugin_capability_network": "Ağ istekleri",
+    "plugin_capability_root": "Kök Köklü Kök",
+    "plugin_capability_shell": "Kabuk komutları",
+    "plugin_capability_shizuku": "Shizuku",
+    "plugin_capability_usb": "USB ve Bad HID",
+    "plugin_capability_wifi": "Wi-Fi",
+    "plugin_delete": "Sil",
+    "plugin_documentation_site": "Belgeler",
+    "plugin_download_allow": "İzin ver",
+    "plugin_download_deny": "Reddet",
+    "plugin_download_permission_body": "%1$s eklentisi %2$d dosya (%3$s) indirmek için izin istiyor.",
+    "plugin_download_permission_title": "Dosya indirme",
+    "plugin_download_unknown_size": "boyut bilinmiyor",
+    "plugin_empty_center": "Henüz eklenti kurmadın",
+    "plugin_host_empty_screen": "Boş ekran",
+    "plugin_host_not_installed": "«%1$s» eklentisi kurulu değil.\nEklenti Yöneticisi’nden bir .dolphyplugin dosyası içe aktar.",
+    "plugin_host_title": "Eklenti",
+    "plugin_manager_about": "Daha fazla bilgi",
+    "plugin_manager_card_body": "Tek bir .dolphyplugin metin dosyasıyla özel ekranlar oluşturabilir ve Bluetooth, Wi-Fi, NFC, IR, USB, Root, Shizuku, kabuk ve Android API’sine erişebilirsin.",
+    "plugin_manager_card_title": "Dolphy için Python eklentileri",
+    "plugin_manager_empty": "Henüz eklenti yok. Yukarıdan bir .dolphyplugin dosyası seç.",
+    "plugin_manager_error": "Hata: %1$s",
+    "plugin_manager_installed": "Kuruldu",
+    "plugin_manager_installed_msg": "Kuruldu: %1$s",
+    "plugin_manager_installed_toast": "%1$s eklentisi kuruldu",
+    "plugin_manager_pick_file": "Dosya seç",
+    "plugin_manager_title": "Eklentiler",
+    "plugin_open_with_hint": "Kurulum için eklenti dosyasında “Birlikte aç” seçeneğini kullanıp Dolphy’yi seç",
+    "plugin_pin": "Sabitle",
+    "plugin_preview_about": "Bu eklenti hakkında",
+    "plugin_preview_author": "Geliştirici",
+    "plugin_preview_details": "Ayrıntılar",
+    "plugin_preview_file": "Dosya",
+    "plugin_preview_identifier": "Kimlik",
+    "plugin_preview_install": "Kur",
+    "plugin_preview_install_error": "Kurulum hatası: %1$s",
+    "plugin_preview_install_success": "Eklenti kuruldu",
+    "plugin_preview_installed": "Kuruldu",
+    "plugin_preview_invalid": "Eklenti açılamadı",
+    "plugin_preview_no_description": "Geliştirici açıklama eklememiş.",
+    "plugin_preview_permissions": "Yetenekler ve erişim",
+    "plugin_preview_permissions_none": "Kodda özel yetenek algılanmadı",
+    "plugin_preview_security": "Tam erişim",
+    "plugin_preview_security_body": "Eklenti Dolphy içinde çalışır ve uygulamanın izinlerini, Android API’lerini, Bluetooth, Wi-Fi, USB, Root ve Shizuku’yu kullanabilir. Yalnızca güvendiğin geliştiricilerin dosyalarını kur.",
+    "plugin_preview_size": "Boyut",
+    "plugin_preview_title": "Dolphy eklentisi",
+    "plugin_preview_update": "Güncelle",
+    "plugin_safe_mode_copy_log": "Kopyalama logu",
+    "plugin_safe_mode_crash_body": "Günlüğü kopyala",
+    "plugin_safe_mode_crash_title": "Güvenli mod açık ve eklentilerin devre dışı bırakıldı.",
+    "plugin_safe_mode_disable": "Uygulama bir eklenti hatası nedeniyle kapandı",
+    "plugin_safe_mode_enabled": "Güvenli modu kapat",
+    "plugin_safe_mode_log_copied": "Tüm eklentiler devre dışı",
+    "plugin_safe_mode_on": "açık",
+    "plugin_safe_mode_title": "Güvenli mod",
+    "plugin_security_section": "GÜVENLİK",
+    "plugin_settings_title": "Eklenti ayarları",
+    "plugin_share": "Paylaş",
+    "plugin_store_section": "Mağaza",
+    "plugin_system_warning_countdown": "Kabul et (%1$d)",
+    "plugin_system_warning_text": "Bu sürüm geniş yetkilere sahip bir eklenti sistemi sunuyor. Güvenlik için yalnızca güvendiğin kaynaklardan eklenti kur ve kodu incele. Geliştirici, kullanıcı eklentilerindeki zararlı kodun yol açtığı hasarlardan sorumlu değildir.",
+    "plugin_system_warning_title": "Dolphy 2.5 eklenti sistemi",
+    "plugin_translate_body": "Eklenti adlarını ve açıklamalarını kendi diline çevirir",
+    "plugin_translate_title": "Çevrimiçi eklenti çevirisi",
+    "plugin_unpin": "Sabitlemeyi kaldır",
+    "pmanager_import_plugin": "Eklenti içe aktar",
+    "pmanager_plugin_store": "Eklenti mağazası",
+    "print_accepted": "yazıcı işi kabul etti%s",
+    "print_certificate_error": "Yazıcı sertifikası güvenilmemektedir",
+    "print_connection_error": "yazıcıya bağlanamaz",
+    "print_invalid_address": "Invalid yazıcı adresi",
+    "print_timeout": "Yazıcı yanıt süresi zaman çıktı",
+    "printer_action_admin": "Admin Panel",
+    "printer_action_change_msg": "Bayan",
+    "printer_action_flood": "Flood",
+    "printer_action_storm": "Fırtına",
+    "printer_actions": "Eylemler",
+    "printer_apply": "Uygula",
+    "printer_available": "Mevcut yazıcılar",
+    "printer_connect": "Bağlan",
+    "printer_connected_brand": "Bağlantılı • %s",
+    "printer_copying_pwd": "● · · · · · · · · · · · ·",
+    "printer_dialog_msg_label": "Mesaj",
+    "printer_dialog_title": "Yazıcı ekranı mesajı",
+    "printer_disconnect": "Bağlantıyı kes",
+    "printer_grant_perm": "Grant Permission",
+    "printer_ip_gateway": "IP: %s",
+    "printer_location_perm": "Konum izni Wi-Fi yazıcıları aramak için gereklidir.",
+    "printer_not_found": "Yazıcılar bulunamadı",
+    "printer_opening_wifi": "Açılış Wi-Fi ayarları",
+    "printer_password_label": "Videoyu İndir",
+    "printer_retry": "Tekrar tekrar deneyin",
+    "privacy_bt_rename_tip": "Bluetooth cihazınızı daha büyük mahremiyet için gizli bir şeyle yeniden ilişkilendirmenizi tavsiye ederiz.",
+    "privacy_for_anonymity": "For For Name (İngilizce)",
+    "privacy_step_bt_settings": "Açık Bluetooth ayarları",
+    "privacy_step_copy_name": "- - -————————————————————————",
+    "privacy_step_rename": "Rename the device",
+    "psafe_clipboard_label": "Dolphy plugin record log log",
+    "qr_audio_spoofer": "QR Audio Spoofer",
+    "qr_audio_spoofer_desc": "Play, yerel ağ içindeki QR aracılığıyla geliyor",
+    "qr_audio_spoofer_help": "Her iki cihaz da aynı yerel ağa bağlanın, sunucuya başlayın ve diğer cihazdaki QR kodunu açın. bağlantı internetten mevcut değildir.",
+    "qr_audio_spoofer_title": "QR Audio Spoofer",
+    "qr_connected": "Cihaz bağlantılı!",
+    "qr_generator_desc": "Create and save your QR kodları",
+    "qr_generator_main_title": "QR Jeneratör",
+    "qr_generator_title": "- QR ah Jeneratör",
+    "qr_link_or_text": "Link Kesme veya metin",
+    "qr_log_1": "Sunucu zaten limanda çalışıyor %1$s",
+    "qr_log_10": "Server limanda başladı %1$s; Overstate doğrulama",
+    "qr_log_11": "Bu liman Potter Başarısız %1$s: %2$s: %3$s",
+    "qr_log_12": "Server başlamayabilir; mevcut limanlar yok",
+    "qr_log_13": "(İngilizce türden bir hata: HTML hatası: %1$s",
+    "qr_log_14": "S Yerel Nur durduruldu",
+    "qr_log_2": "Limanda Netty'yi başlatmak %1$s…",
+    "qr_log_3": "Yerel olmayan bağlantı reddedildi: %1$s",
+    "qr_log_4": "(İngilizce Gezisi: %1$s",
+    "qr_log_5": "Sayfa bağlantılı (WS): %1$s( Güz eyaletin%2$s",
+    "qr_log_6": "Sayfaya ziyaret edin: %1$s",
+    "qr_log_7": "Giriş: %1$s",
+    "qr_log_8": "Sayfa koptu: %1$s",
+    "qr_log_9": "Limanda devlet doğrulama başarısız oldu %1$sBaşka bir liman test edin...",
+    "qr_name_label": "Ad",
+    "qr_new_qr": "yeni QR uncertainty",
+    "qr_no_saved_qrs": "QR kodları kurtarılmadı",
+    "qr_notice_1": "Dosyayı okuyamıyor",
+    "qr_notice_10": "Wi-Fi'ye, Ethernet veya bir erişim noktasına bağlanın ve tekrar deneyin",
+    "qr_notice_11": "İnternet barındırması kullanılmamıştır",
+    "qr_notice_12": "Yerel sunucuya başlayın...",
+    "qr_notice_13": "S Yerel uncertainty a network mod modu",
+    "qr_notice_14": "Dış sunucular ve tüneller engellidir",
+    "qr_notice_15": "Yerel sunucu başlamadı",
+    "qr_notice_16": "8080-8110 liman işgal edildi veya devlet doğrulama başarısız oldu",
+    "qr_notice_17": "Yerel sunucu hazır: %1$s",
+    "qr_notice_18": "Bu QR bağlantısı sadece bu yerel ağda mevcuttur",
+    "qr_notice_19": "Hata: %1$s",
+    "qr_notice_2": "\"B uncertainty",
+    "qr_notice_20": "Server durdu",
+    "qr_notice_3": "B uncertainty: %1$s (%2$s (Tarafçılar)",
+    "qr_notice_4": "HTML'nin ithali başarısız oldu: %1$s",
+    "qr_notice_5": "Bir konuşma uncertainty %1$s",
+    "qr_notice_6": "Ses ithalatı başarısız oldu: %1$s",
+    "qr_notice_7": "İlk önce bir HTML dosyasını ithal edin",
+    "qr_notice_8": "Yerel sunucu zaten çalışıyor",
+    "qr_notice_9": "Yerel ağ mevcut değildir",
+    "qr_play_android_msg": "Android Mesaj",
+    "qr_play_ios_msg": "iOS Mesaj",
+    "qr_scan_me": "İthalat eklenti",
+    "qr_server_running": "Çalışıyor",
+    "qr_server_status": "ian Woolf:",
+    "qr_server_stopped": "Durduruldu",
+    "qr_service_active": "Yerel sunucu arka planda çalışıyor",
+    "qr_start_server": "Start",
+    "qr_start_server_hint": "Sunucuyu başlatmak için düğmesine tıklayın",
+    "qr_stop_server": "Eylemler",
+    "qr_terminal_logs": "SüperVM",
+    "qr_tools": "QR Tools",
+    "qr_waiting_connection": "Bağlantı için bekleyin...",
+    "retry": "Tekrar dene",
+    "root_required_message": "Bu özellik Kök haklara ihtiyaç duyar",
+    "root_required_title": "Kök hakları bulunamadı",
+    "save": "Kaydet",
+    "scan": "Tara",
+    "scooter_connect": "Bağlan",
+    "scooter_disconnect": "Bağlantıyı kes",
+    "scooter_empty": "Hiçbir scooter bulunamadı. Bir cihazın yakınında bir tarama başlatın.",
+    "scooter_hack_card_desc": "Scan Xiaomi/Ninebot, kilit /unlock, beep, batarya",
+    "scooter_lock": "Lock Lock",
+    "scooter_perm_denied": "Bluetooth ve konum izinleri gereklidir",
+    "scooter_scan_start": "property ilham kaynağı",
+    "scooter_scan_stop": "Dur taramayı Durdur",
+    "scooter_scanning": "scooterlar arıyor...",
+    "scooter_sound": "Ses",
+    "scooter_unlock": "IP:",
+    "section_all_functions": "Tüm işlevler",
+    "section_pinned": "Sabitlenenler",
+    "section_recommended": "Önerilenler",
+    "settings_about_footer": "Dolphy (%1$s)\nBazı kaynaklar ve kodlar Flipper Zero donanım yazılımı projesinden türetilmiştir.\nTelif hakkı © Flipper Devices.\nGNU GPL lisansıyla sunulur.",
+    "settings_accent_color": "Vurgu rengi",
+    "settings_app_style": "Stil",
+    "settings_app_style_new": "Kompakt",
+    "settings_app_style_old": "Standart",
+    "settings_bottom_panel": "Alt panel",
+    "settings_custom_color": "Özel renk",
+    "settings_cyclic_dolphin_animation": "Döngüsel animasyon",
+    "settings_developer": "Geliştirici @oosthemes",
+    "settings_fab_choose": "Yüzen düğmenin işlevini seç",
+    "settings_fab_functions_summary": "İşlevler ekranını aç",
+    "settings_fab_summary": "Alt paneldeki orta düğmenin işlevi",
+    "settings_flipper_font": "Flipper yazı tipi",
+    "settings_functions_menu_containers": "Kutular",
+    "settings_functions_menu_tiles": "Kutucuklar",
+    "settings_functions_menu_view": "İşlevler menüsü görünümü",
+    "settings_functions_tile_size": "Kutucuk boyutu",
+    "settings_general": "Genel",
+    "settings_hid_config": "HID yapılandırması",
+    "settings_hid_sensitivity_move": "Dokunmatik yüzey hassasiyeti (hareket)",
+    "settings_hid_sensitivity_scroll": "Dokunmatik yüzey hassasiyeti (kaydırma)",
+    "settings_interface": "Arayüz",
+    "settings_language": "Dil",
+    "settings_liquid_glass": "Liquid Glass",
+    "settings_liquid_glass_buttons": "Düğmeler",
+    "settings_liquid_glass_nav": "Gezinme",
+    "settings_liquid_glass_summary": "Cam görünümlü gezinme çubuğu (LiquidBottomTabs)",
+    "settings_liquid_glass_topbars": "Üst çubuklar",
+    "settings_name_spoofing": "Bluetooth adını değiştirme",
+    "settings_performance_mode": "Performans modu",
+    "settings_performance_mode_auto_enabled": "Bu cihazda performans modu açık. Ayarlardan kapatabilirsin",
+    "settings_performance_mode_summary": "Düşük donanımlı cihazlarda bulanıklığı, hareketli arka planı ve ağır efektleri kapatır",
+    "settings_personalisation": "Kişiselleştirme",
+    "settings_plugins": "Eklentiler",
+    "settings_plugins_summary": "Eklentileri yönet ve kur",
+    "settings_quick_startup": "Hızlı başlangıç",
+    "settings_security": "Güvenlik",
+    "settings_spoofed_name": "Görünen kimlik",
+    "settings_spoofed_name_summary": "Diğer cihazların gördüğü ad",
+    "settings_theme": "Tema",
+    "settings_theme_auto": "Otomatik",
+    "settings_theme_dark": "Koyu",
+    "settings_theme_light": "Açık",
+    "settings_title": "Ayarlar",
+    "settings_ui_scale": "Arayüz ölçeği",
+    "smarttv_cast_card_description": "Videoyu Chromequast, DAL, DLNA ve UPnP kullanarak televizyona gönderiyor",
+    "smarttv_cast_choose_video": "Videoyu seçin",
+    "smarttv_cast_devices": "Cihazlar (Instit)%d)",
+    "smarttv_cast_no_devices": "Bulamayan cihazlar bulunamadı",
+    "smarttv_cast_open_local_site": "askıda",
+    "smarttv_cast_pick_video": "TV'nize göndermek için bir video seçin",
+    "smarttv_cast_title": "jam Öncelikle",
+    "spam_status_current": "yüzlerceavun: %s",
+    "spam_status_empty": "Varlıklar: -",
+    "start": "Başlat",
+    "stop": "Durdur",
+    "store_active_source": "Kaynak: %1$s",
+    "store_add_source": "Kaynak ekle",
+    "store_all_plugins": "Tüm eklentiler",
+    "store_author": "Yazar",
+    "store_delete": "Sil",
+    "store_description": "Açıklama",
+    "store_discussion": "Tartışma / gönderi",
+    "store_empty_source": "Bu kaynakta eklenti yok",
+    "store_error_catalog": "Katalog yüklenemedi",
+    "store_error_file_too_large": "Dosya çok büyük",
+    "store_error_install": "Kurulum başarısız",
+    "store_error_not_ready": "Mağaza hazır değil",
+    "store_error_parse_url": "URL ayrıştırılamadı",
+    "store_error_prefix": "Hata: %1$s",
+    "store_error_redirect_no_url": "URL olmadan yönlendirme (%1$d)",
+    "store_error_too_many_redirects": "Çok fazla yönlendirme",
+    "store_featured": "Öne çıkanlar",
+    "store_file": "Dosya",
+    "store_install": "Kur",
+    "store_install_success": "«%1$s» kuruldu",
+    "store_installed": "Kuruldu",
+    "store_installed_version": "Kurulu sürüm v%1$s",
+    "store_installing": "Kuruluyor…",
+    "store_invalid_link": "Geçersiz bağlantı",
+    "store_items_count": "%1$d öğe",
+    "store_loading_catalog": "Katalog yükleniyor…",
+    "store_no_description": "Açıklama yok.",
+    "store_no_plugin_selected": "Eklenti seçilmedi",
+    "store_nothing_found": "Sonuç bulunamadı",
+    "store_open_link_failed": "Bağlantı açılamadı",
+    "store_plugin": "Eklenti",
+    "store_refresh": "Yenile",
+    "store_reinstall": "Yeniden kur",
+    "store_retry": "Tekrar dene",
+    "store_search_hint": "Eklenti ara",
+    "store_source": "Kaynak",
+    "store_source_connected": "Kaynak bağlandı: %1$s",
+    "store_source_input_hint": "github.com/sahip/depo veya index.json bağlantısı",
+    "store_sources": "Kaynaklar",
+    "store_sources_hint": "index.json dosyası içeren bir GitHub deposu bağla. Depo bağlantısını, sahip/depo biçimindeki adı veya doğrudan index.json bağlantısını yapıştır.",
+    "store_sources_title": "Eklenti kaynakları",
+    "store_title": "Eklenti mağazası",
+    "store_update_available": "Güncelleme mevcut",
+    "store_update_to_version": "v%1$s sürümüne güncelle",
+    "store_updated": "Güncellendi",
+    "store_version": "Sürüm",
+    "success": "Başarılı",
+    "theme_mode_auto_desc": "Sistemle aynı",
+    "theme_mode_dark_desc": "Koyu tema",
+    "theme_mode_light_desc": "Açık tema",
+    "theme_selection_title": "Tema",
+    "universal_db_empty": "Please Name is empty empty",
+    "universal_db_failed": "Veritabanın yükü başarısız oldu (günlük UniversalRemotes)",
+    "universal_desc_ac_ir": "Turnperzero-firmware-dev: .irir",
+    "universal_desc_audio_ir": "Turnperzero-firmware-dev: ses.ir",
+    "universal_desc_projector_ir": "Flipperzerofirmware-dev: projektör.ir veritabanı",
+    "universal_desc_stacked": "Kategorideki tüm kontrollerin ortak düğmeleri \"%s»",
+    "universal_desc_tv_ir": "Turnperzero-firmware-dev: tv.ir",
+    "universal_error_unknown": "Hata: %s",
+    "universal_files_list": "QR Jeneratör %s",
+    "universal_files_missing": "Hiçbir veritabanı dosyaları yapılandırıldı.",
+    "universal_loading_signals": "Please/Axb-Ses/Ax|Ses|Ses|Ses|",
+    "universal_no_signals_for": "aslında Baby %1$s veritabanında %2$s. %3$s",
+    "universal_signal_count": "Veritabanında işaretler: %d",
+    "universal_unknown": "bilinmiyor",
+    "us_ble_detector": "BLE spam dekürücü",
+    "us_ble_detector_desc": "Flipper Zero'yu bul, BLE spammers ve Wi-Fi deauther cihazları yakın.",
+    "us_cat_beacon": "Beacon/Positioning Signal/Positioning Signal/Positioning Signal/Positioning Signal/Positioning Signal/Position",
+    "us_cat_echo": "Echo/Reflections",
+    "us_cat_jammer": "(broadband müdahalesi)",
+    "us_cat_noise": "Interference /Noise",
+    "us_cat_repellent": "Ultrasonik Repellent /Generator",
+    "us_cat_sensor": "Ultrasonik Sensör /Radar",
+    "us_category_possible_suffix": "(İslâm)",
+    "us_detected": "jam yerleştirilir",
+    "us_mic_permission": "US tarayıcı mikrofon erişimi gerektirir.",
+    "us_no_threats": "Flipper Zero, accusations spammers veya Wi-Fi deauther cihazları tespit edilmedi",
+    "us_radar": "Giriş:",
+    "us_radar_desc": "Etrafını görmeye izin verir: hareket sensörleri, radarlar ve jammerler",
+    "us_scan_description": "Ultrasound Scanning: 15-22 kHz (real-time).",
+    "us_scan_duration": "Scanning ~6 saniye sürecek.",
+    "us_scan_warning": "Kaynak algılaması yaklaşık: Sistem 15-22 kHz aralığında enerji görür, bu yüzden sahte pozitiflere yakın olabilirler.",
+    "us_scanning": "Cihazları aramak...",
+    "us_wifi_bonjour_services_found": "Hizmetler Bonjour / DNS-SD bulundu: %d",
+    "us_wifi_bonjour_services_label": "Bonjour / DNS-SD hizmetleri",
+    "us_wifi_bonjour_services_none": "jam 02",
+    "us_wifi_connect": "Bağlan",
+    "us_wifi_connect_admin_message": "Full-time%sSıcak ayarlar.",
+    "us_wifi_connect_admin_title": "jam Distance",
+    "us_wifi_connect_failed": "Ağa bağlanamadı",
+    "us_wifi_connecting": "Bağlanma...",
+    "us_wifi_device_network": "Hata:",
+    "us_wifi_device_other": "Diğer cihaz harp hizmet hizmeti",
+    "us_wifi_device_printer": "Yazıcı / baskı hizmeti",
+    "us_wifi_device_web": "Web cihazı / admin",
+    "us_wifi_enable_location_services": "Konum hizmetlerini aç",
+    "us_wifi_enter_wifi_password": "Wi-Fi şifresini girin",
+    "us_wifi_field_device_guess": "Server Durdu",
+    "us_wifi_field_frequency": "Frekans",
+    "us_wifi_field_gateway": "Gateway Gateway",
+    "us_wifi_field_router_mac": "Yönlendirici MAC (BSSID)",
+    "us_wifi_field_rssi": "Signal Strength",
+    "us_wifi_field_security": "Güvenlik Güvenliği Güvenlik Güvenlik",
+    "us_wifi_field_vendor": "Satışcı",
+    "us_wifi_grant_location": "Android Mesaj",
+    "us_wifi_hidden_ssid": "(gizli ağ)",
+    "us_wifi_info_open": "Bilgi",
+    "us_wifi_last_scan_ago": "Yap %d s",
+    "us_wifi_location_services_disabled_message": "Wi-Fi ağlarını taramak için, telefon ayarlarında konum hizmetlerini (GPS / Network) etkinleştirir.",
+    "us_wifi_location_services_disabled_title": "Konum hizmetleri kapalı",
+    "us_wifi_need_location": "Wi-Fi tarama, yer izni gerektirir.",
+    "us_wifi_need_location_services": "Konum hizmetleri kapalıdır. Wi-Fi'yi taramak için \"Location services\" etkinleştirir.",
+    "us_wifi_no_networks": "No ağları harp Bul",
+    "us_wifi_open_admin": "iOS Mesaj",
+    "us_wifi_open_wifi_settings": "Go to karşılığı",
+    "us_wifi_password_placeholder": "Parola",
+    "us_wifi_scanning": "Wi-Fi ve DNS-SD'yi tarayın...",
+    "usb_ir_connected_desc": "Dış IR modülü USB-C komutları iletmeye hazır",
+    "usb_ir_connected_title": "IR modülü harp",
+    "welcome_dialog_btn_ok": "Anladım",
+    "welcome_dialog_btn_support": "Destek",
+    "welcome_dialog_btn_tg": "Telegram kanalına katıl",
+    "welcome_dialog_text": "Dolphy’de 1. seviyeye ulaştın!\n\nDolphy, root izni gerektirmeyen, mobil sızma testleri için ücretsiz bir Android uygulamasıdır. Güncellemeleri takip etmek için geliştiricinin Telegram kanalına katılabilirsin.",
+    "welcome_dialog_title": "Dolphy’ye hoş geldin",
+    "whisperpair_about_message": "Bu işlev deneysel ve hala test ediliyor. Kanal sohbetinde deneyiminizi paylaşın @oosthemes Telgraf'da onu geliştirmek için.",
+    "whisperpair_about_title": "Whisper Pair Hakkında",
+    "whisperpair_all_ble": "All  karşılığı",
+    "whisperpair_connecting": "Bağlanma...",
+    "whisperpair_connecting_ru": "Bağlanma...",
+    "whisperpair_error": "HATA: %s",
+    "whisperpair_fast_pair": "Hızlı Pair",
+    "whisperpair_incompatible": "Olası kullanılabilirlik",
+    "whisperpair_intercept": "Intercept",
+    "whisperpair_paired": "Paired Cihazlar",
+    "whisperpair_paired_empty": "* * * * *",
+    "whisperpair_paired_success": "B / EDR: %s",
+    "whisperpair_partial": "KURAL harp: %s",
+    "whisperpair_records": "İşte mikrofonunuzun kayıtlarını maçlı cihazlardan görünecek",
+    "whisperpair_scanner": "Device Browser",
+    "whisperpair_scanning_all": "Tüm BLE'leri tarayın...",
+    "whisperpair_scanning_fast": "Hızlı Pair'i tarayın...",
+    "whisperpair_stop": "Durdur",
+    "whisperpair_tws_empty": "Hiçbir cihaz bulunamadı, işitme yardımlarını tespit edilebilir hale getir.",
+    "whisperpair_tws_hint": "Bir ses cihazı seçin. Eşleme ve ses routing, cihaza ve Android sürüme bağlıdır.",
+    "whisperpair_tws_scanning": "Bluetooth cihazları ...",
+    "whisperpair_tws_stopped": "Durduruldu",
+    "whisperpair_tws_title": "TWS ses araçları",
+    "wifi_brute_force_active": "Brute Force Active",
+    "wifi_brute_force_desc": "Sağlam güç için enable şifre grupları sipariş = işleme siparişi.",
+    "wifi_brute_force_passwords": "Brute-Force için şifreler",
+    "wifi_bruteforce_successful": "Bruteforce başarılı başarılı",
+    "wifi_import_passwords": ".txt'den ithal edin",
+    "wifi_password_brute": "Şifre brute güç",
+    "wifi_password_label": "PASSWORD:",
+    "wifi_passwords_count": "%1$d Şifre • Şifre • %2$d geçerli (> = 8 karakter)",
+    "wifi_print_add": "Ekle",
+    "wifi_print_cancel": "İptal",
+    "wifi_print_change_file": "Başka bir harp dosyası seçin",
+    "wifi_print_choose_file": "Dosyayı seçin",
+    "wifi_print_color": "Renk",
+    "wifi_print_copies": "Copies Copies",
+    "wifi_print_document": "Belge",
+    "wifi_print_document_desc": "PDF, JPEG, PNG ve WebP destekleniyor. Dolphy, gerektiğinde PWG Raster'e dosyayı dönüştürüyor.",
+    "wifi_print_hero_desc": "IPP yazıcılarını keşfedin, kapasitenizi kontrol edin ve belgeleri doğrudan gönderin",
+    "wifi_print_hero_title": "Sistem dialog olmadan yazdır",
+    "wifi_print_host": "IP adresi veya host ölçmek",
+    "wifi_print_manual_title": "Ek IPP yazıcısı ekle",
+    "wifi_print_no_printers": "Yazıcılar bulunamadı",
+    "wifi_print_no_printers_desc": "Telefon ve yazıcının aynı Wi-Fi ağ ağlarına bağlı olduğundan emin olun.",
+    "wifi_print_orientation": "Oryantasyon",
+    "wifi_print_paper": "Paper Paper Kağıt",
+    "wifi_print_path": "Queue harp",
+    "wifi_print_port": "Bağlantı noktası",
+    "wifi_print_print": "Otomatik olarak, düz ekranlı",
+    "wifi_print_printer_info": "Yazıcılar Yazıcısı Yazıcısı",
+    "wifi_print_quality": "Kalite",
+    "wifi_print_reading": "yazıcının yeteneklerini okumak...",
+    "wifi_print_scan": "Tara",
+    "wifi_print_searching": "Aranıyor…",
+    "wifi_print_secure": "Güvenli IPPS bağlantı",
+    "wifi_print_sending": "Gönderiliyor…",
+    "wifi_print_settings": "Yazdır ayarları",
+    "wifi_print_sides": "Sides",
+    "wifi_print_test_page": "Yazdır test eğitimci sayfası",
+    "wifi_print_title": "Wi-Fi Print",
+    "wifi_stress_test": "Stres testi (UDP Sel)",
+    "wifi_testing": "Test: %s",
+}
+
+LIB_TEXTS = {
+    "abc_action_bar_up_description": "Move up up",
+    "abc_action_mode_done": "Done",
+    "abc_capital_off": "DEACTIVED",
+    "abc_capital_on": "Vagon - Vevdi - Vevdi - Vevdi",
+    "abc_menu_alt_shortcut_label": "Alt +",
+    "abc_menu_ctrl_shortcut_label": "Evet",
+    "abc_menu_delete_shortcut_label": "Dele respondents Yemek",
+    "abc_menu_enter_shortcut_label": "Enter",
+    "abc_menu_function_shortcut_label": "Fonksiyonlar +",
+    "abc_menu_meta_shortcut_label": "Hedef + Hedef +",
+    "abc_menu_shift_shortcut_label": "Mayus harp +",
+    "abc_menu_space_shortcut_label": "Uzay Uzay",
+    "abc_menu_sym_shortcut_label": "Sym +",
+    "abc_prepend_shortcut_label": "Menü +",
+    "abc_search_hint": "Ara…",
+    "abc_searchview_description_clear": "Delete Consult anlaşmaya",
+    "abc_searchview_description_search": "Ara",
+    "abc_searchview_description_submit": "Mesaj Gönder",
+    "abc_searchview_description_voice": "Ses arama",
+    "abc_toolbar_collapse_description": "42. Sezon",
+    "androidx_compose_foundation_autofill": "Kendini Tamam illustration tamam",
+    "androidx_compose_ui_autofill": "Kendini Tamam illustration tamam",
+    "bottomsheet_action_collapse": "Gizle alt yaprak",
+    "bottomsheet_action_expand": "Alt sayfayı göster",
+    "bottomsheet_action_expand_halfway": "Yarıya taşın",
+    "bottomsheet_drag_handle_content_description": "Takip kontrolör",
+    "call_notification_answer_action": "Otomatik olarak etiketli",
+    "call_notification_answer_video_action": "Videoyu Kullanarak Bekarlı",
+    "call_notification_decline_action": "Reject",
+    "call_notification_hang_up_action": "Hanging",
+    "call_notification_incoming_text": "Incoming call",
+    "call_notification_ongoing_text": "Şimdiki çağrı",
+    "call_notification_screening_text": "Bir gelen çağrıyı abroad",
+    "cast_ad_label": "\"Cehenne\" (İngilizce) \"Cehenne\"",
+    "cast_casting_to_device": "Göndermek için %1$s",
+    "cast_closed_captions": "Alt başlıklar",
+    "cast_closed_captions_unavailable": "Alt başlıklar mevcut değildir rulmanlar",
+    "cast_connecting_to_device": "Bağlanmak için %1$s",
+    "cast_disconnect": "Bağlantıyı kes",
+    "cast_dynamic_group_name_format": "%1$s Velev ki, o zaman vedaklıklı ve %2$d",
+    "cast_expanded_controller_ad_image_description": "Google Cast Cast alıcı bir reklam yeniden üretirken gösterilen resim",
+    "cast_expanded_controller_ad_in_progress": "İlerlemede Duyuru...",
+    "cast_expanded_controller_background_image": "Albüm Kapağı",
+    "cast_expanded_controller_live_head_description": "Şu anki yazının adı, burada ortaya çıkıyor",
+    "cast_expanded_controller_live_stream_indicator": "Akış canlı canlı",
+    "cast_expanded_controller_loading": "Yükleniyor…",
+    "cast_expanded_controller_skip_ad_label": "Jump ad",
+    "cast_expanded_controller_skip_ad_text": "Reklamı atabilirsiniz %1$d…",
+    "cast_forward": "Move forward forward",
+    "cast_forward_10": "10 saniye içinde hareket edin",
+    "cast_forward_30": "30 saniye hareket edin",
+    "cast_live_label": "IN GUIDELINE Reseller",
+    "cast_mute": "Mute",
+    "cast_notification_connected_message": "Bağlanmış tom %1$s",
+    "cast_notification_connecting_message": "Bağlanmak için %1$s",
+    "cast_notification_default_channel_name": "Gönder",
+    "cast_notification_disconnect": "Bağlantıyı kes",
+    "cast_pause": "Duraklat",
+    "cast_play": "Oynat",
+    "cast_rewind": "Rewind",
+    "cast_rewind_10": "Rewind 10 saniye",
+    "cast_rewind_30": "Rewind 30 saniye",
+    "cast_seek_bar": "Uzak araçları: ARP ve trafik denetimleri",
+    "cast_skip_next": "Sonraki elemente Los traditionally",
+    "cast_skip_prev": "(a) (b) (b) (b) (b) (b) (b) (b) (b)",
+    "cast_stop": "Durdur",
+    "cast_stop_live_stream": "Canlı yayın için",
+    "cast_tracks_chooser_dialog_cancel": "İptal",
+    "cast_tracks_chooser_dialog_closed_captions": "Alt başlıklar",
+    "cast_tracks_chooser_dialog_default_track_name": "Arabayla Yol Tarifi Toplu Taşıma %1$d",
+    "cast_tracks_chooser_dialog_none": "\"Cehennem\" (Sekiz)\" (S",
+    "cast_tracks_chooser_dialog_ok": "Tamam",
+    "cast_tracks_chooser_dialog_subtitles": "Alt başlıklar",
+    "cast_unmute": "Activate sound",
+    "character_counter_content_description": "%1$d / %2$d karakter",
+    "character_counter_overflowed_content_description": "Karakter sınırı aşıldı (%1$d / %2$d)",
+    "clear_text_end_icon_content_description": "Delete Text",
+    "close_drawer": "Göze Bırak",
+    "close_sheet": "Paneli kapat",
+    "common_google_play_services_enable_button": "Etkinleştir",
+    "common_google_play_services_enable_text": "%1$s Google Play Services etkinleştirene kadar işe yaramayacaktır.",
+    "common_google_play_services_enable_title": "Google Play Hizmetleri’ni etkinleştir",
+    "common_google_play_services_install_button": "Kur",
+    "common_google_play_services_install_text": "%1$s Google Play Services cihazınızda kurulmıyorsa bu işe yaramayacaktır.",
+    "common_google_play_services_install_title": "Google Play Services Download",
+    "common_google_play_services_notification_channel_name": "Google Play Services",
+    "common_google_play_services_notification_ticker": "Google Play Services Error",
+    "common_google_play_services_unknown_issue": "%1$s uygulamasında Google Play Hizmetleri ile ilgili bir sorun oluştu. Tekrar dene.",
+    "common_google_play_services_unsupported_text": "Uygulamayı uygulamak mümkün değil %1$s Google Play Services olmadan, cihazınızla uyumlu değildir.",
+    "common_google_play_services_update_button": "Güncelle",
+    "common_google_play_services_update_text": "%1$s Google Play Services'i güncellemenize kadar çalışmayacaktır.",
+    "common_google_play_services_update_title": "Google Play Services Güncelleme",
+    "common_google_play_services_updating_text": "%1$s Google Play Services'in mevcut güncellemesi tamamlanmaya kadar koşmayacaktır.",
+    "common_google_play_services_wear_update_text": "Google Play Services'in yeni bir versiyonu gereklidir. Kısa bir süre içinde güncellenecektir.",
+    "common_open_on_phone": "Telefonda açık",
+    "common_signin_button_text": "Giriş Giriş Login Login",
+    "common_signin_button_text_long": "Google ile başlayın",
+    "confirm_device_credential_password": "Şifreyi kullanın",
+    "default_error_message": "Invalid entry",
+    "default_error_msg": "Bilinmeyen hata",
+    "default_popup_window_title": "Pencereyi Kaldırın",
+    "dropdown_menu": "Dispersible Menu",
+    "error_a11y_label": "Başarısızlık",
+    "exo_controls_cc_disabled_description": "Altyazıları aç",
+    "exo_controls_cc_enabled_description": "Altyazıları kapat",
+    "exo_controls_fastforward_description": "Hızlı bir şekilde hareket edin",
+    "exo_controls_fullscreen_enter_description": "Tam ekrana geç",
+    "exo_controls_fullscreen_exit_description": "Tam ekrandan çık",
+    "exo_controls_hide": "Hide oynatıcı kontrol ediyor",
+    "exo_controls_next_description": "Sonraki",
+    "exo_controls_overflow_hide_description": "Gizle Ek Teklifler",
+    "exo_controls_overflow_show_description": "Daha fazla ayar göster",
+    "exo_controls_pause_description": "Duraklat",
+    "exo_controls_play_description": "Oynat",
+    "exo_controls_playback_speed": "Hız",
+    "exo_controls_previous_description": "Önceki",
+    "exo_controls_repeat_all_description": "Mevcut mod: Her şeyi tekrarlayın. Yol değişikliği.",
+    "exo_controls_repeat_off_description": "Mevcut mod: Tekrar etmeyin.Değişim modu.",
+    "exo_controls_repeat_one_description": "Mevcut mod: Tekrar bir. Change modu.",
+    "exo_controls_rewind_description": "Rewind",
+    "exo_controls_seek_bar_description": "Yeniden üretimde ilerleme",
+    "exo_controls_settings_description": "Ayarlar",
+    "exo_controls_show": "Show player kontrol ediyor",
+    "exo_controls_shuffle_off_description": "Karışık çalmayı aç",
+    "exo_controls_shuffle_on_description": "Mümkün olmayan rastgele mod",
+    "exo_controls_stop_description": "Durdur",
+    "exo_controls_vr_description": "RV mod",
+    "exo_download_completed": "File indir tamamlandı",
+    "exo_download_description": "İndir",
+    "exo_download_downloading": "Downloading",
+    "exo_download_failed": "Hiç kimse olamazdı...",
+    "exo_download_notification_channel_name": "Downloads Downloads",
+    "exo_download_paused": "Ücretli Yükler",
+    "exo_download_paused_for_network": "Ağla birlikte ağla birlikte indirmeler",
+    "exo_download_paused_for_wifi": "Inter network the current Wi-Fi network",
+    "exo_download_removing": "İndir downloads",
+    "exo_track_bitrate": "%1$.2f Mb /  ölçmek",
+    "exo_track_resolution": "%1$d×%2$d",
+    "exo_track_role_alternate": "Alternatif",
+    "exo_track_role_commentary": "Remarks",
+    "exo_track_role_supplementary": "Tamamlayıcı",
+    "exo_track_selection_auto": "Otomatik",
+    "exo_track_selection_none": "\"Cehennem\" (Sekiz)\" (S",
+    "exo_track_selection_title_text": "Metin",
+    "exo_track_selection_title_video": "Videoyu Kullanarak Bekarlı",
+    "exo_track_stereo": "Stereo",
+    "exo_track_surround": "Bone-and-a- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half- half-",
+    "exo_track_surround_5_point_1": "En Geliştirme Sesi recognise",
+    "exo_track_surround_7_point_1": "En Geliştirme Ses 7.1gâh",
+    "exo_track_unknown": "Bilinmiyor",
+    "exo_track_unknown_name": "Bilinmeyen (İngilizce).%1$s)",
+    "exposed_dropdown_menu_content_description": "Show down-down menu",
+    "fingerprint_dialog_touch_sensor": "Sensör-Sensor Parmakları",
+    "fingerprint_error_hw_not_available": "Parmak donanımları mevcut değildir.",
+    "fingerprint_error_hw_not_present": "Cihazda parmak izi sensörü yoktur",
+    "fingerprint_error_lockout": "Çok fazla deneme yaptınız, daha sonra tekrar deneyin.",
+    "fingerprint_error_no_fingerprints": "Parmak izi kaydedilmedi.",
+    "fingerprint_error_user_canceled": "Uygulamayı doğrulamak için kullanıcı arayüzü üzerinde uygulama",
+    "fingerprint_not_recognized": "Tanınma Not Not tanınma Not Aday Not",
+    "generic_error_no_device_credential": "PIN, desen veya şifre tanımlanmamıştır.",
+    "generic_error_no_keyguard": "Bu cihaz PINS, desenleri veya şifreleri desteklemez.",
+    "generic_error_user_canceled": "Kullanıcı doğrulamayı iptal etti.",
+    "ic_media_route_learn_more_accessibility": "Nasıl tür göndermek için",
+    "icon_content_description": "Icon of the dialog box",
+    "in_progress": "İlerlemede ilerleme",
+    "indeterminate": "Kısmen işaretli",
+    "item_view_role_description": "Sekme",
+    "m3_loading_indicator_content_description": "Yükleniyor",
+    "m3c_bottom_sheet_collapse_description": "Alt yaprak",
+    "m3c_bottom_sheet_dismiss_description": "Alt sayfayı kapat",
+    "m3c_bottom_sheet_drag_handle_description": "Takip kontrolör",
+    "m3c_bottom_sheet_expand_description": "alt sayfayı silin",
+    "m3c_bottom_sheet_pane_title": "Alt yaprak",
+    "m3c_button_group_more_options": "Daha fazla seçenek",
+    "m3c_date_input_headline": "Date tanıtıldı",
+    "m3c_date_input_headline_description": "Tarih tanıtıldı: %1$s",
+    "m3c_date_input_invalid_for_pattern": "Tarih beklenen desenle eşleşmez: %1$s",
+    "m3c_date_input_invalid_not_allowed": "Tarih izin verilmez: %1$s",
+    "m3c_date_input_invalid_year_range": "Verileri silmek için Wi- telefonu girin %1$s - %2$s",
+    "m3c_date_input_label": "Tarih Tarihi",
+    "m3c_date_input_no_input_description": "Hiçbir veri yok",
+    "m3c_date_input_title": "Tarih Seç",
+    "m3c_date_picker_headline": "Tarih Seçilmiş",
+    "m3c_date_picker_headline_description": "Seçmen: %1$s",
+    "m3c_date_picker_navigate_to_year_description": "Bir yıl git %1$s",
+    "m3c_date_picker_no_selection_description": "Hiçbir veri yok",
+    "m3c_date_picker_scroll_to_earlier_years": "Önceki yıl görmek için paket",
+    "m3c_date_picker_scroll_to_later_years": "Yıllar sonra görmek için paket",
+    "m3c_date_picker_switch_to_calendar_mode": "Zaman çerçeve modundaki değişim",
+    "m3c_date_picker_switch_to_day_selection": "Bir yıl seçmek veya bir gün yeniden ele almak için dokunmak",
+    "m3c_date_picker_switch_to_input_mode": "Metinlt giriş modu için değişim",
+    "m3c_date_picker_switch_to_next_month": "Sonraki ayları değiştirmek",
+    "m3c_date_picker_switch_to_previous_month": "Önceki ay",
+    "m3c_date_picker_switch_to_year_selection": "Bir yıl seçin",
+    "m3c_date_picker_title": "Tarih Seç",
+    "m3c_date_picker_today_description": "Bugün",
+    "m3c_date_picker_year_picker_pane_title": "Visable yıl seçici",
+    "m3c_date_range_input_invalid_range_input": "Tarih aralığı geçerli değil",
+    "m3c_date_range_input_title": "Başlangıç tarihleri girin",
+    "m3c_date_range_picker_day_in_range": "İçinde aralık içinde",
+    "m3c_date_range_picker_end_headline": "tamamlanma tarihi",
+    "m3c_date_range_picker_scroll_to_next_month": "Ertesi ay görmek için paket",
+    "m3c_date_range_picker_scroll_to_previous_month": "Ayı daha önce görmek için paket",
+    "m3c_date_range_picker_start_headline": "Başlangıç Tarihi",
+    "m3c_date_range_picker_title": "Tarihleri Seçen Tarihleri",
+    "m3c_dialog": "Diyalog masası",
+    "m3c_dropdown_menu_collapsed": "Colaltd",
+    "m3c_dropdown_menu_expanded": "Unpaned",
+    "m3c_dropdown_menu_toggle": "Show / Gizle drop-down menü",
+    "m3c_floating_toolbar_collapse": "Gizle Toolbar",
+    "m3c_floating_toolbar_expand": "Show toolbarbar",
+    "m3c_floating_toolbar_more_options": "Daha fazla seçenek",
+    "m3c_search_bar_search": "Ara",
+    "m3c_snackbar_dismiss": "Kapat",
+    "m3c_snackbar_pane_title": "Uyarı",
+    "m3c_suggestions_available": "Aşağıdaki öneriler aşağıda",
+    "m3c_time_input_dialog_title": "Zaman girin",
+    "m3c_time_picker_am": "...",
+    "m3c_time_picker_dialog_title": "Zaman seçin",
+    "m3c_time_picker_hour": "Zaman",
+    "m3c_time_picker_hour_24h_suffix": "%1$d saatler saatler saat saatler",
+    "m3c_time_picker_hour_error": "Kayıt verileri yazmak için etiket tutun",
+    "m3c_time_picker_hour_error_24h": "0 ve telefon cihazının altına tutun.",
+    "m3c_time_picker_hour_selection": "Zaman Seç",
+    "m3c_time_picker_hour_suffix": "%1$d In point",
+    "m3c_time_picker_hour_text_field": "Çünkü zaman için",
+    "m3c_time_picker_minute": "Dakika Dakikalar Dakika",
+    "m3c_time_picker_minute_error": "H'nin bu konuda desteklenmemesi",
+    "m3c_time_picker_minute_selection": "Dakikalar Select dakika Select dakika",
+    "m3c_time_picker_minute_suffix": "%1$d dakika dakikalar dakika",
+    "m3c_time_picker_minute_text_field": "dakikalar için",
+    "m3c_time_picker_period_toggle_description": "AM veya PM PM",
+    "m3c_time_picker_pm": ".",
+    "m3c_time_picker_toggle_keyboard": "Yazma modeline değişim",
+    "m3c_time_picker_toggle_touch": "modu izlemek için değişim",
+    "m3c_tooltip_long_press_label": "Show sö",
+    "m3c_tooltip_pane_description": "Outgoing Açıklama",
+    "m3c_wide_navigation_rail_close_rail": "Yakın Bar",
+    "m3c_wide_navigation_rail_pane_title": "Navigation bar",
+    "material_clock_toggle_content_description": "AM veya PM PM",
+    "material_hour_24h_suffix": "%1$s saatler saatler saat saatler",
+    "material_hour_selection": "Zaman Seç",
+    "material_hour_suffix": "%1$s In point",
+    "material_minute_selection": "Dakikalar Select dakika Select dakika",
+    "material_minute_suffix": "%1$s dakika dakikalar dakika",
+    "material_slider_range_end": "End of interval",
+    "material_slider_range_start": "Başlangıç",
+    "material_slider_value": "Değer",
+    "material_timepicker_am": "...",
+    "material_timepicker_clock_mode_description": "Zaman yazmak için saat modunda değiştirin.",
+    "material_timepicker_hour": "Zaman",
+    "material_timepicker_minute": "Minute Minute",
+    "material_timepicker_pm": ".",
+    "material_timepicker_select_time": "Zaman Seç",
+    "material_timepicker_text_input_mode_description": "Zaman yazmak için metin modunu değiştirin.",
+    "mr_cast_button_connected": "Gönder; bağlantılı",
+    "mr_cast_button_connecting": "Gönder; bağlantı kurmak;",
+    "mr_cast_button_disconnected": "Gönder;",
+    "mr_cast_dialog_title_view_placeholder": "Mevcut bilgi mevcut değildir",
+    "mr_chooser_looking_for_devices": "cihazlara bakmak...",
+    "mr_chooser_title": "Gönderin",
+    "mr_chooser_wifi_learn_more": "Daha fazla bilgi edinin Daha fazla bilgi edinin",
+    "mr_chooser_wifi_warning_description_car": "Diğer cihazın bu araba olarak aynı Wi-Fi ağı ile bağlantılı olduğundan emin olun.",
+    "mr_chooser_wifi_warning_description_phone": "Diğer cihazın bu telefon olarak aynı Wi-Fi ağıyla bağlantılı olduğundan emin olun.",
+    "mr_chooser_wifi_warning_description_tablet": "Diğer cihazın bu tablet olarak aynı Wi-Fi ağı ile bağlantılı olduğundan emin olun.",
+    "mr_chooser_wifi_warning_description_tv": "Diğer cihazın bu TV olarak aynı Wi-Fi ağıyla bağlantılı olduğundan emin olun.",
+    "mr_chooser_wifi_warning_description_unknown": "Diğer cihazın bu cihaz olarak aynı Wi-Fi ağıyla bağlantılı olduğundan emin olun.",
+    "mr_chooser_wifi_warning_description_watch": "Diğer cihazın bu saat olarak aynı Wi-Fi ağı ile bağlantılı olduğundan emin olun.",
+    "mr_chooser_zero_routes_found_title": "Mevcut cihazlar mevcut değil",
+    "mr_controller_album_art": "Albüm sö",
+    "mr_controller_casting_screen": "Yelkenli ekran",
+    "mr_controller_close_description": "Kapat",
+    "mr_controller_collapse_group": "42. Sezon",
+    "mr_controller_disconnect": "Bağlantıyı kes",
+    "mr_controller_expand_group": "Göster",
+    "mr_controller_no_info_available": "Mevcut bilgi mevcut değildir",
+    "mr_controller_no_media_selected": "Seçilen içerik yok",
+    "mr_controller_pause": "Duraklat",
+    "mr_controller_play": "Oynat",
+    "mr_controller_stop": "Durdur",
+    "mr_controller_stop_casting": "Nakliyeyi Durdurun",
+    "mr_controller_volume_slider": "Cilt kontrolü",
+    "mr_dialog_default_group_name": "Grup Grup Grubu Grup Group Group",
+    "mr_dialog_groupable_header": "Bir cihazı ekleyin",
+    "mr_dialog_transferable_header": "Bir grup halinde oyna",
+    "mr_route_name_speaker": "Konuşma",
+    "mr_route_name_tv": "Televizyon Televizyon",
+    "mr_route_name_unknown": "Bilinmiyor",
+    "mr_user_route_category_name": "Cihazlar",
+    "mtrl_badge_numberless_content_description": "Yeni bildirim",
+    "mtrl_checkbox_state_description_checked": "İşaretli",
+    "mtrl_checkbox_state_description_indeterminate": "Kısmen işaretli",
+    "mtrl_checkbox_state_description_unchecked": "Unmarked",
+    "mtrl_chip_close_icon_content_description": "Withdrawal %1$s",
+    "mtrl_exceed_max_badge_number_content_description": "Daha Fazla Daha fazlası %1$d Yeni bildirimleri yeni bildirimleri",
+    "mtrl_picker_a11y_next_month": "Sonraki ayları değiştirmek",
+    "mtrl_picker_a11y_prev_month": "Önceki ay",
+    "mtrl_picker_announce_current_range_selection": "Başlangıç verilmesi: %1$s - tamamlanma tarihi seçimi: %2$s",
+    "mtrl_picker_announce_current_selection": "Şimdiki seçim: %1$s",
+    "mtrl_picker_announce_current_selection_none": "Hiçbir şey yok",
+    "mtrl_picker_cancel": "İptal",
+    "mtrl_picker_confirm": "Tamam",
+    "mtrl_picker_date_header_unselected": "Tarih Seçilmiş",
+    "mtrl_picker_end_date_description": "tamamlanma tarihi: %1$s",
+    "mtrl_picker_invalid_format": "In desire.",
+    "mtrl_picker_invalid_format_example": "Örnek: Örnek: %1$s",
+    "mtrl_picker_invalid_format_use": "Kullanım: %1$s",
+    "mtrl_picker_invalid_range": "Dönem geçerli değildir.",
+    "mtrl_picker_navigate_to_current_year_description": "Şu anki yıla git, %1$d",
+    "mtrl_picker_navigate_to_year_description": "Bir yıl git %1$d",
+    "mtrl_picker_out_of_range": "Geçerli süre dışarıda: %1$s",
+    "mtrl_picker_range_header_only_end_selected": "Başlangıcı Tarihi%1$s",
+    "mtrl_picker_range_header_only_start_selected": "%1$s- tamamlanmanın tamamlanması",
+    "mtrl_picker_range_header_unselected": "Başlangıç Tarihi - tamamlanma tarihi",
+    "mtrl_picker_save": "Kaydet",
+    "mtrl_picker_start_date_description": "Başlangıç Tarihi: %1$s",
+    "mtrl_picker_text_input_date_hint": "Tarih Tarihi",
+    "mtrl_picker_text_input_date_range_end_hint": "tamamlanma tarihi",
+    "mtrl_picker_text_input_date_range_start_hint": "Başlangıç Tarihi",
+    "mtrl_picker_text_input_year_abbr": "Birbirbiri bir",
+    "mtrl_picker_today_description": "Bugün, bugün, %1$s",
+    "mtrl_picker_toggle_to_calendar_input_mode": "Giriş mod takvimine değişim",
+    "mtrl_picker_toggle_to_day_selection": "Takvime göre değişim",
+    "mtrl_picker_toggle_to_text_input_mode": "Text Giriş Mode",
+    "mtrl_picker_toggle_to_year_selection": "Yılın görüşüne Değişim",
+    "mtrl_picker_toggled_to_day_selection": "Takvim ışığında değiştirildi",
+    "mtrl_picker_toggled_to_year_selection": "Yıl görüşlerinde değişti.",
+    "mtrl_timepicker_cancel": "İptal",
+    "mtrl_timepicker_confirm": "Tamam",
+    "navigation_menu": "Navigation menu",
+    "not_selected": "Seçilmedi",
+    "password_toggle_content_description": "Göster şifre göster",
+    "range_end": "End of interval",
+    "range_start": "Başlangıç",
+    "search_menu_title": "Ara",
+    "searchview_clear_text_content_description": "Delete Text",
+    "searchview_navigation_content_description": "Geri",
+    "selected": "Seçilmiş seçilmiş",
+    "side_sheet_accessibility_pane_title": "Side Bıçağı",
+    "snackbar_pane_title": "Uyarı",
+    "state_empty": "Boş",
+    "state_off": "Engelliler",
+    "state_on": "Açık",
+    "switch_role": "Anahtar",
+    "tab": "Sekme",
+    "template_percent": "%1$d Yüzde yüzde.",
+    "tooltip_description": "popup Açıklama",
+    "tooltip_label": "pop-up Açıklama",
+}
+
+NO_ENTRY = 0xFFFFFFFF
+
+
+def _len8(n):
+    return bytes([n]) if n < 0x80 else bytes([0x80 | (n >> 8), n & 0xFF])
+
+
+def _pool(strings):
+    data = bytearray()
+    offs = []
+    for s in strings:
+        b = s.encode("utf-8")
+        u16 = len(s.encode("utf-16-le")) // 2
+        offs.append(len(data))
+        data += _len8(u16) + _len8(len(b)) + b + b"\x00"
+    while len(data) % 4:
+        data.append(0)
+    n = len(strings)
+    start = 28 + 4 * n
+    head = struct.pack("<HHIIIIII", 0x0001, 28, start + len(data), n, 0, 0x100, start, 0)
+    return head + struct.pack("<%dI" % n, *offs) + bytes(data)
+
+
+def _config(lang, sdk):
+    cfg = bytearray(64)
+    struct.pack_into("<I", cfg, 0, 64)
+    if lang:
+        cfg[8:10] = lang.encode("ascii")
+    struct.pack_into("<H", cfg, 24, sdk)  # sdkVersion: gana a la config sin versión de la app
+    return bytes(cfg)
+
+
+def build_arsc(pkg_name, pkg_id, type_id, entries, langs=("", "en", "ru", "tr")):
+    """entries: {id_de_entrada: (nombre_clave, texto)} -> bytes de un resources.arsc"""
+    texts = []
+    tidx = {}
+    keys = []
+    kidx = {}
+    for _eid, (kname, text) in entries.items():
+        if text not in tidx:
+            tidx[text] = len(texts)
+            texts.append(text)
+        if kname not in kidx:
+            kidx[kname] = len(keys)
+            keys.append(kname)
+    count = max(entries) + 1
+    type_names = ["t%d" % i for i in range(1, type_id)] + ["string"]
+    type_pool = _pool(type_names)
+    key_pool = _pool(keys)
+    global_pool = _pool(texts)
+
+    spec = struct.pack("<HHIBBHI", 0x0202, 16, 16 + 4 * count, type_id, 0, 0, count)
+    spec += b"\x00" * (4 * count)
+    chunks = [spec]
+    ordered = sorted(entries)
+    for lang in langs:
+        body = bytearray()
+        offs = [NO_ENTRY] * count
+        for eid in ordered:
+            kname, text = entries[eid]
+            offs[eid] = len(body)
+            body += struct.pack("<HHI", 8, 0, kidx[kname])
+            body += struct.pack("<HBBI", 8, 0, 3, tidx[text])
+        start = 84 + 4 * count
+        head = struct.pack("<HHIBBHII", 0x0201, 84, start + len(body), type_id, 0, 0, count, start)
+        head += _config(lang, 1)
+        chunks.append(head + struct.pack("<%dI" % count, *offs) + bytes(body))
+
+    name = pkg_name.encode("utf-16-le")[:254]
+    name = name + b"\x00" * (256 - len(name))
+    pkg_size = 288 + len(type_pool) + len(key_pool) + sum(len(c) for c in chunks)
+    pkg = struct.pack("<HHI", 0x0200, 288, pkg_size) + struct.pack("<I", pkg_id) + name
+    pkg += struct.pack("<IIIII", 288, 0, 288 + len(type_pool), 0, 0)
+    pkg += type_pool + key_pool + b"".join(chunks)
+    total = 12 + len(global_pool) + len(pkg)
+    return struct.pack("<HHII", 0x0002, 12, total, 1) + global_pool + pkg
+
+
+# ====================================================================== otros plugins
+# Los plugins pintan su interfaz con ui.text(), ui.button()... que devuelven diccionarios
+# JSON. Aquí se intercepta PluginRuntimeSession.render() y se traducen los textos antes de
+# que lleguen a la pantalla. Orden de búsqueda: diccionario -> caché -> traductor en línea
+# (en segundo plano; mientras llega la respuesta se ve el original y luego se refresca).
+
+DICT = {
+    "(hidden network)": "(gizli ağ)",
+    "(possible)": "(İslâm)",
+    "ACTIVITY LOG": "ACTITY LOG",
+    "ATTACK IN PROGRESS": "ATTACK IN PROGRESS",
+    "AV Receivers": "AV Alıcılar",
+    "About": "Hakkında",
+    "About Audio Spoof": "←",
+    "About BlueDucky": "BlueDucky Hakkında",
+    "About Quiet Connect": "Sessiz Connect Hakkında",
+    "About Whisper Pair": "Whisper Pair Hakkında",
+    "About plugins": "Hakkında eklentiler",
+    "About this plugin": "Bu eklenti hakkında",
+    "Accent Color": "Acent Color",
+    "Action opened by the central bottom-panel button": "Merkezi alt panel düğmesi tarafından açılan eylem",
+    "Actions": "Eylemler",
+    "Active": "Etkin",
+    "Active: —": "Varlıklar: -",
+    "Add": "Ekle",
+    "Add Device": "Google Cast",
+    "Add IPP printer": "Ek IPP yazıcısı ekle",
+    "Add phone number": "Telefon numarası ekle",
+    "Add source": "Ekle kaynağı ekle",
+    "Add to favorites": "Favorilere Ekle",
+    "Additional Features": "Ek Özellikler",
+    "Admin Panel": "Admin Panel",
+    "Advanced": "Gelişmiş",
+    "Advanced Bluetooth device discovery": "Nefsimi organize et, ne de kendini göster, ne de kendini göster, ne de kendini göster, ne de kendini göster,",
+    "Advertising is already running": "Reklam zaten çalışıyor",
+    "Air Conditioners": "Hava Durumcular",
+    "Air Purifiers": "Hava Purifiers",
+    "All": "Tümü",
+    "All BLE": "All  karşılığı",
+    "All Functions": "Tüm Fonksiyonlar",
+    "All plugins": "Tüm eklentiler",
+    "All plugins are disabled": "Tüm eklentiler engellidir",
+    "Allow": "İzin ver",
+    "Allow contacts access to pick a number": "Bir sayı seçmeye izin vermek için iletişim erişim izin",
+    "Always": "Her zaman",
+    "Analysis": "Analiz",
+    "Android / iOS Mode": "Android / iOS Mode",
+    "Android Message": "Android Mesaj",
+    "Android, Root and Shizuku": "Android, Root and Shizuku",
+    "Animation reset to standard mode": "Animation standart moda sıfır",
+    "Animation set as permanent on home screen": "Animasyon, evde ekranda kalıcı olarak ayarlanıyor",
+    "App hooking": "App kancaing",
+    "Appearance": "Görünüm",
+    "Apple Action Modal List": "Apple Action Modal Listesi",
+    "Apply": "Uygula",
+    "Apply tag to phone": "Telefona etiket uygulayın",
+    "Arbitrary text": "Arbitrary text",
+    "Ask before plugins download files": "Eklentiler indirme dosyalarından önce sorun",
+    "Audio Systems": "Ses Sistemleri",
+    "Audio profile connection timeout": "Ses profili bağlantısı zamanout",
+    "Audit": "Denetim",
+    "Author": "Yazar",
+    "Author guide": "Yazar rehberi",
+    "Auto": "Otomatik",
+    "Auto-update from store": "Auto-update from store",
+    "Available printers": "Mevcut yazıcılar",
+    "BAD HID scripts run": "BAD HID senaryoları çalışır",
+    "BLE Smart Home": "BLE Smart Home",
+    "BLE chat with other Dolphy users": "Diğer Dolphy kullanıcıları ile sohbet",
+    "BLE spam detector": "BLE spam dekürücü",
+    "BT Name Spoofing": "BT Name Spoofing",
+    "BT-Audio Hijack": "BT-Seso Hijack",
+    "Back": "Geri",
+    "Back/ESC Spam": "Back/ESC Spam",
+    "Bad HID Mode": "Bad HID Mode",
+    "Bank Card": "Banka Kartı",
+    "Basic": "Temel",
+    "Battery": "Battery Battery",
+    "Battery level": "Battery seviyesi",
+    "Beacon/Positioning Signal": "Beacon/Positioning Signal/Positioning Signal/Positioning Signal/Positioning Signal/Positioning Signal/Position",
+    "Bidets": "Bitirenler",
+    "Blu-Ray Players": "Blu-Ray Oyuncular",
+    "Bluetooth Classic pairing request test": "Bluetooth Classic çifting istek testi testi",
+    "Bluetooth Disabled": "Bluetooth Disabledd",
+    "Bluetooth HID profile active": "Bluetooth HID profili aktif",
+    "Bluetooth access": "Bluetooth Access",
+    "Bluetooth and BLE": "- - -————————————————————————",
+    "Bluetooth and location permissions are required": "Bluetooth ve konum izinleri gereklidir",
+    "Bluetooth is off": "Bluetooth kapalı",
+    "Bluetooth not supported": "Bluetooth desteklenmedi",
+    "Bluetooth permissions are required for scanning.": "Bluetooth Bluetooth Tabletleri için gerekli olan.You Bluetooth permissions are required for.",
+    "BluetoothLeAdvertiser unavailable": "BluetoothLeAdvertiser mevcut değil",
+    "Bond Spam": "Bond Spam",
+    "Bonjour / DNS‑SD services": "Bonjour / DNS-SD hizmetleri",
+    "Bottom panel": "Alt Panel",
+    "Brand Name": "Marka Adı",
+    "Brightness": "Katal",
+    "Brute Force Active": "Brute Force Active",
+    "Bruteforce successful": "Bruteforce başarılı başarılı",
+    "Buds List": "TV algılaması başarısız oldu:",
+    "Buttons": "Düğmeler",
+    "By name": "Adına andolsun",
+    "By signal": "sinyale yemin ederim",
+    "CD Players": "CD Oyuncular",
+    "Cable Set-Top Boxes": "Kablo Set-Top Kutu",
+    "Camera search": "Kamera Arama",
+    "Cameras": "Kameralar",
+    "Cancel": "İptal",
+    "Cannot connect to printer": "yazıcıya bağlanamaz",
+    "Cannot read file": "Dosyayı okuyamıyor",
+    "Capabilities": "Yetenekler",
+    "Capabilities and access": "Yetenek ve erişim",
+    "Car Head Units": "Arabalar Bölümler",
+    "Car Multimedia": "Araba",
+    "Center Cursor": "Merkez Cursoror",
+    "Change Msg": "Bayan",
+    "Chat name": "Chat name Adı",
+    "Checking WPS status...": "WPS statüsünü kontrol edin...",
+    "Checking default credentials...": "Varsayılan kimlikleri kontrol edin...",
+    "Checking root…": "Kök kontrol etmek...",
+    "Checking your network for cameras.": "Ağınızı kameralar için kontrol edin.",
+    "Choose a FAB action": "FAB aksiyon seçin",
+    "Choose a video to send to your TV": "TV'nize göndermek için bir video seçin",
+    "Choose another file": "Başka bir harp dosyası seçin",
+    "Choose file": "Dosyayı seçin",
+    "Choose from your address book": "Adresiniz kitaplarından seçin",
+    "Choose video": "Videoyu seçin",
+    "Choose what to write": "Ne yazacağını seçin",
+    "Clear": "Temizle",
+    "Clear log": "Günlüğü temizle",
+    "Clear logs": "Clear loglar",
+    "Clear selection": "Clear Selection",
+    "Clear user NDEF data on a writable tag": "Basit bir kullanıcı NDEF verileri değerli bir etiket",
+    "Clocks": "Saatler",
+    "Close": "Kapat",
+    "Collapsed": "Colaltd",
+    "Color": "Renk",
+    "Compact": "Kompakt",
+    "Company Code": "Volume Up Up",
+    "Computers": "Bilgisayarlar",
+    "Confirm": "Onayla",
+    "Connect": "Bağlan",
+    "Connect to a Google Cast device first.": "İlk önce bir Google Cast cihazına bağlanın.",
+    "Connect to a local Wi-Fi network.": "Bir ağ için bir ağ açın.",
+    "Connect to network": "Ağa bağlan",
+    "Connectable": "Connectable Connectable",
+    "Connected": "Bağlı",
+    "Connected over USB": "USB üzerinden bağlantı kurdu",
+    "Connected!": "Bağlandı!",
+    "Connecting...": "Bağlanma...",
+    "Connecting…": "Bağlanma...",
+    "Connection Update Required": "Bağlantı Güncellemesi Gerekli",
+    "Connection error": "Bağlantı hatası",
+    "Connection lost, reconnecting": "Bağlantı kayboldu, yeniden bağlantı kurmak",
+    "Contact": "İletişim İletişim",
+    "Contact on tag": "etiketle ilgili iletişim",
+    "Containers": "Konteynerler",
+    "Content": "İçerik",
+    "Continue": "Devam devam etmeye devam et",
+    "Controls": "Kontroller",
+    "Converters": "Garantili Evler",
+    "Copies": "Copies Copies",
+    "Copy": "Kopyala",
+    "Copy log": "Kopyalama logu",
+    "Copy tag for emulation": "Bağışlama için kopya etiketi",
+    "Copy the invisible name": "- - -————————————————————————",
+    "Copying password...": "● · · · · · · · · · · · ·",
+    "Could not connect": "Bağlanamadı",
+    "Could not get video from the cameras found": "Kameralardan video alamaz, bulundu",
+    "Could not import commands from file": "Dosyadan gelen komutları ithal edemez",
+    "Could not make this chat discoverable.": "Bu sohbetin keşfedilemez hale getirilemez hale gelmeyebilir.",
+    "Could not open plugin": "Açık değil mi?",
+    "Could not parse DuckyScript": "Duckyiff'i parlatamaz",
+    "Could not parse the URL": "URL'yi parlatayamadım",
+    "Could not read the video": "Videoyu okuyamayabilir",
+    "Could not send text to notepad": "Notpad için metin gönderemez",
+    "Count": "Sayı",
+    "Create": "Oluştur",
+    "Create URL tag and emulate NFC Forum Type 4": "URL etiketi oluşturun ve NFC Forum Type 4",
+    "Create and save your QR codes": "Create and save your QR kodları",
+    "Current signal:": "Current sinyal:",
+    "Custom": "Özel",
+    "Custom BLE Spam modes": "Özel BLE Spam modları",
+    "Custom color": "Özel renk",
+    "Customize animations": "Özelleştirme animasyonları",
+    "Cyclic Animation": "Klübünlü Animasyon",
+    "DEX loading and class access": "DEX yükleme ve sınıf erişim",
+    "DVB-T Receivers": "DVB-T Alıcılar",
+    "DVD Players": "DVD Oyuncular",
+    "Dark": "Koyu",
+    "Dark theme": "Dark tema",
+    "Data written": "Data written",
+    "Database from flipperzero-firmware-dev: ac.ir": "Turnperzero-firmware-dev: .irir",
+    "Database from flipperzero-firmware-dev: audio.ir": "Turnperzero-firmware-dev: ses.ir",
+    "Database from flipperzero-firmware-dev: tv.ir": "Turnperzero-firmware-dev: tv.ir",
+    "Database is empty": "Please Name is empty empty",
+    "Date": "Tarih Tarihi",
+    "Default": "Varsayılan olarak sıralayıcı",
+    "Delay": "Gecikme",
+    "Delete": "Sil",
+    "Delete Selected": "Delete Seçilmiş",
+    "Delete selected tags": "Seçilmiş etiketler",
+    "Delivered to all discovered users": "Tüm keşfedilen kullanıcılara teslim edildi",
+    "Delivery failed for one or more users": "Teslimat bir veya daha fazla kullanıcı için başarısız oldu",
+    "Deny": "Deny",
+    "Description": "Açıklama",
+    "Details": "Ayrıntılar",
+    "Detected:": "jam yerleştirilir",
+    "Developer": "Geliştirici",
+    "Developer @oosthemes": "Geliştirici @oosthemes",
+    "Device Actions": "Cihaz Eylemleri",
+    "Device Scanner": "Device Browser",
+    "Device Type": "Device Type",
+    "Device accepted the video": "Cihaz videoyu kabul etti",
+    "Device connected!": "Cihaz bağlantılı!",
+    "Device guess": "Server Durdu",
+    "Device name": "Cihaz adı",
+    "Device not found": "bulamadık",
+    "Devices": "Cihazlar",
+    "Digital Photo Frames": "Dijital Fotoğraf Frames",
+    "Digital Signage": "Dijital İşaretaj",
+    "Digits": "Digits",
+    "Disable": "Kapat",
+    "Disable Safe Mode": "Güvenli bir şekilde",
+    "Disabled": "Engelliler",
+    "Disconnect": "Bağlantıyı kes",
+    "Disconnected": "Bağlantı kesildi",
+    "Discover devices in current Wi-Fi network": "Mevcut Wi-Fi ağında bulunan Discover devices",
+    "Discover devices on the current Wi-Fi network": "Mevcut Wi-Fi ağında bulunan Discover devices",
+    "Discovered Devices": "Keşfetli Cihazlar",
+    "Discovered cameras": "Keşfetli kameralar",
+    "Discovered devices are listed below": "Keşfetli cihazlar aşağıda listelenmiştir",
+    "Discussion / post": "Tartışma / post",
+    "DoS attack started": "Cihazları arıyor...",
+    "Document": "Belge",
+    "Documentation website": "Dokümantasyon web sitesi",
+    "Dolphy 2.5 plugin system": "Dolphy 2.5 eklenti sistemi",
+    "Dolphy Python plugins": "Dolphy Python eklentileri",
+    "Dolphy plugin": "Dolphying Query",
+    "Dolphy plugin crash log": "Dolphy plugin record log log",
+    "Don't show again": "Tekrar göstermeyin",
+    "Done": "Hazır",
+    "Done!": "Done!",
+    "Download": "İndir",
+    "Ducky Scripts": "Ducky scripts",
+    "Ducky script": "Ducky senaryo",
+    "Ducky script · USB HID gadget (root)": "Ducky senaryosu · Gadget USB HID (root)",
+    "EMV card": "EMV kart",
+    "Echo/Reflections": "Echo/Reflections",
+    "Edit": "Düzenle",
+    "Edit Device": "Cilt Down Down",
+    "Edit Mode": "Edit Mode",
+    "Electronic Whiteboards": "Electronic Whiteboards",
+    "Email": "E-posta e-posta e-posta e-posta e-posta",
+    "Empty DuckyScript file": "Boş Duckyiff dosyası",
+    "Empty screen": "Boş ekran",
+    "Emulate wireless Bluetooth keyboard/mouse": "Kablosuz Bluetooth klavye /mouse",
+    "Emulating...": "Emulating...",
+    "Enable": "Aç",
+    "Enable NFC in phone settings": "Telefon ayarlarında NFC’yi aç",
+    "Enable location services": "Konum hizmetlerini aç",
+    "Enable safe mode automatically on crashes": "Çökme sonrası güvenli modu otomatik aç",
+    "Enabled": "Enabled",
+    "Enter DuckyScript…": "DuckyScript'a girin...",
+    "Enter Wi‑Fi password": "Wi-Fi şifresini girin",
+    "Enter a Ducky script": "Bir Ducky senaryosu girin",
+    "Enter a device name": "Bir aygıt adı girin",
+    "Enter phone number": "Telefon numarası girin",
+    "Enter tag name": "Etiket adını gir",
+    "Enter text": "Enter text",
+    "Enter text (Latin letters, digits, symbols)": "Metin girin (Latin harfler, sayılar, semboller)",
+    "Enter the number manually": "Sayıyı manuel olarak girin",
+    "Enter valid URL": "Geçerli URL girin",
+    "Erase NFC tag": "Erase NFC etiketi",
+    "Error": "Hata",
+    "Excellent": "Mükemmel",
+    "Exit": "Çık",
+    "Exit Edit Mode": "Çıkış",
+    "Expanded": "Genişledi",
+    "Export": "Dışa aktar",
+    "External servers and tunnels are disabled": "Dış sunucular ve tüneller engellidir",
+    "Failed": "Başarısızlık",
+    "Failed to connect to the network": "Ağa bağlanamadı",
+    "Failed to load catalog": "Katalog yüklemeye başarısız oldu",
+    "Failed to open link": "Bağlantıyı açmaya başarısız oldu",
+    "Fair": "Orta",
+    "Fans": "Fans Fans",
+    "Fast Pair List": "Videoyu hazırlamak...",
+    "Favorites": "Favoriler Favoriler",
+    "Featured": "Özel Önemli Özel Önemler",
+    "Fetching system info...": "Fetching sistemi bilgi...",
+    "File": "Dosya",
+    "File download": "Dosya indir",
+    "File downloads": "File indirs",
+    "File import error": "Dosya import hatası",
+    "File is too large": "Dosya çok büyük bir dosya",
+    "Filter": "Filtre Filtre",
+    "Finish": "Bile bitir",
+    "Fireplaces": "Fireplaces",
+    "Flipper Font": "Flipper Font",
+    "Flipper Mac script not found": "Flipper Mac senaryosu bulunamadı",
+    "Flipper Win script not found": "Flipper Win senaryo bulunamadı",
+    "Flipper database not found or empty": "Flipper veritabanı bulunamadı veya boş",
+    "Flood Print": "Flood",
+    "For anonymity": "For For Name (İngilizce)",
+    "Forward": "İleri",
+    "Frequency": "Frekans",
+    "Full access": "Full access Full access Full",
+    "Function menu view": "İşlev menüsü görünüm",
+    "Functions": "Fonksiyonlar",
+    "Game Consoles": "Oyun Konsolları",
+    "Gateway": "Gateway Gateway",
+    "Glass navigation bar (LiquidBottomTabs)": "Cam navigasyon bar (LiquidBottomTabs)",
+    "Go": "Git",
+    "Go to settings": "Go to karşılığı",
+    "Good": "İyi",
+    "Got it": "Got it",
+    "Grant Bluetooth access for this section.": "Bu bölüm için Bluetooth erişimine izin verin.",
+    "Grant Permission": "Grant Permission",
+    "Grant access": "Grant access access",
+    "Grant location": "Android Mesaj",
+    "HCE is not supported on this device.": "HCE bu cihazda desteklenmez.",
+    "HID Configuration": "HID Konfü",
+    "HID Keyboard": "HID Klavye",
+    "HID Keyboard Service": "HID Klavye Servisi",
+    "HID modes": "HID modları",
+    "HTML is empty": "\"B uncertainty",
+    "Hacking...": "Hacking...",
+    "Headphones": "Hedef:",
+    "Headphones List": "Kulaklıklar Listesi",
+    "Heaters": "Rezistans",
+    "Help": "Yardım",
+    "Hex payload": "Hex, yükleri öder",
+    "Hide": "42. Sezon",
+    "Hide HEX": "Gizle HEX",
+    "History": "Tarih Tarihi Tarihi",
+    "Hold the tag near the phone": "Telefonun yakınında tutun",
+    "Hold the tag near the phone to erase data": "Verileri silmek için telefonun yakınında etiketi tutun",
+    "Hold the tag near the phone to write data": "Verileri yazmak için telefondaki etiketi tut",
+    "Home": "Ana ekran",
+    "Home Spam": "Home Spam",
+    "Humidifiers": "Humidifiers",
+    "IP address or host name": "IP adresi veya host ölçmek",
+    "IR Banners": "IR Banners",
+    "IR Jammer": "IR spot",
+    "IR Remotes (Flipper)": "IR Uzaktans (Flipper)",
+    "IR Remotes (TV)": "IR Uzaktans (TV)",
+    "IR module connected": "IR modülü harp",
+    "IR remote database from Flipper-IRDB-main": "IR uzaktan veritabanı Flipper-IRDB-main",
+    "IR signals sent": "IR sinyalleri gönderilen",
+    "Identifier": "Idenitim",
+    "Idle": "Idle",
+    "Import": "İçe aktar",
+    "Import .ir file": "İthalat .ir file",
+    "Import DuckyScript": "İthalat Duckyiff",
+    "Import a .txt with DuckyScript via the + button": "DuckyScript ile bir .txt + düğme ile",
+    "Import an HTML file first": "İlk önce bir HTML dosyasını ithal edin",
+    "Import from .txt": ".txt'den ithal edin",
+    "Import plugin": "İthalat eklenti",
+    "Info": "Bilgi",
+    "Infrared transmitter": "Photoen verici",
+    "Install": "Kur",
+    "Installation failed": "Tesis başarısız oldu",
+    "Installed": "Yüklemek için",
+    "Installing…": "Yüklemek...",
+    "Intercept": "Intercept",
+    "Intercept Bluetooth speakers and headphones": "Intercept Bluetooth konuşmacıları ve kulaklıklar",
+    "Interface": "Interface",
+    "Interface scale": "Interface ölçek",
+    "Interference/Noise": "Interference /Noise",
+    "Internet hosting is not used": "İnternet barındırması kullanılmamıştır",
+    "Interval": "Aralık",
+    "Invalid hex payload": "Invalid hex maaş",
+    "Invalid link": "Invalid linki",
+    "Invalid printer address": "Invalid yazıcı adresi",
+    "Jammer (broadband interference)": "(broadband müdahalesi)",
+    "Jamming…": "Interfieing...",
+    "KVM Switches": "KVM anahtarları",
+    "Keyboard": "Klavye",
+    "Known vendors": "Bilinen satıcılar",
+    "LAN Tools": "LAN Tools",
+    "LAN scanner": "LAN tarayıcı",
+    "LED Lighting": "LED Aydınlatma",
+    "Language": "Dil",
+    "Last seen": "Son olarak görüldü",
+    "Learn more": "Daha fazla bilgi edinin Daha fazla bilgi edinin",
+    "Left": "Sol",
+    "Level": "Seviye",
+    "Level up pending": "Seviyeye devam etmek için",
+    "Library of simple NFC tags with links": "Basit NFC etiketlerin Kütüphaneleri",
+    "Light": "Açık",
+    "Light theme": "Işık tema",
+    "Link in Tag": "Link in Tag",
+    "Link or text": "Link Kesme veya metin",
+    "Listen": "Dinle",
+    "Listening": "Dinlemeyi dinlemek",
+    "Live": "Canlı",
+    "Live feed from your home camera (admin/admin)": "Ev kameranızdan canlı bes (admin/admin)",
+    "Load": "Yükle",
+    "Loading": "Yükleniyor",
+    "Loading catalog…": "Şarj kataloğu...",
+    "Loading on device…": "Cihazın üzerine yükleniyor...",
+    "Loading remotes...": "Uzaklar Yükleniyor...",
+    "Loading signals...": "Please/Axb-Ses/Ax|Ses|Ses|Ses|",
+    "Loading...": "Yükleniyor...",
+    "Local network is unavailable": "Yerel ağ mevcut değildir",
+    "Local network mode": "S Yerel uncertainty a network mod modu",
+    "Local network tools": "Yerel ağ araçları",
+    "Local server failed to start": "Yerel sunucu başlamadı",
+    "Local server is already running": "Yerel sunucu zaten çalışıyor",
+    "Local server is running in the background": "Yerel sunucu arka planda çalışıyor",
+    "Local server stopped": "S Yerel Nur durduruldu",
+    "Location services are off": "Konum hizmetleri kapalı",
+    "Lock": "Lock Lock",
+    "Log": "Günlük",
+    "Log copied": "Log kopyalandı",
+    "Logs": "Logs Logs",
+    "MAC address": "MAC adresi",
+    "MAX LEVEL": "“Gerekli”, “Gerekli”, “Gerekli”,",
+    "Main Information": "Ana Bilgi",
+    "Manage and install plugins": "Yönetin ve eklentileri yükleme",
+    "Manual": "Manual Manual",
+    "Manual connection required in Bluetooth settings": "Bluetooth ayarlarında gerekli olan manuel bağlantı",
+    "Manufacturer": "Satışcı",
+    "Match system": "Maç sistemi",
+    "Media": "Medya",
+    "Memory size": "Memory boyut",
+    "Menu": "Menü",
+    "Message": "Mesaj",
+    "Middle": "Orta",
+    "MiniDisc Players": "MiniDisc Oyuncular",
+    "Minimal plugin": "Minimal plugin",
+    "Miscellaneous": "Miscellaneous",
+    "Mode": "Mod",
+    "Monitors": "Monitors",
+    "Mood": "Mood",
+    "Moving to another device": "Başka bir cihaza taşınmak",
+    "Mute": "Mute",
+    "NFC Emulation": "NFC Emulation",
+    "NFC Forum Type 4 · hold the phone near a reader": "NFC Forum Type 4 · telefonu bir okuyucuya getiriyor",
+    "NFC Tag Emulation": "NFC Tag Emulation",
+    "NFC Tags": "NFC Tags",
+    "NFC Tools": "NFC Tools",
+    "NFC cards read": "NFC kartları oku",
+    "NFC emulations started": "NFC emulations başladı",
+    "NFC is off": "NFC kapalı",
+    "NFC is off. Enable NFC in phone settings.": "NFC kapalıdır. Telefon ayarlarında enable NFC.",
+    "NFC is unavailable": "NFC mevcut değildir",
+    "NFC tag tools": "NFC etiketi araçları",
+    "NFC unavailable": "NFC mevcut değildi",
+    "NRF Scanner": "NRF Browser",
+    "Name": "Ad",
+    "Name visible to other devices": "Başka cihazlara görünür isim",
+    "Named only": "Sadece Add sadece",
+    "Navigation": "Navigation",
+    "Network": "Ağ",
+    "Network Diagnostic Hub": "Network Tanı Hub",
+    "Network device": "Hata:",
+    "Network not connected": "jam Distance",
+    "Network requests": "Network requests",
+    "Never": "Asla",
+    "New": "Yeni",
+    "New Airtag List": "Müdahaleye hazır olun...",
+    "New Apple Device List": "SEÇİM",
+    "New NFC Tag": "Yeni NFC Tag",
+    "New QR Code": "yeni QR uncertainty",
+    "Next": "İleri",
+    "No": "Hayır",
+    "No IP cameras were found on your network": "Ağınızda IP kameraları bulunamadı",
+    "No active HID connection": "Aktif HID bağlantısı yok",
+    "No cameras found": "Kameralar bulunamadı",
+    "No cameras found on the network": "Ağda bulunan hiçbir kamera bulunamadı",
+    "No cameras on the network": "Ağda kamera yok",
+    "No database files configured.": "Hiçbir veritabanı dosyaları yapılandırıldı.",
+    "No description.": "Hiçbir açıklama.",
+    "No devices found": "Bulamayan cihazlar bulunamadı",
+    "No devices found nearby": "No devices yakındakileri buldu",
+    "No devices found. Tap refresh.": "Bululan cihazlar yok. Tap yenilendi.",
+    "No messages yet": "Henüz mesaj yok",
+    "No networks found": "No ağları harp Bul",
+    "No paired devices in this list yet": "* * * * *",
+    "No permissions for BLE advertising": "BLE reklam için izin yok",
+    "No plugin selected": "Hiçbir eklenti seçilmedi",
+    "No plugins in this source": "Bu kaynaktan eklenti yok",
+    "No printers found": "Yazıcılar bulunamadı",
+    "No recordings yet": "BLE Smart Home",
+    "No response to request": "İstek için cevap yok",
+    "No saved QR codes": "QR kodları kurtarılmadı",
+    "No scooters found. Start a scan near a device.": "Hiçbir scooter bulunamadı. Bir cihazın yakınında bir tarama başlatın.",
+    "No services found": "jam 02",
+    "None": "Yok",
+    "Normal List": "Chat name Adı",
+    "Not Connected": "Bağlanma",
+    "Not Your Device List": "Videoyu kabul et Videoyu kabul et",
+    "Not enough free space for this video": "Bu video için yeterli ücretsiz yer değil",
+    "Notepad text": "Notpad text",
+    "Nothing found": "Hiçbir şey bulunamadı hiçbir şey bulunamadı",
+    "Notifications": "Bildirimler",
+    "OFF": "OFF OFF",
+    "OK": "Tamam",
+    "ON": "(Gerekli)",
+    "ONVIF and IP camera ports": "ONVIF ve IP kamera",
+    "Offline": "Offline",
+    "Online plugin translation": "Online eklenti çevirisi",
+    "Open": "Aç",
+    "Open Bluetooth settings": "Açık Bluetooth ayarları",
+    "Open Link": "Bağlantıyı aç",
+    "Open NFC payment settings": "Açık NFC ödeme ayarları",
+    "Open a link when scanned": "Gözden Geçiren bir bağlantı açın",
+    "Open admin": "iOS Mesaj",
+    "Open app settings": "Açık uygulama ayarları",
+    "Open compose in mail app": "Posta uygulamasında açık form",
+    "Open local site": "askıda",
+    "Open router web panel": "Yönlendiricinin web panelini aç",
+    "Open the complete Functions screen": "Tamam Fonksiyonlar ekranını açın",
+    "Opening Wi-Fi settings": "Açılış Wi-Fi ayarları",
+    "Operation failed": "Operasyon başarısız oldu",
+    "Options": "Seçenekler",
+    "Orientation": "Oryantasyon",
+    "Other": "Diğer",
+    "Other device service": "Diğer cihaz harp hizmet hizmeti",
+    "PASSWORD:": "PASSWORD:",
+    "PERMISSION REQUIRED": "PERMISSION REQUIRED",
+    "Packet log": "Packet log",
+    "Packet sent successfully": "Packet başarıyla gönderildi",
+    "Paired": "Paired",
+    "Paired Devices": "Paired Cihazlar",
+    "Paper": "Paper Paper Kağıt",
+    "Passport": "Pasaport",
+    "Passport: Statistics": "Pasaport: İstatistikler",
+    "Password": "Parola",
+    "Password brute force": "Şifre brute güç",
+    "Password protection": "Şifre koruma koruma",
+    "Passwords for Brute-Force": "Brute-Force için şifreler",
+    "Paste": "Yapıştır",
+    "Pause": "Pause",
+    "Payload too long for legacy advertising": "Payload çok uzun süre mirası için",
+    "Payloads": "Payloads",
+    "Performance Mode": "Performans Modu",
+    "Permanent": "Kalıcı",
+    "Permission error. Try connecting manually": "İzin hatası. Elle bağlanmaya çalış",
+    "Permissions": "İzinler",
+    "Personalisation": "Kişiselleştirme",
+    "Phantom Clicks": "Phantom Clicks",
+    "Phone": "Telefon",
+    "Phone number or vCard": "Telefon numarası veya vCard",
+    "Pick from contacts": "kontaklardan alın",
+    "Pin": "Sabitle",
+    "Pinned": "Pinnedildi",
+    "Plain text": "Düz metin çevirisi",
+    "Play": "Oynat",
+    "Play sounds via QR inside the local network": "Play, yerel ağ içindeki QR aracılığıyla geliyor",
+    "Please enable Bluetooth to use spam features": "Lütfen Bluetooth'un spam özelliklerini kullanmasına izin verin",
+    "Plugin Store": "Plugin Store",
+    "Plugin files and assets": "Eklenti dosyaları ve varlıklar",
+    "Plugin installed": "Plugin installed",
+    "Plugin settings": "Plugin ayarları",
+    "Plugin sources": "Plugin kaynakları",
+    "Port": "Bağlantı noktası",
+    "Possible incompatibility": "Olası kullanılabilirlik",
+    "Power": "Güç gücü",
+    "Preferences": "Tercihler",
+    "Preparing video…": "Videoyu hazırlamak...",
+    "Present phone to reader.": "Okuyucuya mevcut telefon.",
+    "Preset not found": "Preset bulunamadı",
+    "Previous": "Önceki",
+    "Print": "Otomatik olarak, düz ekranlı",
+    "Print settings": "Yazdır ayarları",
+    "Print test page": "Yazdır test eğitimci sayfası",
+    "Print without the system dialog": "Sistem dialog olmadan yazdır",
+    "Printer": "Yazıcılar Yazıcısı Yazıcısı",
+    "Printer / printing service": "Yazıcı / baskı hizmeti",
+    "Printer Display Message": "Yazıcı ekranı mesajı",
+    "Printer Password": "Videoyu İndir",
+    "Printer certificate is not trusted": "Yazıcı sertifikası güvenilmemektedir",
+    "Printer response timed out": "Yazıcı yanıt süresi zaman çıktı",
+    "Printers not found": "Yazıcılar bulunamadı",
+    "Profile": "Profil",
+    "Projectors": "Projektörler",
+    "QR Code Generator": "- QR ah Jeneratör",
+    "QR Generator": "QR Jeneratör",
+    "QR Tools": "QR Tools",
+    "QR code generation and local audio control": "QR kodu nesli ve yerel ses kontrolü",
+    "Quality": "Kalite",
+    "Queue path": "Queue harp",
+    "Quick Actions": "Hızlı Eylemler",
+    "Quick Startup": "Hızlı Startup",
+    "Quiet connect": "Sessiz bağlantı",
+    "Quit": "Çık",
+    "ROUTER ACTIONS": "ROUTER ACTIONS",
+    "Radio interfaces": "Radyo arayüzleri",
+    "Randomize MAC": "Randomize MAC",
+    "Read NFC tag and show full information": "NFC etiketini okuyun ve tam bilgi göster",
+    "Read Tag": "Read Tag",
+    "Read-only": "Oku-sadece",
+    "Reading printer capabilities…": "yazıcının yeteneklerini okumak...",
+    "Ready": "Hazır",
+    "Ready for commands...": "komutlar için hazır ...",
+    "Ready for interference…": "müdahale etmeye hazır...",
+    "Ready to send": "Hazırla",
+    "Reboot": "Yeniden başlat",
+    "Receive": "Al",
+    "Recommended": "Önerilen",
+    "Record": "Kaydet",
+    "Record type": "Kayıt türü",
+    "Recording...": "Kayıt...",
+    "Recordings": "Kayıtlar",
+    "Refresh": "Yenile",
+    "Reinstall": "Yeniden yükleme",
+    "Remote not found": "Uzak bulunamadı",
+    "Remotes marked with a star will appear here": "Uzaklar bir canlı olarak görünür",
+    "Remove": "Kaldırın",
+    "Remove from favorites": "Favorilerden Çıkarın",
+    "Rename": "Rename",
+    "Rename Remote": "Rename Uzaktan",
+    "Rename the device": "Rename the device",
+    "Rescan": "Offline",
+    "Reset": "Sıfırla",
+    "Results": "Sonuçlar",
+    "Resume": "Sürdür",
+    "Retry": "Tekrar dene",
+    "Right": "Sağ",
+    "Root access denied": "Kök erişim inkar edildi",
+    "Root access required": "Gerekli Kök erişim gerekli",
+    "Root network tools: ARP and traffic inspection": "Kök Ağları: ARP ve Trafik Kontrolleri",
+    "Root rights not found": "Kök hakları bulunamadı",
+    "Root: available": "Root: available",
+    "Root: unavailable": "Kök: Yok Kök: Yok",
+    "Router MAC (BSSID)": "Yönlendirici MAC (BSSID)",
+    "Run": "Çalıştır",
+    "Run again": "Tekrar Run Run",
+    "Running": "Çalışıyor",
+    "Running…": "Bluetooth Engelli",
+    "Russian": "Rusça",
+    "SECURITY": "GÜVENLİK",
+    "SELECT DEVICE": "SEBICE",
+    "SSID (network name)": "SSID (network name)",
+    "SSID and password (text record)": "SSID ve şifre (text record)",
+    "SUCCESS: Reboot signal sent!": "SUCCESS: Reboot sinyali gönderildi!",
+    "Safe Mode": "Güvenli Mod",
+    "Save": "Kaydet",
+    "Save URL for Type 4 emulation": "Tip 4 emulation için URL'yi kurtarın",
+    "Scan": "Tara",
+    "Scan Me": "İthalat eklenti",
+    "Scan Xiaomi/Ninebot, lock/unlock, beep, battery": "Scan Xiaomi/Ninebot, kilit /unlock, beep, batarya",
+    "Scan again": "Yeniden tara",
+    "Scan complete": "Scan Complete",
+    "Scan scooters": "property ilham kaynağı",
+    "Scanner": "Tarayıcı",
+    "Scanners": "Tarayıcılar",
+    "Scanning Bluetooth devices…": "Bluetooth cihazları ...",
+    "Scanning Fast Pair...": "Hızlı Pair'i tarayın...",
+    "Scanning Wi-Fi modules...": "Wi-Fi modüllerini tarayın...",
+    "Scanning Wi‑Fi and DNS‑SD…": "Wi-Fi ve DNS-SD'yi tarayın...",
+    "Scanning all BLE...": "Tüm BLE'leri tarayın...",
+    "Scanning audio devices…": "Ses cihazları için bakmak...",
+    "Scanning for cameras…": "Kameralara bakmak...",
+    "Scanning for devices...": "Cihazları aramak...",
+    "Scanning for devices…": "cihazlara bakmak...",
+    "Scanning network...": "Tarama ağı...",
+    "Scanning will take ~6 seconds.": "Scanning ~6 saniye sürecek.",
+    "Scanning...": "Scanning...",
+    "Scanning…": "Taranıyor…",
+    "Screen and logic modification": "Ekran ve mantık değişikliği",
+    "Screen hook modes": "Ekran kanca modları",
+    "Screens, actions, and services": "Ekranlar, eylemler ve hizmetler",
+    "Screenshot": "Ekran görüntüsü",
+    "Screenshot Spam": "Ekran görüntüsü Spam",
+    "Script failed": "Senaryo başarısız oldu",
+    "Script finished": "Senaryo bitmişti",
+    "Search": "Ara",
+    "Search Brand": "Arama Marka",
+    "Search plugins": "Arama eklentileri",
+    "Searching for devices": "Cihazları aramak için",
+    "Searching for devices...": "Cihazları aramak...",
+    "Searching for devices…": "cihazlara bakmak...",
+    "Searching scooters…": "scooterlar arıyor...",
+    "Searching...": "Aranıyor...",
+    "Searching…": "Aranıyor…",
+    "Secure IPPS connection": "Güvenli IPPS bağlantı",
+    "Select": "Seç",
+    "Select Category": "Kategori Seç",
+    "Select a device for spam": "spam için bir cihaz seçin",
+    "Select all": "Tümünü seç",
+    "Select an .ir file": "Bir .ir dosyasını seçin",
+    "Select scripts": "Senaryoları seçin",
+    "Send": "Gönder",
+    "Send all jammer signals": "Tüm jammer sinyalleri gönderin",
+    "Send logs": "Kayıtları gönder",
+    "Send power off signals to all TVs": "Tüm TV'lere güç gönderin",
+    "Sending finished": "Hazırlayın",
+    "Sending reboot command...": "Yeniden yeniden başlatma komutunu gönderin...",
+    "Sending signals...": "İşaretler gönderin...",
+    "Sending...": "Gönder...",
+    "Sending…": "Gönderiliyor…",
+    "Sent": "Sent",
+    "Serial Terminal": "Seri Terminal Terminal",
+    "Server could not start; no available ports": "Server başlamayabilir; mevcut limanlar yok",
+    "Server status:": "ian Woolf:",
+    "Server stopped": "Server durdu",
+    "Services": "Hizmetler Hizmetler",
+    "Set Dolphy as default payment app.": "Dolphy’yi varsayılan ödeme uygulaması olarak ayarla.",
+    "Set animation as permanent on home screen?": "Ev ekranında kalıcı olarak animasyon mu ayarlayın?",
+    "Setting up the HID gadget…": "HID gadget'ı yapılandırın...",
+    "Settings": "Ayarlar",
+    "Share": "Paylaş",
+    "Shell commands": "Shell komutları",
+    "Show": "Göster",
+    "Show HEX": "Show HEX",
+    "Shutdown": "Shutdown",
+    "Sides": "Sides",
+    "Signal Strength": "Signal Strength",
+    "Size": "Boyut",
+    "Skip": "Atla",
+    "Slow Connection": "Yavaş Bağlantı",
+    "Smart Light": "Got it",
+    "Smart Search": "Smart Search",
+    "Sort": "Sırala",
+    "Sound": "Ses",
+    "Soundbars": "Sesbarss",
+    "Source": "Kaynak Kaynağı",
+    "Sources": "Kaynaklar",
+    "Spam interval (ms)": "Spam aralığı (ms)",
+    "Speakers": "Konuşmacılar",
+    "Speed": "Hız",
+    "Spoofed Identity": "Spontılı Kimlikler",
+    "Standard": "Standart",
+    "Standard Flipper Database": "Standart Flipper Database",
+    "Start": "Başlat",
+    "Start IR storm": "IR fırtınasını başlatın",
+    "Start Scanning": "Taramayı başlat",
+    "Start Server": "Start",
+    "Start scan": "Taramayı başlat",
+    "Starting hijack…": "Kaçmak için ...",
+    "Starting local server…": "Yerel sunucuya başlayın...",
+    "Starting security audit...": "Güvenlik denetimine başlayın...",
+    "Starting...": "Başlayın...",
+    "State and settings": "Devlet ve ayarlar",
+    "Status": "Durum",
+    "Stop": "Durdur",
+    "Stop IR storm": "IR fırtınayı durdur",
+    "Stop Scanning": "Dur taramayı Durdur",
+    "Stop Server": "Eylemler",
+    "Stop scan": "Dur taramayı Durdur",
+    "Stopped": "Durduruldu",
+    "Stopped.": "Durdu.",
+    "Store": "Mağaza",
+    "Store is not ready": "Mağaza hazır değil, hazır değil",
+    "Storm": "Fırtına",
+    "Streaming Devices": "Akış Cihazları",
+    "Stress test (UDP Flood)": "Stres testi (UDP Sel)",
+    "Style": "Stil",
+    "Subject (optional)": "Konu (isteğe)",
+    "Subscribe to TG": "TG'ye abone olun",
+    "Success": "Başarılı",
+    "Success! Checking password…": "Başarı, şifreyi kontrol edin...",
+    "Successfully connected": "Bağlantı başarılı",
+    "Support": "Destek",
+    "TARGET": "TARGET",
+    "TV Tuners": "TV Tuners",
+    "TV database not found or contains no entries": "TV veritabanı bulunamadı veya giriş yok",
+    "TVs": "Bululdu:",
+    "TWS audio tools": "TWS ses araçları",
+    "Tablet": "Tablet",
+    "Tag Analysis": "Tag Analiz",
+    "Tag Information": "Tag Bilgileri",
+    "Tag Saved": "Tag Kurtarıldı",
+    "Tag copy": "Tag kopya",
+    "Tag not found": "Tag bulunamadı",
+    "Tag saved to \"NFC Emulation\" section": "Tag \"NFC Emulation\" bölümüne kaydedildi",
+    "Tap \"Start Scanning\" to begin": "Tap \"Start Scanning\" to start",
+    "Tap a device to attack": "Saldırıya saldırmak için bir aygıt dokunun",
+    "Tap the button to start the server": "Sunucuyu başlatmak için düğmesine tıklayın",
+    "Target:": "Hedef: Hedef:",
+    "Technologies": "Teknoloji Teknolojileri",
+    "Terminal logs": "SüperVM",
+    "Test": "Test et",
+    "Text": "Metin",
+    "The Bluetooth name shown to other devices.": "Bluetooth adı diğer cihazlara gösterilen.",
+    "The app was closed because of a plugin error": "Uygulama bir eklenti hatası nedeniyle kapalıydı",
+    "The developer did not provide a description.": "Geliştirici, bir ödeme olarak değil.",
+    "Theme": "Tema",
+    "These network tools require root access.": "Bu ağ araçları kök erişim gerektirir.",
+    "This contact has no phone number": "Bu temasın telefon numarası yok",
+    "This device does not support BLE advertising": "Bu cihaz BLE reklamını desteklemiyor",
+    "This feature requires Root rights": "Bu özellik Kök haklara ihtiyaç duyar",
+    "This tag cannot be emulated": "Bu etiket emated edilemez",
+    "Tile size": "Malzemelerin büyüklüğü",
+    "Tiles": "Kaplamalar",
+    "Time": "Zaman",
+    "Too many redirects": "Kayıt Ol Girişi (Görünge)",
+    "Tools": "Araçlar",
+    "Top bars": "Top barlar",
+    "Touchpad": "Touchpad",
+    "Touchpad Sensitivity (Move)": "Touchpad Hassasiyet (Move)",
+    "Touchpad Sensitivity (Scroll)": "Touchpad Hassasiyet (Scroll)",
+    "Touchscreens": "Touchscreens",
+    "Toys": "Oyuncak Oyuncakları Oyuncakları",
+    "Traffic": "Trafik",
+    "Trusted model": "Güvenilen model",
+    "Try again": "Tekrar tekrar deneyin",
+    "Try all devices on the network": "Ağdaki tüm cihazlara deneyin",
+    "Turn on Bluetooth and try again.": "Bluetooth'a dön ve tekrar deneyin.",
+    "Turn on Bluetooth first": "İlk önce Bluetooth'ta dön",
+    "Turn on Bluetooth to discover nearby devices": "Yakındaki cihazları keşfetmek için Bluetooth'a dön",
+    "Turn on NFC in settings": "NFC'de Ayarlar",
+    "Tx power": "Tx güç gücü",
+    "Type": "Tür",
+    "Type a message": "Bir mesaj yazın",
+    "Type to notepad": "Notpad",
+    "URL to open": "URL açık",
+    "US Radar": "Giriş:",
+    "US radar and BLE/Wi-Fi device detector": "ABD radarı ve BLE/Wi-Fi cihazı dedektörleri",
+    "US scanner requires microphone access.": "US tarayıcı mikrofon erişimi gerektirir.",
+    "USB and Bad HID": "USB ve Bad HID",
+    "Ultrasonic Repellent/Generator": "Ultrasonik Repellent /Generator",
+    "Ultrasonic Sensor/Radar": "Ultrasonik Sensör /Radar",
+    "Ultrasound scanning: 15–22 kHz (real-time).": "Ultrasound Scanning: 15-22 kHz (real-time).",
+    "Uninstall": "Uninstall",
+    "Universal Remotes": "Evrensel Uzaktanlar",
+    "Unknown": "Bilinmiyor",
+    "Unknown commands": "Bilinmeyen komutlar",
+    "Unknown device": "Bilinmeyen cihaz",
+    "Unlock": "IP:",
+    "Unnamed": "Unnamed",
+    "Unpin": "Unpin",
+    "Up to 25 characters": "İnsanlarla birlikte, insanlar için,",
+    "Update": "Güncelle",
+    "Update available": "Güncellemeler mevcut Güncellemeler Güncellemeler",
+    "Updated": "Güncellendi",
+    "Upload": "Upload Upload",
+    "Username": "Username",
+    "VCRs": "VCRs",
+    "Vacuum Cleaners": "Vakumlu temizleyiciler",
+    "Value": "Değer",
+    "Vendor": "Satışcı",
+    "Verdict": "Verdict",
+    "Version": "Sürüm",
+    "Very weak": "Çok zayıf",
+    "Video Conferencing": "Video Conferencing",
+    "Video ready. Choose a device.": "Video hazır. Bir cihazı seçin.",
+    "Vivo Gamepad List": "PH Gamepad Listesi",
+    "Vivo TWS List": "PH TWS Listesi",
+    "Volume": "Cilt",
+    "Volume +": "Cilt +",
+    "Volume -": "Cilt -",
+    "Volume Down": "Sesi kıs",
+    "Volume Spam": "Cilt Spam",
+    "Volume Up": "Volume Up Up",
+    "WARN: WPS V1 Enabled": "WARN: WPS V1 Enabled",
+    "WARN: admin/admin found!": "WARN: yönetici /admin bulundu!",
+    "WI-FI Attacks": "WI-FI Saldırıları",
+    "Waiting for NFC...": "NFC için bekleyin...",
+    "Waiting for connection": "Bağlantı için bekleme",
+    "Waiting for connection...": "Bağlantı için bekleyin...",
+    "Waiting for network traffic…": "Ağ trafiği için bekleyin...",
+    "Waiting...": "Bekleniyor...",
+    "Warning": "Uyarı",
+    "Watch List": "Yeniden deneme",
+    "Weak": "Weak",
+    "Web device / admin interface": "Web cihazı / admin",
+    "Welcome": "Hoş geldin",
+    "Welcome to Dolphy": "Dolphy'a hoş geldiniz",
+    "Wi-Fi DoS": "Wi-Fi DoS",
+    "Wi-Fi Print": "Wi-Fi Print",
+    "Wi-Fi and networking": "Wi-Fi ve ağ",
+    "Window Cleaners": "Pencereyi Temizler",
+    "Wi‑Fi network": "Wi-Fi ağ",
+    "Wi‑Fi password": "Wi-Fi Şifre",
+    "Wi‑Fi scanning requires location permission.": "Wi-Fi tarama, yer izni gerektirir.",
+    "Writable": "Writable",
+    "Write to NFC tag": "NFC etiketine yaz",
+    "Write to tag": "Etikete yaz",
+    "XP to Level Up": "İnsanlar, insanlar için,",
+    "YOU": "SİZİN SİZİN",
+    "Yes": "Evet",
+    "You don’t have any installed plugins yet": "Henüz yüklü eklentiler yok.",
+    "You have no NFC tags yet": "Henüz NFC etiketleriniz yok",
+    "You have not added any devices yet.": "\"Doğalların ve ağların hepsine ait.",
+    "Your Remotes": "Uzaklarınız",
+    "device": "aygıt cihazı",
+    "e.g. 0x004C for Apple": "e.g. 0x004C Apple için",
+    "e.g. AirPods Fake 2026": "E.g. AirPods Fake 2026",
+    "github.com/owner/repo or index.json link": "b.hub.com / sahibi / repo veya bağlantı index.json",
+    "iOS Crash List": "iOS Crash Listesi",
+    "iOS Message": "iOS Mesaj",
+    "just now": "Şimdi sadece şimdi",
+    "tag": "etiket",
+    "to Dolphy!": "Dolphy!",
+    "unknown size": "Bilinmeyen boyut",
+}
+
+DICT_LOW = {}
+for _k, _v in DICT.items():
+    DICT_LOW.setdefault(_k.lower(), _v)
+
+TURKISH = set(DICT.values()) | set(TEXTS.values()) | set(LIB_TEXTS.values())
+
+TEXT_KEYS = ("text", "title", "subtitle", "description", "label", "message", "confirmText",
+             "dismissText", "primaryText", "placeholder", "hint", "summary", "trailing",
+             "contentDescription")
+SKIP_TYPES = ("logPanel", "webView")
+DESC_ONLY_TYPES = ("image", "icon")
+SKIP_RE = re.compile(r"(?:[0-9A-Fa-f]{2}[:-]){3,}|\b\d{1,3}(?:\.\d{1,3}){3}\b|https?://|www\.|"
+                     r"\S+@\S+\.\S+|^[/~]\S|0x[0-9A-Fa-f]{4,}|\b[0-9A-Fa-f]{12,}\b")
+TAIL_RE = re.compile(r"^(.*?)([\s:.…!?]*)$", re.S)
+
+
+def gtx(text):
+    import urllib.parse
+    import urllib.request
+    url = ("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=tr&dt=t&q="
+           + urllib.parse.quote(text))
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=8) as r:
+        data = json.loads(r.read().decode("utf-8"))
+    return "".join(seg[0] for seg in data[0] if seg and seg[0])
+
+
+class Translator:
+    def __init__(self, cache_path=None, fetch=gtx, on_ready=None):
+        self.enabled = True
+        self.online = False
+        self.cache_path = cache_path
+        self.fetch = fetch
+        self.on_ready = on_ready          # fn(lista_de_sesiones) -> refresca pantallas
+        self.cache = collections.OrderedDict()
+        self.outs = set()
+        self.queue = collections.deque()
+        self.queued = set()
+        self.waiters = set()
+        self.lock = threading.Lock()
+        self.worker = None
+        self.fails = 0
+        self.pause_until = 0.0
+        self.dirty = False
+        self._load()
+
+    # ---- caché en disco
+    def _load(self):
+        try:
+            if self.cache_path and os.path.exists(self.cache_path):
+                with open(self.cache_path, encoding="utf-8") as f:
+                    for k, v in json.load(f).items():
+                        self.cache[k] = v
+                        self.outs.add(v)
+        except Exception:
+            self.cache.clear()
+
+    def _save(self):
+        try:
+            if self.cache_path and self.dirty:
+                tmp = self.cache_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(dict(self.cache), f, ensure_ascii=False)
+                os.replace(tmp, self.cache_path)
+                self.dirty = False
+        except Exception:
+            pass
+
+    # ---- reglas
+    @staticmethod
+    def worth(s):
+        if len(s) < 2 or len(s) > 400:
+            return False
+        letters = sum(c.isalpha() for c in s)
+        if letters < 2 or letters * 10 < len(s) * 4:
+            return False
+        return not SKIP_RE.search(s)
+
+    def _dict(self, core):
+        hit = DICT.get(core)
+        if hit is None:
+            hit = DICT_LOW.get(core.lower())
+        if hit is not None and len(core) > 2 and core.isupper():
+            hit = hit.replace("i", "İ").upper()
+        return hit
+
+    def tr(self, s, session=None):
+        """Devuelve la traducción si ya se conoce; si no, la pide en segundo plano."""
+        if not isinstance(s, str) or not self.worth(s):
+            return s
+        pre = s[:len(s) - len(s.lstrip())]
+        body = s.strip()
+        m = TAIL_RE.match(body)
+        core, tail = (m.group(1), m.group(2)) if m else (body, "")
+        if not core or body in TURKISH or body in self.outs:
+            return s
+        hit = self._dict(core)
+        if hit is not None:
+            return pre + hit + tail
+        hit = self.cache.get(body)
+        if hit is not None:
+            return pre + hit + s[len(s.rstrip()):]
+        if self.online and sum(c.isdigit() for c in s) < 4:
+            self._enqueue(body, session)
+        return s
+
+    # ---- cola en segundo plano
+    def _enqueue(self, body, session):
+        with self.lock:
+            if session is not None:
+                self.waiters.add(session)
+            if body in self.queued or len(self.queue) > 200:
+                return
+            self.queued.add(body)
+            self.queue.append(body)
+            if self.worker is None or not self.worker.is_alive():
+                self.worker = threading.Thread(target=self._run, daemon=True)
+                self.worker.start()
+
+    def _run(self):
+        while True:
+            with self.lock:
+                if not self.queue:
+                    waiters = list(self.waiters)
+                    self.waiters.clear()
+                    self.worker = None
+                    break
+                body = self.queue.popleft()
+            if time.time() < self.pause_until:
+                with self.lock:
+                    self.queued.discard(body)
+                continue
+            try:
+                out = self.fetch(body)
+                if not out or not str(out).strip():
+                    out = body
+                self.cache[body] = str(out).strip()
+                self.outs.add(self.cache[body])
+                while len(self.cache) > 5000:
+                    self.cache.popitem(last=False)
+                self.dirty = True
+                self.fails = 0
+            except Exception:
+                self.fails += 1
+                if self.fails >= 4:
+                    self.pause_until = time.time() + 120.0
+                    self.fails = 0
+            with self.lock:
+                self.queued.discard(body)
+            time.sleep(0.15)
+        self._save()
+        if waiters and self.on_ready is not None:
+            try:
+                self.on_ready(waiters)
+            except Exception:
+                pass
+
+    # ---- recorrido de estructuras de UI / ajustes
+    def walk(self, node, session=None):
+        if isinstance(node, dict):
+            if node.get("type") in SKIP_TYPES:
+                return node
+            if node.get("type") in DESC_ONLY_TYPES:
+                d = node.get("contentDescription")
+                if isinstance(d, str):
+                    node["contentDescription"] = self.tr(d, session)
+                return node
+            for k, v in list(node.items()):
+                if k in TEXT_KEYS and isinstance(v, str):
+                    node[k] = self.tr(v, session)
+                elif k == "options" and isinstance(v, list):
+                    for opt in v:
+                        if isinstance(opt, list) and len(opt) > 1 and isinstance(opt[1], str):
+                            opt[1] = self.tr(opt[1], session)
+                        elif isinstance(opt, dict):
+                            self.walk(opt, session)
+                elif k == "tabs" and isinstance(v, list):
+                    node[k] = [self.tr(t, session) if isinstance(t, str) else t for t in v]
+                elif isinstance(v, (dict, list)):
+                    self.walk(v, session)
+        elif isinstance(node, list):
+            for item in node:
+                if isinstance(item, (dict, list)):
+                    self.walk(item, session)
+        return node
+
+    def json_text(self, raw, session=None):
+        return json.dumps(self.walk(json.loads(raw), session), ensure_ascii=False)
+
+
+class Bridge:
+    """Envoltorio del puente de un plugin: traduce lo que registra (ajustes, módulos, avisos).
+    Consulta el traductor vigente en PluginRuntimeSession._es_tr, así sigue funcionando si
+    este plugin se recarga."""
+    _es_bridge = True
+
+    def __init__(self, inner, session_cls):
+        object.__setattr__(self, "_b", inner)
+        object.__setattr__(self, "_s", session_cls)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_b"), name)
+
+    def _t(self):
+        t = getattr(object.__getattribute__(self, "_s"), "_es_tr", None)
+        return t if (t is not None and t.enabled) else None
+
+    def _inner(self):
+        return object.__getattribute__(self, "_b")
+
+    def toast(self, text):
+        t = self._t()
+        try:
+            if t is not None:
+                text = t.tr(str(text))
+        except Exception:
+            pass
+        return self._inner().toast(text)
+
+    def registerSettings(self, title, spec, *rest):
+        t = self._t()
+        try:
+            if t is not None:
+                title = t.tr(str(title))
+                spec = t.json_text(spec)
+        except Exception:
+            pass
+        return self._inner().registerSettings(title, spec, *rest)
+
+    def registerModule(self, section, title, description, *rest):
+        t = self._t()
+        try:
+            if t is not None:
+                title, description = t.tr(str(title)), t.tr(str(description))
+        except Exception:
+            pass
+        return self._inner().registerModule(section, title, description, *rest)
+
+    def registerBleMode(self, mode_id, title, description, *rest):
+        t = self._t()
+        try:
+            if t is not None:
+                title, description = t.tr(str(title)), t.tr(str(description))
+        except Exception:
+            pass
+        return self._inner().registerBleMode(mode_id, title, description, *rest)
+
+
+def runtime_module():
+    mod = sys.modules.get("dolphy_runtime")
+    if mod is None:
+        import dolphy_runtime as mod
+    return mod
+
+
+def wrap_existing(rt):
+    """Envuelve el puente de los plugins que ya estaban cargados (por si se crearon antes)."""
+    import gc
+    S = rt.PluginRuntimeSession
+    n = 0
+    for o in gc.get_objects():
+        try:
+            if not isinstance(o, S) or o.manifest.get("id") == "dolphy_tr":
+                continue
+            if getattr(type(o.bridge), "_es_bridge", False):
+                continue
+            w = Bridge(o.bridge, S)
+            o.bridge = w
+            if o.plugin is not None:
+                o.plugin.api = w
+            if "api" in o.namespace:
+                o.namespace["api"] = w
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
+def install_patches(rt, tr):
+    S = rt.PluginRuntimeSession
+    B = rt.BasePlugin
+    S._es_tr = tr
+    try:
+        wrap_existing(rt)
+    except Exception:
+        pass
+    if getattr(S, "_es_installed", False):
+        return
+    S._es_installed = True
+    orig_render = S.render
+    orig_init = S.__init__
+    orig_toast = B.toast
+
+    def render(self, screen_id, state_json):
+        out = orig_render(self, screen_id, state_json)
+        t = getattr(S, "_es_tr", None)
+        if t is None or not t.enabled:
+            return out
+        try:
+            return t.json_text(out, self)
+        except Exception:
+            return out
+
+    def init(self, source, bridge, manifest_json):
+        t = getattr(S, "_es_tr", None)
+        try:
+            if t is not None and t.enabled and json.loads(manifest_json).get("id") != "dolphy_tr":
+                bridge = Bridge(bridge, S)
+        except Exception:
+            pass
+        orig_init(self, source, bridge, manifest_json)
+
+    def toast(self, text):
+        t = getattr(S, "_es_tr", None)
+        if t is not None and t.enabled:
+            try:
+                text = t.tr(str(text))
+            except Exception:
+                pass
+        return orig_toast(self, text)
+
+    S.render = render
+    S.__init__ = init
+    B.toast = toast
+
+
+def uninstall_patches(rt):
+    try:
+        rt.PluginRuntimeSession._es_tr = None
+    except Exception:
+        pass
+
+
+def make_run():
+    from java import dynamic_proxy, jclass
+    Runnable = jclass("java.lang.Runnable")
+
+    class Run(dynamic_proxy(Runnable)):
+        def __init__(self, fn):
+            super().__init__()
+            self.fn = fn
+
+        def run(self):
+            self.fn()
+
+    return Run
+
+
+class DolphyTr(BasePlugin):
+    def on_plugin_load(self):
+        self.enabled = bool(self.get_setting("tr_enabled", True))
+        self.tr = None
+        self.loader = None
+        self.targets = []
+        self.handler = None
+        self.Run = None
+        self.err = ""
+        self.tries = 0
+        self.alive = True
+        self.api.registerSettings("Türkçe", json.dumps([
+            {"type": "header", "title": "Dolphy Türkçe"},
+            {"type": "switch", "key": "tr_enabled", "title": "Uygulamayı Türkçeleştir",
+             "subtitle": "Özgün dile dönmek için kapat. Değişiklik hemen görünmezse Dolphy’yi yeniden aç.",
+             "default": True},
+            {"type": "switch", "key": "tr_plugins", "title": "Diğer eklentileri de çevir",
+             "subtitle": "Diğer eklentilerin ekrandaki metinlerini sözlükten çevirir.",
+             "default": True},
+            {"type": "switch", "key": "tr_online", "title": "Çevrimiçi çeviri",
+             "subtitle": "Sözlükte bulunmayan eklenti metinlerini Google Çeviri’ye gönderir ve sonuçları telefonda saklar.",
+             "default": False},
+        ]), 40)
+        self._setup_translator()
+        try:
+            from java import jclass
+            self.handler = jclass("android.os.Handler")(jclass("android.os.Looper").getMainLooper())
+            self.Run = make_run()
+            self._post(self._boot, 300)
+        except Exception as e:
+            self._fail("inicio", e)
+
+    def on_plugin_unload(self):
+        self.alive = False
+        self._remove()
+        self._teardown_translator()
+
+    def on_plugin_disable(self):
+        self.alive = False
+        self._remove()
+        self._teardown_translator()
+
+    def on_activity_create(self, activity):
+        if self.alive and self.handler is not None:
+            self._post(lambda: self._apply(activity), 0)
+            self._post(lambda: self._apply(activity), 700)
+
+    def on_setting_changed(self, payload):
+        self.enabled = bool(self.get_setting("tr_enabled", True))
+        if self.tr is not None:
+            self.tr.enabled = bool(self.get_setting("tr_plugins", True))
+            self.tr.online = bool(self.get_setting("tr_online", False))
+        if self.handler is None:
+            return
+        if self.enabled:
+            self._post(self._boot, 0)
+        else:
+            self._post(self._remove, 0)
+
+    # ------------------------------------------------------------------ otros plugins
+    def _setup_translator(self):
+        try:
+            path = None
+            try:
+                ctx = self.api.getApplicationContext()
+                path = os.path.join(str(ctx.getFilesDir().getAbsolutePath()), "dolphy_tr_cache.json")
+            except Exception:
+                pass
+            self.tr = Translator(path, gtx, self._refresh_sessions)
+            self.tr.enabled = bool(self.get_setting("tr_plugins", True))
+            self.tr.online = bool(self.get_setting("tr_online", False))
+            install_patches(runtime_module(), self.tr)
+        except Exception as e:
+            self._fail("otros plugins", e)
+
+    def _teardown_translator(self):
+        try:
+            if self.tr is not None:
+                self.tr.enabled = False
+            uninstall_patches(runtime_module())
+        except Exception:
+            pass
+
+    def _refresh_sessions(self, sessions):
+        # Se llama desde el hilo del traductor: la actualización se hace en el hilo principal.
+        def go():
+            for s in sessions:
+                try:
+                    s.bridge.refresh()
+                except Exception:
+                    pass
+        if self.handler is not None and self.Run is not None:
+            self._post(go, 0)
+
+    def _say(self, text):
+        try:
+            self.api.toast(str(text))
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ utilidades
+    def _post(self, fn, delay=0):
+        try:
+            r = self.Run(fn)
+            if delay:
+                self.handler.postDelayed(r, delay)
+            else:
+                self.handler.post(r)
+        except Exception as e:
+            self._fail("post", e)
+
+    def _fail(self, stage, e):
+        try:
+            tb = traceback.extract_tb(e.__traceback__)
+            line = (" @L" + str(tb[-1].lineno)) if tb else ""
+            self.err = "[" + stage + "] " + type(e).__name__ + line + ": " + str(e)[:160]
+            self._say("Dolphy TR: " + self.err)
+        except Exception:
+            pass
+
+    def _boot(self):
+        if not self.alive or not self.enabled:
+            return
+        try:
+            act = self.api.getActivity()
+            if act is None:
+                self.tries += 1
+                if self.tries < 100:
+                    self._post(self._boot, 600)
+                return
+            self._apply(act)
+        except Exception as e:
+            self._fail("boot", e)
+
+    # ------------------------------------------------------------------ traducción
+    def _ensure_loader(self, act):
+        if self.loader is not None:
+            return True
+        from java import jclass
+        sdk = int(jclass("android.os.Build$VERSION").SDK_INT)
+        if sdk < 30:
+            self._say("Dolphy TR: Android 11 veya üzeri gerekiyor")
+            return False
+        res = act.getResources()
+        pkg = str(act.getPackageName())
+        entries = {}
+        pkg_id = None
+        type_id = None
+        merged = dict(LIB_TEXTS)
+        merged.update(TEXTS)
+        for name, text in merged.items():
+            rid = int(res.getIdentifier(name, "string", pkg))
+            if rid == 0:
+                continue
+            p = (rid >> 24) & 0xFF
+            t = (rid >> 16) & 0xFF
+            e = rid & 0xFFFF
+            if pkg_id is None:
+                pkg_id, type_id = p, t
+            if p != pkg_id or t != type_id:
+                continue
+            entries[e] = (name, text)
+        if not entries:
+            self._say("Dolphy TR: Çevrilecek metin bulunamadı")
+            return False
+        data = build_arsc(pkg, pkg_id, type_id, entries)
+        path = os.path.join(str(act.getCacheDir().getAbsolutePath()), "dolphy_tr.arsc")
+        with open(path, "wb") as f:
+            f.write(data)
+        File = jclass("java.io.File")
+        PFD = jclass("android.os.ParcelFileDescriptor")
+        pfd = PFD.open(File(path), PFD.MODE_READ_ONLY)
+        provider = jclass("android.content.res.loader.ResourcesProvider").loadFromTable(pfd, None)
+        loader = jclass("android.content.res.loader.ResourcesLoader")()
+        loader.addProvider(provider)
+        self.loader = loader
+        self.count = len(entries)
+        return True
+
+    def _apply(self, act):
+        if not self.alive or not self.enabled:
+            return
+        try:
+            if not self._ensure_loader(act):
+                return
+            for getter in (lambda: act.getResources(),
+                           lambda: act.getBaseContext().getResources(),
+                           lambda: act.getApplicationContext().getResources()):
+                try:
+                    r = getter()
+                    r.addLoaders(self.loader)
+                    self.targets.append(r)
+                except Exception:
+                    pass
+            self._kick(act)
+        except Exception as e:
+            self._fail("aplicar", e)
+
+    def _remove(self):
+        try:
+            if self.loader is not None:
+                for r in self.targets:
+                    try:
+                        r.removeLoaders(self.loader)
+                    except Exception:
+                        pass
+            self.targets = []
+            act = self.api.getActivity()
+            if act is not None:
+                self._kick(act)
+        except Exception as e:
+            self._fail("quitar", e)
+
+    def _kick(self, act):
+        # Hace que Compose vuelva a leer las cadenas sin recrear la actividad.
+        def go():
+            try:
+                decor = act.getWindow().getDecorView()
+                decor.dispatchConfigurationChanged(act.getResources().getConfiguration())
+            except Exception as e:
+                self._fail("refrescar", e)
+        self._post(go, 150)
+        self._post(go, 900)
