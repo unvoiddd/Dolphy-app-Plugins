@@ -75,7 +75,7 @@
     {
       "id": 23,
       "name": "BLE Radar Locator",
-      "version": "1.5.3",
+      "version": "3.0.4",
       "author": "@Da_koroche",
       "description": {
         "ru": "BLE Radar Locator 1.5.3\nЧто нового:\n- компас: точки и роза крутятся вместе с телефоном\n- свип больше не дёргается при обновлении\n- фильтры, сортировка, CSV, логи\nРаньше был просто список, теперь реальный радар",
@@ -83,8 +83,8 @@
       },
       "file": "plugins/ble_radar_locator/ble_radar_locator.dolphyplugin",
       "download_url": "https://raw.githubusercontent.com/unvoiddd/Dolphy-app-Plugins/main/plugins/ble_radar_locator/ble_radar_locator.dolphyplugin",
-      "post_url": "https://t.me/c/3966541757/31450",
-      "updated_at": "2026-10-07 02:26:07"
+      "post_url": "https://t.me/c/3966541757/49071",
+      "updated_at": "2026-11-27 11:11:41"
     },
     {
       "id": 1,
